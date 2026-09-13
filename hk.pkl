@@ -1,0 +1,59 @@
+amends "package://github.com/jdx/hk/releases/download/v1.57.0/hk@1.57.0#/Config.pkl"
+import "package://github.com/jdx/hk/releases/download/v1.57.0/hk@1.57.0#/Builtins.pkl"
+
+min_hk_version = "1.57.0"
+
+fail_fast = false
+
+local lint_steps = new Mapping<String, Step> {
+  ["rustfmt"] = Builtins.rustfmt
+  ["clippy"] {
+    glob = List("*.rs")
+    check = new CommandSpec {
+      command = new Command { argv = List("cargo", "clippy", "--all-targets", "--", "-D", "warnings") }
+      effect = "read"
+    }
+  }
+
+  ["shellcheck"] = Builtins.shellcheck
+  ["shfmt"] = Builtins.shfmt
+
+  ["taplo"] = (Builtins.taplo) {
+    check = new CommandSpec {
+      command = new Command { argv = List("taplo", "lint", "--no-schema", "{{files}}") }
+      effect = "read"
+    }
+  }
+  ["taplo_format"] = Builtins.taplo_format
+
+  ["prettier"] = (Builtins.prettier) {
+    glob = List("*.json", "*.jsonc", "*.yaml", "*.yml", "*.md")
+  }
+}
+
+hooks {
+  ["pre-commit"] {
+    fix = true
+    stash = "git"
+    steps = lint_steps
+  }
+  ["commit-msg"] {
+    steps {
+      ["commitlint"] {
+        check = new CommandSpec {
+          command = "commitlint --edit {{commit_msg_file}}"
+          effect = "read"
+        }
+      }
+    }
+  }
+  ["check"] {
+    fix = false
+    steps = lint_steps
+  }
+  ["fix"] {
+    fix = true
+    stash = "none"
+    steps = lint_steps
+  }
+}
