@@ -160,9 +160,13 @@ impl Dispatch<XdgSurface, ()> for AppState {
                 let w = (state.wayland.width as i32).max(100);
                 let h = (state.wayland.height as i32).max(100);
                 if let Ok(buffer) = create_shm_buffer(shm, w, h, qh) {
+                    if let Some(old) = state.wayland.current_buffer.take() {
+                        old.destroy();
+                    }
                     surface.attach(Some(&buffer), 0, 0);
                     surface.damage_buffer(0, 0, w, h);
                     surface.commit();
+                    state.wayland.current_buffer = Some(buffer);
                 }
             }
         }
@@ -316,8 +320,16 @@ where
 {
     use std::os::fd::{AsFd, FromRawFd, OwnedFd};
 
-    let stride = width * 4;
-    let size = (stride * height) as usize;
+    // Bound and sanitize dimensions to prevent overflow and absurd memory requests
+    let width = (width.clamp(100, 8192)) as usize;
+    let height = (height.clamp(100, 8192)) as usize;
+
+    let stride = width
+        .checked_mul(4)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "width overflow"))?;
+    let size = stride
+        .checked_mul(height)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "size overflow"))?;
 
     let fd = unsafe { libc::memfd_create(c"ftty-shm".as_ptr(), libc::MFD_CLOEXEC) };
     if fd < 0 {
@@ -350,9 +362,9 @@ where
     let pool = shm.create_pool(owned_fd.as_fd(), size as i32, qh, ());
     let buffer = pool.create_buffer(
         0,
-        width,
-        height,
-        stride,
+        width as i32,
+        height as i32,
+        stride as i32,
         wayland_client::protocol::wl_shm::Format::Argb8888,
         qh,
         (),
@@ -476,5 +488,42 @@ mod tests {
         assert_eq!(app.cell_width, 9);
         assert_eq!(app.cell_height, 18);
         assert!(!app.wayland.configured);
+    }
+
+    #[test]
+    fn test_pty_and_terminal_roundtrip() {
+        let term = Terminal::new(80, 24, 100);
+        let pty = Pty::spawn(Some("/bin/sh"), 80, 24).expect("PTY spawn");
+        let mut app = AppState::new(term, pty);
+
+        // Send a command to shell via PTY
+        use std::io::{Read, Write};
+        app.pty
+            .write_all(b"echo ftty_test_ok\n")
+            .expect("write to pty");
+
+        // Wait briefly and read output back into terminal
+        let mut received = false;
+        for _ in 0..50 {
+            std::thread::sleep(Duration::from_millis(20));
+            let mut buf = [0u8; 1024];
+            if let Ok(n) = app.pty.read(&mut buf)
+                && n > 0
+            {
+                app.terminal.advance_bytes(&buf[..n]);
+                let full_screen: String = app
+                    .terminal
+                    .grid
+                    .lines
+                    .iter()
+                    .flat_map(|r| r.cells.iter().map(|c| c.c))
+                    .collect();
+                if full_screen.contains("ftty_test_ok") {
+                    received = true;
+                    break;
+                }
+            }
+        }
+        assert!(received, "Expected shell echo in terminal grid");
     }
 }

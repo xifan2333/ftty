@@ -54,16 +54,32 @@ impl KeyboardHandler {
     /// Caller must ensure `fd` is a valid, readable file descriptor representing a keymap.
     pub unsafe fn set_keymap_from_fd(&mut self, fd: RawFd, size: usize) {
         let mut buf = vec![0u8; size];
-        let bytes_read = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), size) };
-        if bytes_read > 0 {
-            buf.truncate(bytes_read as usize);
-            // Drop trailing null byte if present
-            if let Some(&0) = buf.last() {
-                buf.pop();
+        let mut total_read = 0;
+
+        while total_read < size {
+            let res =
+                unsafe { libc::read(fd, buf[total_read..].as_mut_ptr().cast(), size - total_read) };
+            if res > 0 {
+                total_read += res as usize;
+            } else if res == 0 {
+                break;
+            } else {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                eprintln!("ftty: failed reading keymap from fd: {err}");
+                return;
             }
-            if let Ok(s) = std::str::from_utf8(&buf) {
-                self.set_keymap_from_string(s);
-            }
+        }
+
+        buf.truncate(total_read);
+        if let Some(&0) = buf.last() {
+            buf.pop();
+        }
+        match std::str::from_utf8(&buf) {
+            Ok(s) => self.set_keymap_from_string(s),
+            Err(e) => eprintln!("ftty: invalid UTF-8 in keymap: {e}"),
         }
     }
 
