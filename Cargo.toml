@@ -12,6 +12,18 @@ keywords = ["terminal", "wayland", "kitty-graphics", "suckless", "emulator"]
 categories = ["command-line-utilities"]
 
 [dependencies]
+bitflags = "2.8"
+libc = "0.2"
+nix = { version = "0.31", default-features = false, features = [
+  "term",
+  "process",
+  "signal",
+  "fs",
+  "ioctl",
+  "poll",
+] }
+unicode-width = "0.2"
+vte = "0.15"
 
 [profile.release]
 opt-level = 3

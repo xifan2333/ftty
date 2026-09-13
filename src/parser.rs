@@ -1,0 +1,361 @@
+//! ANSI / VT escape sequence parser implementing the DEC terminal state machine.
+
+use vte::{Params, Parser, Perform};
+
+use crate::color::Color;
+use crate::grid::{CellFlags, ClearMode, Grid};
+
+/// Terminal emulation state machine combining a screen grid, current formatting attributes,
+/// and a VT parser.
+pub struct Terminal {
+    pub grid: Grid,
+    pub active_fg: Color,
+    pub active_bg: Color,
+    pub active_flags: CellFlags,
+    pub title: String,
+    parser: Parser,
+}
+
+impl Terminal {
+    #[must_use]
+    pub fn new(cols: usize, rows: usize, max_scrollback: usize) -> Self {
+        Self {
+            grid: Grid::new(cols, rows, max_scrollback),
+            active_fg: Color::DefaultForeground,
+            active_bg: Color::DefaultBackground,
+            active_flags: CellFlags::empty(),
+            title: String::new(),
+            parser: Parser::new(),
+        }
+    }
+
+    /// Feeds incoming raw bytes (from PTY) through the VT parser.
+    pub fn advance_bytes(&mut self, bytes: &[u8]) {
+        let mut parser = std::mem::replace(&mut self.parser, Parser::new());
+        parser.advance(self, bytes);
+        self.parser = parser;
+    }
+
+    fn handle_sgr(&mut self, params: &[u16]) {
+        if params.is_empty() {
+            self.reset_attributes();
+            return;
+        }
+
+        let mut i = 0;
+        while i < params.len() {
+            match params[i] {
+                0 => self.reset_attributes(),
+                1 => self.active_flags.insert(CellFlags::BOLD),
+                2 => self.active_flags.insert(CellFlags::DIM),
+                3 => self.active_flags.insert(CellFlags::ITALIC),
+                4 => self.active_flags.insert(CellFlags::UNDERLINE),
+                7 => self.active_flags.insert(CellFlags::REVERSE),
+                8 => self.active_flags.insert(CellFlags::HIDDEN),
+                9 => self.active_flags.insert(CellFlags::STRIKETHROUGH),
+                22 => self.active_flags.remove(CellFlags::BOLD | CellFlags::DIM),
+                23 => self.active_flags.remove(CellFlags::ITALIC),
+                24 => self.active_flags.remove(CellFlags::UNDERLINE),
+                27 => self.active_flags.remove(CellFlags::REVERSE),
+                28 => self.active_flags.remove(CellFlags::HIDDEN),
+                29 => self.active_flags.remove(CellFlags::STRIKETHROUGH),
+                30..=37 => self.active_fg = Color::Indexed((params[i] - 30) as u8),
+                38 => {
+                    // Extended foreground
+                    if i + 2 < params.len() && params[i + 1] == 5 {
+                        self.active_fg = Color::Indexed(params[i + 2] as u8);
+                        i += 2;
+                    } else if i + 4 < params.len() && params[i + 1] == 2 {
+                        self.active_fg = Color::Rgb(
+                            params[i + 2] as u8,
+                            params[i + 3] as u8,
+                            params[i + 4] as u8,
+                        );
+                        i += 4;
+                    }
+                }
+                39 => self.active_fg = Color::DefaultForeground,
+                40..=47 => self.active_bg = Color::Indexed((params[i] - 40) as u8),
+                48 => {
+                    // Extended background
+                    if i + 2 < params.len() && params[i + 1] == 5 {
+                        self.active_bg = Color::Indexed(params[i + 2] as u8);
+                        i += 2;
+                    } else if i + 4 < params.len() && params[i + 1] == 2 {
+                        self.active_bg = Color::Rgb(
+                            params[i + 2] as u8,
+                            params[i + 3] as u8,
+                            params[i + 4] as u8,
+                        );
+                        i += 4;
+                    }
+                }
+                49 => self.active_bg = Color::DefaultBackground,
+                90..=97 => self.active_fg = Color::Indexed((params[i] - 90 + 8) as u8),
+                100..=107 => self.active_bg = Color::Indexed((params[i] - 100 + 8) as u8),
+                _ => {}
+            }
+            i += 1;
+        }
+    }
+
+    fn reset_attributes(&mut self) {
+        self.active_fg = Color::DefaultForeground;
+        self.active_bg = Color::DefaultBackground;
+        self.active_flags = CellFlags::empty();
+    }
+}
+
+impl Perform for Terminal {
+    fn print(&mut self, c: char) {
+        self.grid
+            .write_char(c, self.active_fg, self.active_bg, self.active_flags);
+    }
+
+    fn execute(&mut self, byte: u8) {
+        match byte {
+            b'\n' | 0x0B | 0x0C => {
+                self.grid.newline();
+                self.grid.carriage_return();
+            }
+            b'\r' => self.grid.carriage_return(),
+            b'\x08' => self.grid.backspace(),
+            b'\t' => self.grid.tab(),
+            b'\x07' => {} // Bell
+            _ => {}
+        }
+    }
+
+    fn hook(&mut self, _params: &Params, _intermediates: &[u8], _ignore: bool, _action: char) {}
+
+    fn put(&mut self, _byte: u8) {}
+
+    fn unhook(&mut self) {}
+
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        if params.len() >= 2
+            && (params[0] == b"0" || params[0] == b"2")
+            && let Ok(title) = std::str::from_utf8(params[1])
+        {
+            self.title = title.to_string();
+        }
+    }
+
+    fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
+        let is_private = intermediates.contains(&b'?');
+        let mut flat_params: Vec<u16> = Vec::new();
+        for param in params.iter() {
+            flat_params.extend_from_slice(param);
+        }
+
+        let first_param = flat_params.first().copied().unwrap_or(0);
+        let param_or = |default: usize| -> usize {
+            if first_param == 0 {
+                default
+            } else {
+                first_param as usize
+            }
+        };
+
+        if is_private {
+            match (action, first_param) {
+                ('h', 25) => self.grid.cursor.visible = true,
+                ('l', 25) => self.grid.cursor.visible = false,
+                ('h', 1049) => self.grid.enter_alt_screen(),
+                ('l', 1049) => self.grid.exit_alt_screen(),
+                _ => {}
+            }
+            return;
+        }
+
+        match action {
+            // CUU - Cursor Up
+            'A' => {
+                let count = param_or(1);
+                self.grid.cursor.row = self.grid.cursor.row.saturating_sub(count);
+            }
+            // CUD - Cursor Down
+            'B' => {
+                let count = param_or(1);
+                self.grid.cursor.row =
+                    (self.grid.cursor.row + count).min(self.grid.rows.saturating_sub(1));
+            }
+            // CUF - Cursor Forward
+            'C' => {
+                let count = param_or(1);
+                self.grid.cursor.col =
+                    (self.grid.cursor.col + count).min(self.grid.cols.saturating_sub(1));
+            }
+            // CUB - Cursor Back
+            'D' => {
+                let count = param_or(1);
+                self.grid.cursor.col = self.grid.cursor.col.saturating_sub(count);
+            }
+            // CNL - Cursor Next Line
+            'E' => {
+                let count = param_or(1);
+                self.grid.cursor.row =
+                    (self.grid.cursor.row + count).min(self.grid.rows.saturating_sub(1));
+                self.grid.cursor.col = 0;
+            }
+            // CPL - Cursor Previous Line
+            'F' => {
+                let count = param_or(1);
+                self.grid.cursor.row = self.grid.cursor.row.saturating_sub(count);
+                self.grid.cursor.col = 0;
+            }
+            // CHA / HPA - Cursor Character Absolute
+            'G' | '\'' => {
+                let col = param_or(1).saturating_sub(1);
+                self.grid.cursor.col = col.min(self.grid.cols.saturating_sub(1));
+            }
+            // CUP / HVP - Cursor Position
+            'H' | 'f' => {
+                let row = flat_params
+                    .first()
+                    .copied()
+                    .unwrap_or(1)
+                    .max(1)
+                    .saturating_sub(1) as usize;
+                let col = flat_params
+                    .get(1)
+                    .copied()
+                    .unwrap_or(1)
+                    .max(1)
+                    .saturating_sub(1) as usize;
+                self.grid.cursor.row = row.min(self.grid.rows.saturating_sub(1));
+                self.grid.cursor.col = col.min(self.grid.cols.saturating_sub(1));
+            }
+            // ED - Erase in Display
+            'J' => {
+                let mode = match first_param {
+                    1 => ClearMode::Above,
+                    2 => ClearMode::All,
+                    3 => ClearMode::Saved,
+                    _ => ClearMode::Below,
+                };
+                self.grid.clear_screen(mode);
+            }
+            // EL - Erase in Line
+            'K' => {
+                let mode = match first_param {
+                    1 => ClearMode::Above,
+                    2 => ClearMode::All,
+                    _ => ClearMode::Below,
+                };
+                self.grid.clear_line(mode);
+            }
+            // IL - Insert Lines
+            'L' => self.grid.insert_lines(param_or(1)),
+            // DL - Delete Lines
+            'M' => self.grid.delete_lines(param_or(1)),
+            // DCH - Delete Characters
+            'P' => self.grid.delete_chars(param_or(1)),
+            // ICH - Insert Blank Characters
+            '@' => self.grid.insert_blank_chars(param_or(1)),
+            // SU - Scroll Up
+            'S' => self.grid.scroll_up(param_or(1)),
+            // SD - Scroll Down
+            'T' => self.grid.scroll_down(param_or(1)),
+            // VPA - Line Position Absolute
+            'd' => {
+                let row = param_or(1).saturating_sub(1);
+                self.grid.cursor.row = row.min(self.grid.rows.saturating_sub(1));
+            }
+            // SGR - Select Graphic Rendition
+            'm' => self.handle_sgr(&flat_params),
+            // DECSTBM - Set Scrolling Region
+            'r' => {
+                let top = flat_params
+                    .first()
+                    .copied()
+                    .unwrap_or(1)
+                    .max(1)
+                    .saturating_sub(1) as usize;
+                let bottom = flat_params
+                    .get(1)
+                    .copied()
+                    .unwrap_or(self.grid.rows as u16)
+                    .max(1)
+                    .saturating_sub(1) as usize;
+                self.grid.set_scroll_region(top, bottom);
+            }
+            // Save cursor position
+            's' => self.grid.save_cursor(),
+            // Restore cursor position
+            'u' => self.grid.restore_cursor(),
+            _ => {}
+        }
+    }
+
+    fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, byte: u8) {
+        match byte {
+            b'7' => self.grid.save_cursor(),
+            b'8' => self.grid.restore_cursor(),
+            b'M' => {
+                // Reverse Index
+                if self.grid.cursor.row == self.grid.scroll_region_top {
+                    self.grid.scroll_down(1);
+                } else {
+                    self.grid.cursor.row = self.grid.cursor.row.saturating_sub(1);
+                }
+            }
+            b'c' => {
+                // Full Reset (RIS)
+                self.grid.clear_screen(ClearMode::All);
+                self.grid.cursor = crate::grid::Cursor::default();
+                self.reset_attributes();
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_print_and_cursor_movement() {
+        let mut term = Terminal::new(80, 24, 100);
+        term.advance_bytes(b"Hello, World!\r\nSecond line");
+
+        assert_eq!(term.grid.lines[0].cells[0].c, 'H');
+        assert_eq!(term.grid.lines[0].cells[12].c, '!');
+        assert_eq!(term.grid.lines[1].cells[0].c, 'S');
+        assert_eq!(term.grid.cursor.row, 1);
+        assert_eq!(term.grid.cursor.col, 11);
+    }
+
+    #[test]
+    fn test_sgr_formatting() {
+        let mut term = Terminal::new(80, 24, 100);
+        // Set bold, red fg (31), truecolor bg (48;2;10;20;30)
+        term.advance_bytes(b"\x1b[1;31;48;2;10;20;30mX\x1b[0m");
+
+        let cell = term.grid.lines[0].cells[0];
+        assert_eq!(cell.c, 'X');
+        assert!(cell.flags.contains(CellFlags::BOLD));
+        assert_eq!(cell.fg, Color::Indexed(1));
+        assert_eq!(cell.bg, Color::Rgb(10, 20, 30));
+
+        // After reset
+        assert_eq!(term.active_fg, Color::DefaultForeground);
+        assert_eq!(term.active_bg, Color::DefaultBackground);
+        assert_eq!(term.active_flags, CellFlags::empty());
+    }
+
+    #[test]
+    fn test_osc_title() {
+        let mut term = Terminal::new(80, 24, 100);
+        term.advance_bytes(b"\x1b]0;ftty terminal\x07");
+        assert_eq!(term.title, "ftty terminal");
+    }
+
+    #[test]
+    fn test_clear_screen_csi() {
+        let mut term = Terminal::new(80, 24, 100);
+        term.advance_bytes(b"Testing\x1b[2J");
+        assert_eq!(term.grid.lines[0].cells[0].c, ' ');
+    }
+}
