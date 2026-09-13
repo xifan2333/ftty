@@ -145,6 +145,7 @@ impl AppState {
         self.default_fg = new_config.foreground();
         self.default_bg = new_config.background();
         self.terminal.grid.cursor.shape = new_config.cursor_shape();
+        self.config = new_config;
 
         if let Some(new_font_mgr) = maybe_new_font {
             self.font_mgr = new_font_mgr;
@@ -154,7 +155,6 @@ impl AppState {
             let _ = self.resize_terminal();
         }
 
-        self.config = new_config;
         self.needs_redraw = true;
     }
 
@@ -648,10 +648,14 @@ mod tests {
         assert_eq!(app.default_fg, Rgb::new(255, 255, 255));
         assert_eq!(app.terminal.grid.cursor.shape, CursorShape::Block);
 
-        // Update config file
+        // Update config file with new colors, cursor, and padding
         std::fs::write(
             &config_path,
             r##"
+            [window]
+            padding_x = 20
+            padding_y = 20
+
             [cursor]
             shape = "underline"
 
@@ -668,6 +672,8 @@ mod tests {
         assert_eq!(app.default_bg, Rgb::new(18, 52, 86));
         assert_eq!(app.default_fg, Rgb::new(255, 0, 0));
         assert_eq!(app.terminal.grid.cursor.shape, CursorShape::Underline);
+        assert_eq!(app.config.padding_x(), 20);
+        assert_eq!(app.config.padding_y(), 20);
         assert!(app.needs_redraw);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
