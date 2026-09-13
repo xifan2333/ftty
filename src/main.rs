@@ -12,7 +12,13 @@ fn main() {
         }
     };
 
-    let app_state = AppState::new(term, pty);
+    let app_state = match AppState::new(term, pty) {
+        Ok(state) => state,
+        Err(e) => {
+            eprintln!("ftty: failed to initialize font or state: {e}");
+            std::process::exit(1);
+        }
+    };
 
     if std::env::var_os("WAYLAND_DISPLAY").is_none() && std::env::var_os("WAYLAND_SOCKET").is_none()
     {

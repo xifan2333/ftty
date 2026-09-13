@@ -1,8 +1,6 @@
 //! Unified calloop single-threaded event loop multiplexing Wayland, PTY I/O, and POSIX signals.
 
 use std::io::{self, Read, Write};
-use std::os::fd::AsRawFd;
-use std::time::Duration;
 
 use calloop::generic::Generic;
 use calloop::signals::{Signal, Signals};
@@ -10,13 +8,11 @@ use calloop::{EventLoop, Interest, Mode};
 use calloop_wayland_source::WaylandSource;
 
 use wayland_client::protocol::{
-    wl_buffer::WlBuffer,
+    wl_callback::{self, WlCallback},
     wl_compositor::WlCompositor,
     wl_keyboard::{self, KeyState, WlKeyboard},
     wl_registry::{self, WlRegistry},
     wl_seat::{self, Capability, WlSeat},
-    wl_shm::WlShm,
-    wl_shm_pool::WlShmPool,
     wl_surface::WlSurface,
 };
 use wayland_client::{Connection, Dispatch, QueueHandle, WEnum};
@@ -26,35 +22,106 @@ use wayland_protocols::xdg::shell::client::{
     xdg_wm_base::{self, XdgWmBase},
 };
 
+use crate::color::{Rgb, default_256_palette};
+use crate::font::{CellMetrics, FontManager, GlyphAtlas};
 use crate::input::KeyboardHandler;
 use crate::parser::Terminal;
 use crate::pty::Pty;
+use crate::render::Renderer;
 use crate::wayland::WaylandState;
 
 /// Shared application state passed to all calloop sources and Wayland event dispatches.
 pub struct AppState {
+    // Destroy the native EGL window before the Wayland surface handles.
+    pub renderer: Option<Renderer>,
     pub terminal: Terminal,
     pub pty: Pty,
     pub keyboard: KeyboardHandler,
     pub wayland: WaylandState,
+    pub font_mgr: FontManager,
+    pub atlas: GlyphAtlas,
+    pub palette: [Rgb; 256],
     pub running: bool,
-    pub cell_width: u32,
-    pub cell_height: u32,
+    pub needs_redraw: bool,
+    frame_callback: Option<WlCallback>,
+    pending_size: Option<[u32; 2]>,
+    render_error: Option<io::Error>,
 }
 
 impl AppState {
-    #[must_use]
-    pub fn new(terminal: Terminal, pty: Pty) -> Self {
-        Self {
+    /// Creates a new `AppState` with terminal, PTY, system monospace font, and glyph atlas.
+    ///
+    /// # Errors
+    /// Returns [`std::io::Error`] if system font discovery fails.
+    pub fn new(terminal: Terminal, pty: Pty) -> Result<Self, io::Error> {
+        let font_mgr = FontManager::load(14.0)?;
+        let atlas = GlyphAtlas::new(128, 128);
+        let palette = default_256_palette();
+        let mut wayland = WaylandState::new();
+        wayland.width = (terminal.grid.cols as u32)
+            .saturating_mul(font_mgr.metrics.cell_width)
+            .clamp(100, i32::MAX as u32);
+        wayland.height = (terminal.grid.rows as u32)
+            .saturating_mul(font_mgr.metrics.cell_height)
+            .clamp(100, i32::MAX as u32);
+
+        Ok(Self {
             terminal,
             pty,
             keyboard: KeyboardHandler::new(),
-            wayland: WaylandState::new(),
+            wayland,
+            font_mgr,
+            atlas,
+            renderer: None,
+            palette,
             running: true,
-            cell_width: 9,
-            cell_height: 18,
-        }
+            needs_redraw: true,
+            frame_callback: None,
+            pending_size: None,
+            render_error: None,
+        })
     }
+
+    fn resize_terminal(&mut self) -> io::Result<()> {
+        let (cols, rows) = terminal_size(
+            [self.wayland.width, self.wayland.height],
+            self.font_mgr.metrics,
+        );
+        if (self.terminal.grid.cols, self.terminal.grid.rows) != (cols as usize, rows as usize) {
+            self.pty.resize(cols, rows)?;
+            self.terminal.grid.resize(cols as usize, rows as usize);
+        }
+        Ok(())
+    }
+
+    fn configure_renderer(&mut self, connection: &Connection) -> io::Result<()> {
+        let size = self
+            .pending_size
+            .take()
+            .unwrap_or([self.wayland.width, self.wayland.height]);
+        if let Some(renderer) = &self.renderer {
+            renderer.resize(size)?;
+        } else {
+            let surface = self
+                .wayland
+                .surface
+                .as_ref()
+                .ok_or_else(|| io::Error::other("configured without a Wayland surface"))?;
+            self.renderer = Some(Renderer::new(surface, connection, size)?);
+        }
+        [self.wayland.width, self.wayland.height] = size;
+        self.resize_terminal()?;
+        self.needs_redraw = true;
+        // A resize must be committed even if the compositor suspended the old frame callback.
+        self.frame_callback = None;
+        Ok(())
+    }
+}
+
+fn terminal_size([width, height]: [u32; 2], metrics: CellMetrics) -> (u16, u16) {
+    let cols = (width / metrics.cell_width.max(1)).clamp(1, u16::MAX as u32) as u16;
+    let rows = (height / metrics.cell_height.max(1)).clamp(1, u16::MAX as u32) as u16;
+    (cols, rows)
 }
 
 // ---------------------------------------------------------------------------
@@ -73,12 +140,12 @@ impl Dispatch<WlRegistry, ()> for AppState {
         if let wl_registry::Event::Global {
             name,
             interface,
-            version: _,
+            version,
         } = event
         {
             match interface.as_str() {
                 "wl_compositor" => {
-                    let comp = registry.bind::<WlCompositor, _, _>(name, 4, qh, ());
+                    let comp = registry.bind::<WlCompositor, _, _>(name, version.min(4), qh, ());
                     state.wayland.compositor = Some(comp);
                     state.wayland.init_window(qh);
                 }
@@ -88,12 +155,8 @@ impl Dispatch<WlRegistry, ()> for AppState {
                     state.wayland.init_window(qh);
                 }
                 "wl_seat" => {
-                    let seat = registry.bind::<WlSeat, _, _>(name, 5, qh, ());
+                    let seat = registry.bind::<WlSeat, _, _>(name, version.min(5), qh, ());
                     state.wayland.seat = Some(seat);
-                }
-                "wl_shm" => {
-                    let shm = registry.bind::<WlShm, _, _>(name, 1, qh, ());
-                    state.wayland.shm = Some(shm);
                 }
                 _ => {}
             }
@@ -146,28 +209,16 @@ impl Dispatch<XdgSurface, ()> for AppState {
         proxy: &XdgSurface,
         event: xdg_surface::Event,
         _data: &(),
-        _conn: &Connection,
-        qh: &QueueHandle<Self>,
+        conn: &Connection,
+        _qh: &QueueHandle<Self>,
     ) {
         if let xdg_surface::Event::Configure { serial } = event {
             proxy.ack_configure(serial);
             state.wayland.configured = true;
 
-            // Attach initial buffer so the compositor displays the window immediately
-            if let Some(surface) = &state.wayland.surface
-                && let Some(shm) = &state.wayland.shm
-            {
-                let w = (state.wayland.width as i32).max(100);
-                let h = (state.wayland.height as i32).max(100);
-                if let Ok(buffer) = create_shm_buffer(shm, w, h, qh) {
-                    if let Some(old) = state.wayland.current_buffer.take() {
-                        old.destroy();
-                    }
-                    surface.attach(Some(&buffer), 0, 0);
-                    surface.damage_buffer(0, 0, w, h);
-                    surface.commit();
-                    state.wayland.current_buffer = Some(buffer);
-                }
+            if let Err(error) = state.configure_renderer(conn) {
+                state.render_error = Some(error);
+                state.running = false;
             }
         }
     }
@@ -188,16 +239,15 @@ impl Dispatch<XdgToplevel, ()> for AppState {
                 height,
                 states: _,
             } => {
-                if width > 0 && height > 0 {
-                    state.wayland.width = width as u32;
-                    state.wayland.height = height as u32;
-
-                    let cols = (width as u32 / state.cell_width).max(1) as u16;
-                    let rows = (height as u32 / state.cell_height).max(1) as u16;
-
-                    state.terminal.grid.resize(cols as usize, rows as usize);
-                    let _ = state.pty.resize(cols, rows);
+                let mut size = [state.wayland.width, state.wayland.height];
+                // Zero lets the client choose that dimension independently.
+                if width > 0 {
+                    size[0] = width as u32;
                 }
+                if height > 0 {
+                    size[1] = height as u32;
+                }
+                state.pending_size = Some(size);
             }
             xdg_toplevel::Event::Close => {
                 state.wayland.close_requested = true;
@@ -244,6 +294,7 @@ impl Dispatch<WlKeyboard, ()> for AppState {
                 fd,
                 size,
             } => unsafe {
+                use std::os::fd::AsRawFd;
                 state
                     .keyboard
                     .set_keymap_from_fd(fd.as_raw_fd(), size as usize);
@@ -273,105 +324,21 @@ impl Dispatch<WlKeyboard, ()> for AppState {
     }
 }
 
-impl Dispatch<WlShm, ()> for AppState {
+impl Dispatch<WlCallback, ()> for AppState {
     fn event(
-        _state: &mut Self,
-        _proxy: &WlShm,
-        _event: <WlShm as wayland_client::Proxy>::Event,
+        state: &mut Self,
+        proxy: &WlCallback,
+        event: wl_callback::Event,
         _data: &(),
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
-    }
-}
-
-impl Dispatch<WlShmPool, ()> for AppState {
-    fn event(
-        _state: &mut Self,
-        _proxy: &WlShmPool,
-        _event: <WlShmPool as wayland_client::Proxy>::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-    ) {
-    }
-}
-
-impl Dispatch<WlBuffer, ()> for AppState {
-    fn event(
-        _state: &mut Self,
-        _proxy: &WlBuffer,
-        _event: <WlBuffer as wayland_client::Proxy>::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-    ) {
-    }
-}
-
-fn create_shm_buffer<D>(
-    shm: &WlShm,
-    width: i32,
-    height: i32,
-    qh: &QueueHandle<D>,
-) -> io::Result<WlBuffer>
-where
-    D: Dispatch<WlShmPool, ()> + Dispatch<WlBuffer, ()> + 'static,
-{
-    use std::os::fd::{AsFd, FromRawFd, OwnedFd};
-
-    // Bound and sanitize dimensions to prevent overflow and absurd memory requests
-    let width = (width.clamp(100, 8192)) as usize;
-    let height = (height.clamp(100, 8192)) as usize;
-
-    let stride = width
-        .checked_mul(4)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "width overflow"))?;
-    let size = stride
-        .checked_mul(height)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "size overflow"))?;
-
-    let fd = unsafe { libc::memfd_create(c"ftty-shm".as_ptr(), libc::MFD_CLOEXEC) };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-
-    unsafe {
-        if libc::ftruncate(fd, size as libc::off_t) < 0 {
-            libc::close(fd);
-            return Err(io::Error::last_os_error());
-        }
-
-        // Fill buffer with dark charcoal background color (#181818)
-        let ptr = libc::mmap(
-            std::ptr::null_mut(),
-            size,
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_SHARED,
-            fd,
-            0,
-        );
-        if ptr != libc::MAP_FAILED {
-            let slice = std::slice::from_raw_parts_mut(ptr.cast::<u32>(), size / 4);
-            slice.fill(0xFF18_1818);
-            libc::munmap(ptr, size);
+        if let wl_callback::Event::Done { .. } = event
+            && state.frame_callback.as_ref() == Some(proxy)
+        {
+            state.frame_callback = None;
         }
     }
-
-    let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
-    let pool = shm.create_pool(owned_fd.as_fd(), size as i32, qh, ());
-    let buffer = pool.create_buffer(
-        0,
-        width as i32,
-        height as i32,
-        stride as i32,
-        wayland_client::protocol::wl_shm::Format::Argb8888,
-        qh,
-        (),
-    );
-    pool.destroy();
-
-    Ok(buffer)
 }
 
 // ---------------------------------------------------------------------------
@@ -413,6 +380,7 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
             match state.pty.read(&mut buf) {
                 Ok(n) if n > 0 => {
                     state.terminal.advance_bytes(&buf[..n]);
+                    state.needs_redraw = true;
                     Ok(calloop::PostAction::Continue)
                 }
                 Ok(_) => {
@@ -463,30 +431,67 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
     // 4. Main Event Loop Tick
     while app_state.running {
         event_loop
-            .dispatch(Some(Duration::from_millis(16)), &mut app_state)
+            .dispatch(None, &mut app_state)
             .map_err(io::Error::other)?;
+
+        if !app_state.running {
+            break;
+        }
+        if app_state.needs_redraw
+            && app_state.frame_callback.is_none()
+            && let Some(renderer) = &mut app_state.renderer
+        {
+            renderer.render_grid(
+                &app_state.terminal.grid,
+                &app_state.palette,
+                &app_state.font_mgr,
+                &mut app_state.atlas,
+                [app_state.wayland.width, app_state.wayland.height],
+            )?;
+            if let Some(surface) = &app_state.wayland.surface {
+                app_state.frame_callback = Some(surface.frame(&qh, ()));
+            }
+            renderer.present()?;
+            app_state.needs_redraw = false;
+        }
 
         let _ = conn.flush();
     }
 
-    Ok(())
+    app_state.render_error.map_or(Ok(()), Err)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn terminal_dimensions_use_metrics_and_fit_the_pty() {
+        let metrics = CellMetrics {
+            cell_width: 9,
+            cell_height: 18,
+            ascent: 14,
+        };
+        assert_eq!(terminal_size([720, 480], metrics), (80, 26));
+        assert_eq!(terminal_size([1, 1], metrics), (1, 1));
+        assert_eq!(
+            terminal_size([u32::MAX, u32::MAX], metrics),
+            (u16::MAX, u16::MAX)
+        );
+    }
 
     #[test]
     fn test_app_state_initialization() {
         let term = Terminal::new(80, 24, 100);
         let pty = Pty::spawn(Some("/bin/sh"), 80, 24).expect("PTY spawn");
-        let app = AppState::new(term, pty);
+        let app = AppState::new(term, pty).expect("AppState new");
 
         assert!(app.running);
         assert_eq!(app.terminal.grid.cols, 80);
         assert_eq!(app.terminal.grid.rows, 24);
-        assert_eq!(app.cell_width, 9);
-        assert_eq!(app.cell_height, 18);
+        assert!(app.font_mgr.metrics.cell_width > 0);
+        assert!(app.font_mgr.metrics.cell_height > 0);
         assert!(!app.wayland.configured);
     }
 
@@ -494,10 +499,9 @@ mod tests {
     fn test_pty_and_terminal_roundtrip() {
         let term = Terminal::new(80, 24, 100);
         let pty = Pty::spawn(Some("/bin/sh"), 80, 24).expect("PTY spawn");
-        let mut app = AppState::new(term, pty);
+        let mut app = AppState::new(term, pty).expect("AppState new");
 
         // Send a command to shell via PTY
-        use std::io::{Read, Write};
         app.pty
             .write_all(b"echo ftty_test_ok\n")
             .expect("write to pty");
