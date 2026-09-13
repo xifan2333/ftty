@@ -1,6 +1,6 @@
 # Agent Instructions & Project Guidelines for ftty
 
-`ftty` (Fan TTY / Fast TTY) is an ultra-lightweight, Suckless Wayland terminal emulator with native Kitty graphics protocol support, written in Rust.
+`ftty` is an ultra-lightweight, Suckless Wayland terminal emulator with native Kitty graphics protocol support, written in Rust.
 
 ---
 

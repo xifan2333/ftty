@@ -8,7 +8,7 @@
   <a href="https://www.gnu.org/licenses/gpl-3.0"><img src="https://img.shields.io/badge/License-GPL--3.0-blue?style=flat-square" alt="License" /></a>
 </p>
 
-`ftty` (Fan TTY / Fast TTY) is an ultra-lightweight, Suckless Wayland terminal emulator built with Rust. It provides first-class support for the **Kitty Graphics Protocol** and **Fcitx5 Chinese IME** while remaining strictly obedient to Unix and Suckless philosophies.
+`ftty` is an ultra-lightweight, Suckless Wayland terminal emulator built with Rust. It provides first-class support for the **Kitty Graphics Protocol** and **Fcitx5 Chinese IME** while remaining strictly obedient to Unix and Suckless philosophies.
 
 ---
 

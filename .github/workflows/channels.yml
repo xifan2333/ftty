@@ -1,0 +1,58 @@
+name: channels
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to publish from"
+        required: true
+        default: "main"
+      version:
+        description: "Release version override (defaults to Cargo.toml)"
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: channels-${{ inputs.ref }}
+  cancel-in-progress: false
+
+jobs:
+  aur:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Resolve version from Cargo.toml
+        id: meta
+        shell: bash
+        run: |
+          if [[ -n "${{ inputs.version }}" ]]; then
+            version="${{ inputs.version }}"
+          else
+            version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          fi
+
+          if [[ -z "${version}" ]]; then
+            echo "Failed to extract version from Cargo.toml" >&2
+            exit 1
+          fi
+
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Publishing version ${version} to AUR (aur/ftty-bin)"
+
+      - name: Trigger AUR ftty-bin publish
+        env:
+          GH_TOKEN: ${{ secrets.AUR_AUTO_PAT }}
+        run: |
+          if [[ -z "${GH_TOKEN}" ]]; then
+            echo "AUR_AUTO_PAT secret is not set; skipping automated downstream dispatch."
+            exit 0
+          fi
+          gh workflow run build-and-publish.yml \
+            --repo xifan2333/aur-auto \
+            --field package=ftty-bin \
+            --field force=true
