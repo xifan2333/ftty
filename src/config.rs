@@ -55,7 +55,6 @@ pub struct WindowConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub struct CursorConfig {
     pub shape: Option<CursorShape>,
-    pub blink: Option<bool>,
 }
 
 /// Named standard 16 ANSI colors (0..=15).
@@ -190,9 +189,6 @@ impl Config {
         if let Some(shape) = other.cursor.shape {
             self.cursor.shape = Some(shape);
         }
-        if let Some(blink) = other.cursor.blink {
-            self.cursor.blink = Some(blink);
-        }
 
         if let Some(fg) = other.colors.foreground {
             self.colors.foreground = Some(fg);
@@ -235,6 +231,16 @@ impl Config {
     #[must_use]
     pub fn rows(&self) -> u16 {
         self.window.rows.unwrap_or(DEFAULT_ROWS)
+    }
+
+    #[must_use]
+    pub fn padding_x(&self) -> u16 {
+        self.window.padding_x.unwrap_or(0)
+    }
+
+    #[must_use]
+    pub fn padding_y(&self) -> u16 {
+        self.window.padding_y.unwrap_or(0)
     }
 
     #[must_use]
@@ -431,7 +437,6 @@ mod tests {
 
         [cursor]
         shape = "beam"
-        blink = true
 
         [colors]
         foreground = "#ffffff"

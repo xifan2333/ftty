@@ -20,7 +20,7 @@ fn print_help() {
 fn main() {
     let mut args = std::env::args().skip(1);
     let mut config_path = None;
-    let mut custom_command = None;
+    let mut custom_command: Option<Vec<String>> = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -46,7 +46,7 @@ fn main() {
                     eprintln!("ftty: missing command for -e");
                     std::process::exit(1);
                 }
-                custom_command = Some(rest.join(" "));
+                custom_command = Some(rest);
                 break;
             }
             other => {
@@ -68,7 +68,10 @@ fn main() {
     let rows = config.rows();
 
     let term = Terminal::new(cols as usize, rows as usize, 1000);
-    let pty = match Pty::spawn(custom_command.as_deref(), cols, rows) {
+    let cmd_slice: Option<Vec<&str>> = custom_command
+        .as_ref()
+        .map(|v| v.iter().map(String::as_str).collect());
+    let pty = match Pty::spawn(cmd_slice.as_deref(), cols, rows) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("ftty: failed to spawn PTY: {e}");

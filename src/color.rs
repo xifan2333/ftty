@@ -27,6 +27,11 @@ impl std::str::FromStr for Rgb {
         let s = s.trim();
         let s = s.strip_prefix('#').unwrap_or(s);
         let s = s.strip_prefix("0x").unwrap_or(s);
+        if !s.is_ascii() {
+            return Err(format!(
+                "invalid hex color containing non-ASCII characters: '{s}'"
+            ));
+        }
         if s.len() == 6 {
             let r = u8::from_str_radix(&s[0..2], 16).map_err(|e| e.to_string())?;
             let g = u8::from_str_radix(&s[2..4], 16).map_err(|e| e.to_string())?;
@@ -190,5 +195,7 @@ mod tests {
         assert_eq!(Rgb::new(24, 24, 24).to_string(), "#181818");
         assert!("invalid".parse::<Rgb>().is_err());
         assert!("#1234".parse::<Rgb>().is_err());
+        assert!("aéabc".parse::<Rgb>().is_err());
+        assert!("#éff".parse::<Rgb>().is_err());
     }
 }

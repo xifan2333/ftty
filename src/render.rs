@@ -326,6 +326,7 @@ impl Renderer {
         fonts: &FontManager,
         atlas: &mut GlyphAtlas,
         size: [u32; 2],
+        padding: [u16; 2],
     ) -> io::Result<()> {
         let [width, height] = native_size(size)?;
         self.egl.make_current()?;
@@ -337,6 +338,7 @@ impl Renderer {
             fonts.metrics,
             fonts,
             atlas,
+            padding,
         );
         // SAFETY: this renderer owns the current context and all referenced GL objects.
         unsafe {
@@ -522,10 +524,13 @@ fn build_vertices(
     metrics: CellMetrics,
     fonts: &FontManager,
     atlas: &GlyphAtlas,
+    padding: [u16; 2],
 ) {
     vertices.clear();
     let cw = metrics.cell_width as f32;
     let ch = metrics.cell_height as f32;
+    let pad_x = f32::from(padding[0]);
+    let pad_y = f32::from(padding[1]);
     let cursor = cursor_cell(grid);
 
     // Draw every background first so spacer cells cannot cover wide or overhanging glyphs.
@@ -533,8 +538,8 @@ fn build_vertices(
         for (col, cell) in line.cells.iter().enumerate() {
             let (_, bg) = cell_colors(cell, colors);
             if bg != colors.background {
-                let x = col as f32 * cw;
-                let y = row as f32 * ch;
+                let x = pad_x + col as f32 * cw;
+                let y = pad_y + row as f32 * ch;
                 push_quad(vertices, [x, y, x + cw, y + ch], SOLID_UV, rgba(bg));
             }
         }
@@ -542,8 +547,8 @@ fn build_vertices(
     if let Some((row, col, width)) = cursor
         && grid.cursor.shape == CursorShape::Block
     {
-        let x = col as f32 * cw;
-        let y = row as f32 * ch;
+        let x = pad_x + col as f32 * cw;
+        let y = pad_y + row as f32 * ch;
         push_quad(
             vertices,
             [x, y, x + width as f32 * cw, y + ch],
@@ -560,8 +565,8 @@ fn build_vertices(
             {
                 continue;
             }
-            let x = col as f32 * cw;
-            let y = row as f32 * ch;
+            let x = pad_x + col as f32 * cw;
+            let y = pad_y + row as f32 * ch;
             let (fg, _) = cell_colors(cell, colors);
             let under_block = grid.cursor.shape == CursorShape::Block
                 && cursor.is_some_and(|(r, c, width)| row == r && col >= c && col < c + width);
@@ -633,8 +638,8 @@ fn build_vertices(
     }
 
     if let Some((row, col, width)) = cursor {
-        let x = col as f32 * cw;
-        let y = row as f32 * ch;
+        let x = pad_x + col as f32 * cw;
+        let y = pad_y + row as f32 * ch;
         let rect = match grid.cursor.shape {
             CursorShape::Block => return,
             CursorShape::Beam => [x, y, x + 2.0_f32.min(cw), y + ch],
@@ -661,6 +666,7 @@ mod tests {
             fonts.metrics,
             &fonts,
             &atlas,
+            [0, 0],
         );
         (vertices, atlas)
     }
@@ -755,6 +761,7 @@ mod tests {
             fonts.metrics,
             &fonts,
             &atlas,
+            [0, 0],
         );
         // Ensure vertices were generated for the character cell rather than dropped.
         assert_eq!(vertices.len(), 48);
@@ -769,8 +776,32 @@ mod tests {
             fonts.metrics,
             &fonts,
             &empty_atlas,
+            [0, 0],
         );
         assert_eq!(placeholder_vertices.len(), 48);
         assert_eq!(placeholder_vertices[2], -1.0); // SOLID_UV placeholder
+    }
+
+    #[test]
+    fn test_padding_offsets_vertices() {
+        let fonts = FontManager::load(14.0).expect("system monospace font");
+        let mut grid = Grid::new(1, 1, 0);
+        grid.cursor.visible = false;
+        grid.lines[0].cells[0].bg = Color::Rgb(10, 20, 30);
+
+        let atlas = GlyphAtlas::new(16, 16);
+        let mut vertices = Vec::new();
+        build_vertices(
+            &mut vertices,
+            &grid,
+            ColorScheme::new(&default_256_palette(), DEFAULT_FG, DEFAULT_BG),
+            fonts.metrics,
+            &fonts,
+            &atlas,
+            [12, 18],
+        );
+        assert_eq!(vertices.len(), 48);
+        assert_eq!(vertices[0], 12.0); // x offset by padding_x
+        assert_eq!(vertices[1], 18.0); // y offset by padding_y
     }
 }

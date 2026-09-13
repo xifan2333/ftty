@@ -81,11 +81,15 @@ impl AppState {
         terminal.grid.cursor.shape = config.cursor_shape();
 
         let mut wayland = WaylandState::new();
+        let pad_x = u32::from(config.padding_x());
+        let pad_y = u32::from(config.padding_y());
         wayland.width = (terminal.grid.cols as u32)
             .saturating_mul(font_mgr.metrics.cell_width)
+            .saturating_add(pad_x * 2)
             .clamp(100, i32::MAX as u32);
         wayland.height = (terminal.grid.rows as u32)
             .saturating_mul(font_mgr.metrics.cell_height)
+            .saturating_add(pad_y * 2)
             .clamp(100, i32::MAX as u32);
 
         Ok(Self {
@@ -122,22 +126,32 @@ impl AppState {
         let font_changed = self.config.font_family() != new_config.font_family()
             || (self.config.font_size() - new_config.font_size()).abs() > f32::EPSILON;
 
+        let maybe_new_font = if font_changed {
+            match FontManager::load_with_family(new_config.font_family(), new_config.font_size()) {
+                Ok(mgr) => Some(mgr),
+                Err(e) => {
+                    eprintln!("ftty: failed to reload font face or size: {e}");
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+
+        let padding_changed = self.config.padding_x() != new_config.padding_x()
+            || self.config.padding_y() != new_config.padding_y();
+
         self.palette = new_config.build_palette();
         self.default_fg = new_config.foreground();
         self.default_bg = new_config.background();
         self.terminal.grid.cursor.shape = new_config.cursor_shape();
 
-        if font_changed {
-            match FontManager::load_with_family(new_config.font_family(), new_config.font_size()) {
-                Ok(new_font_mgr) => {
-                    self.font_mgr = new_font_mgr;
-                    self.atlas.clear();
-                    let _ = self.resize_terminal();
-                }
-                Err(e) => {
-                    eprintln!("ftty: failed to reload font face or size: {e}");
-                }
-            }
+        if let Some(new_font_mgr) = maybe_new_font {
+            self.font_mgr = new_font_mgr;
+            self.atlas.clear();
+            let _ = self.resize_terminal();
+        } else if padding_changed {
+            let _ = self.resize_terminal();
         }
 
         self.config = new_config;
@@ -148,6 +162,7 @@ impl AppState {
         let (cols, rows) = terminal_size(
             [self.wayland.width, self.wayland.height],
             self.font_mgr.metrics,
+            [self.config.padding_x(), self.config.padding_y()],
         );
         if (self.terminal.grid.cols, self.terminal.grid.rows) != (cols as usize, rows as usize) {
             self.pty.resize(cols, rows)?;
@@ -180,9 +195,11 @@ impl AppState {
     }
 }
 
-fn terminal_size([width, height]: [u32; 2], metrics: CellMetrics) -> (u16, u16) {
-    let cols = (width / metrics.cell_width.max(1)).clamp(1, u16::MAX as u32) as u16;
-    let rows = (height / metrics.cell_height.max(1)).clamp(1, u16::MAX as u32) as u16;
+fn terminal_size([width, height]: [u32; 2], metrics: CellMetrics, padding: [u16; 2]) -> (u16, u16) {
+    let usable_w = width.saturating_sub(u32::from(padding[0]) * 2);
+    let usable_h = height.saturating_sub(u32::from(padding[1]) * 2);
+    let cols = (usable_w / metrics.cell_width.max(1)).clamp(1, u16::MAX as u32) as u16;
+    let rows = (usable_h / metrics.cell_height.max(1)).clamp(1, u16::MAX as u32) as u16;
     (cols, rows)
 }
 
@@ -508,12 +525,14 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
                 app_state.default_fg,
                 app_state.default_bg,
             );
+            let padding = [app_state.config.padding_x(), app_state.config.padding_y()];
             renderer.render_grid(
                 &app_state.terminal.grid,
                 colors,
                 &app_state.font_mgr,
                 &mut app_state.atlas,
                 [app_state.wayland.width, app_state.wayland.height],
+                padding,
             )?;
             if let Some(surface) = &app_state.wayland.surface {
                 app_state.frame_callback = Some(surface.frame(&qh, ()));
@@ -540,10 +559,11 @@ mod tests {
             cell_height: 18,
             ascent: 14,
         };
-        assert_eq!(terminal_size([720, 480], metrics), (80, 26));
-        assert_eq!(terminal_size([1, 1], metrics), (1, 1));
+        assert_eq!(terminal_size([720, 480], metrics, [0, 0]), (80, 26));
+        assert_eq!(terminal_size([720, 480], metrics, [18, 18]), (76, 24));
+        assert_eq!(terminal_size([1, 1], metrics, [0, 0]), (1, 1));
         assert_eq!(
-            terminal_size([u32::MAX, u32::MAX], metrics),
+            terminal_size([u32::MAX, u32::MAX], metrics, [0, 0]),
             (u16::MAX, u16::MAX)
         );
     }
@@ -551,7 +571,7 @@ mod tests {
     #[test]
     fn test_app_state_initialization() {
         let term = Terminal::new(80, 24, 100);
-        let pty = Pty::spawn(Some("/bin/sh"), 80, 24).expect("PTY spawn");
+        let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
         let app = AppState::new(term, pty).expect("AppState new");
 
         assert!(app.running);
@@ -565,7 +585,7 @@ mod tests {
     #[test]
     fn test_pty_and_terminal_roundtrip() {
         let term = Terminal::new(80, 24, 100);
-        let pty = Pty::spawn(Some("/bin/sh"), 80, 24).expect("PTY spawn");
+        let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
         let mut app = AppState::new(term, pty).expect("AppState new");
 
         // Send a command to shell via PTY
@@ -620,7 +640,7 @@ mod tests {
         .unwrap();
 
         let term = Terminal::new(80, 24, 100);
-        let pty = Pty::spawn(Some("/bin/sh"), 80, 24).expect("PTY spawn");
+        let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
         let mut app = AppState::with_config(term, pty, Some(config_path.clone()))
             .expect("AppState with_config");
 
@@ -649,6 +669,66 @@ mod tests {
         assert_eq!(app.default_fg, Rgb::new(255, 0, 0));
         assert_eq!(app.terminal.grid.cursor.shape, CursorShape::Underline);
         assert!(app.needs_redraw);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_failed_reload_preserves_state() {
+        use crate::grid::CursorShape;
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("ftty_reload_fail_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let config_path = temp_dir.join("ftty.toml");
+
+        std::fs::write(
+            &config_path,
+            r##"
+            [font]
+            size = 14.0
+
+            [cursor]
+            shape = "block"
+
+            [colors]
+            foreground = "#ffffff"
+            background = "#000000"
+            "##,
+        )
+        .unwrap();
+
+        let term = Terminal::new(80, 24, 100);
+        let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
+        let mut app = AppState::with_config(term, pty, Some(config_path.clone()))
+            .expect("AppState with_config");
+
+        // Write an invalid font size (0.0), along with changed colors and cursor
+        std::fs::write(
+            &config_path,
+            r##"
+            [font]
+            size = 0.0
+
+            [cursor]
+            shape = "underline"
+
+            [colors]
+            foreground = "#ff0000"
+            background = "#123456"
+            "##,
+        )
+        .unwrap();
+
+        app.needs_redraw = false;
+        app.reload_config();
+
+        // Ensure state was NOT partially committed
+        assert_eq!(app.default_bg, Rgb::new(0, 0, 0));
+        assert_eq!(app.default_fg, Rgb::new(255, 255, 255));
+        assert_eq!(app.terminal.grid.cursor.shape, CursorShape::Block);
+        assert_eq!(app.font_mgr.font_size(), 14.0);
+        assert!(!app.needs_redraw);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
