@@ -21,7 +21,7 @@ impl Pty {
     ///
     /// # Errors
     /// Returns an [`io::Error`] if PTY allocation, forking, or file descriptor manipulation fails.
-    pub fn spawn(command: Option<&str>, cols: u16, rows: u16) -> io::Result<Self> {
+    pub fn spawn(command: Option<&[&str]>, cols: u16, rows: u16) -> io::Result<Self> {
         let winsize = Winsize {
             ws_row: rows,
             ws_col: cols,
@@ -88,15 +88,22 @@ impl Pty {
                     std::env::set_var("COLORTERM", "truecolor");
                 }
 
-                let shell = command
-                    .map(str::to_string)
-                    .or_else(|| std::env::var("SHELL").ok())
-                    .unwrap_or_else(|| "/bin/sh".to_string());
+                let default_shell =
+                    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+                let (prog, arg_strings): (&str, Vec<&str>) = match command {
+                    Some(args) if !args.is_empty() => (args[0], args.to_vec()),
+                    _ => (default_shell.as_str(), vec![default_shell.as_str()]),
+                };
 
-                let shell_c = CString::new(shell.clone()).unwrap_or_default();
-                let args = [shell_c.as_c_str()];
+                let prog_c = CString::new(prog).unwrap_or_default();
+                let c_args: Vec<CString> = arg_strings
+                    .into_iter()
+                    .map(|s| CString::new(s).unwrap_or_default())
+                    .collect();
+                let c_arg_ptrs: Vec<&std::ffi::CStr> =
+                    c_args.iter().map(|c| c.as_c_str()).collect();
 
-                let _ = execvp(&shell_c, &args);
+                let _ = execvp(&prog_c, &c_arg_ptrs);
                 unsafe { libc::_exit(127) };
             }
             Err(e) => Err(io::Error::from_raw_os_error(e as i32)),
@@ -192,11 +199,14 @@ mod tests {
 
     #[test]
     fn test_pty_spawn_and_resize() {
-        let pty = Pty::spawn(Some("/bin/sh"), 80, 24);
+        let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24);
         assert!(pty.is_ok(), "Failed to spawn PTY: {:?}", pty.err());
         let pty = pty.unwrap();
         assert!(pty.as_raw_fd() >= 0);
         assert!(pty.resize(120, 40).is_ok());
         assert!(pty.is_alive());
+
+        let pty_with_args = Pty::spawn(Some(&["/bin/sh", "-c", "exit 0"]), 80, 24);
+        assert!(pty_with_args.is_ok());
     }
 }

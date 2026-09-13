@@ -28,6 +28,8 @@ nix = { version = "0.31", default-features = false, features = [
   "ioctl",
   "poll",
 ] }
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.6"
 unicode-width = "0.2"
 vte = "0.15"
 wayland-client = "0.31"

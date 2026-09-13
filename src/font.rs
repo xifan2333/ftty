@@ -38,6 +38,7 @@ pub struct CachedGlyph {
 pub struct FontManager {
     regular: fontdue::Font,
     styles: [OnceLock<Option<fontdue::Font>>; 3],
+    family: String,
     font_size: f32,
     pub metrics: CellMetrics,
 }
@@ -63,7 +64,7 @@ fn load_handle(handle: &Handle, font_size: f32) -> io::Result<fontdue::Font> {
     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
-fn load_monospace(style: usize, font_size: f32) -> io::Result<fontdue::Font> {
+fn load_font_face(family: &str, style: usize, font_size: f32) -> io::Result<fontdue::Font> {
     let mut properties = Properties::new();
     if style & 1 != 0 {
         properties.weight(Weight::BOLD);
@@ -71,25 +72,30 @@ fn load_monospace(style: usize, font_size: f32) -> io::Result<fontdue::Font> {
     if style & 2 != 0 {
         properties.style(Style::Italic);
     }
+    let families = if family.eq_ignore_ascii_case("monospace") || family.trim().is_empty() {
+        vec![FamilyName::Monospace]
+    } else {
+        vec![FamilyName::Title(family.to_string()), FamilyName::Monospace]
+    };
     let handle = SystemSource::new()
-        .select_best_match(&[FamilyName::Monospace], &properties)
+        .select_best_match(&families, &properties)
         .map_err(|e| io::Error::new(io::ErrorKind::NotFound, e))?;
     load_handle(&handle, font_size)
 }
 
 impl FontManager {
-    /// Discovers and loads a system monospace face at a size in pixels per em.
+    /// Discovers and loads a font face by family name and size in pixels per em.
     ///
     /// # Errors
     /// Returns an error for an invalid size, missing font, or unreadable font data.
-    pub fn load(font_size: f32) -> io::Result<Self> {
+    pub fn load_with_family(family: &str, font_size: f32) -> io::Result<Self> {
         if !font_size.is_finite() || font_size <= 0.0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "invalid font size",
             ));
         }
-        let regular = load_monospace(0, font_size)?;
+        let regular = load_font_face(family, 0, font_size)?;
         let cell_width = regular
             .metrics('M', font_size)
             .advance_width
@@ -107,6 +113,7 @@ impl FontManager {
         Ok(Self {
             regular,
             styles: std::array::from_fn(|_| OnceLock::new()),
+            family: family.to_string(),
             font_size,
             metrics: CellMetrics {
                 cell_width,
@@ -114,6 +121,24 @@ impl FontManager {
                 ascent,
             },
         })
+    }
+
+    /// Discovers and loads a system monospace face at a size in pixels per em.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid size, missing font, or unreadable font data.
+    pub fn load(font_size: f32) -> io::Result<Self> {
+        Self::load_with_family("monospace", font_size)
+    }
+
+    #[must_use]
+    pub fn family(&self) -> &str {
+        &self.family
+    }
+
+    #[must_use]
+    pub fn font_size(&self) -> f32 {
+        self.font_size
     }
 
     /// Falls back to the regular face if a styled face cannot be loaded.
@@ -124,7 +149,7 @@ impl FontManager {
             return &self.regular;
         }
         self.styles[style - 1]
-            .get_or_init(|| load_monospace(style, self.font_size).ok())
+            .get_or_init(|| load_font_face(&self.family, style, self.font_size).ok())
             .as_ref()
             .unwrap_or(&self.regular)
     }
