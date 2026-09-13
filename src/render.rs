@@ -410,6 +410,8 @@ fn visible_glyph(cell: &Cell) -> bool {
 fn prepare_atlas(grid: &Grid, fonts: &FontManager, atlas: &mut GlyphAtlas) {
     for attempt in 0..2 {
         let mut full = false;
+        // Pre-cache fallback glyph '?' so it is guaranteed available if the atlas fills.
+        let _ = atlas.get_or_insert('?', CellFlags::empty(), fonts);
         for cell in grid
             .lines
             .iter()
@@ -542,22 +544,52 @@ fn build_vertices(
             if cell.flags.contains(CellFlags::DIM) {
                 color[3] = 0.6;
             }
-            if visible_glyph(cell)
-                && let Some(glyph) = atlas.get(cell.c, cell.flags, fonts)
-                && glyph.width > 0
-                && glyph.height > 0
-            {
-                let gx = x + glyph.offset_x as f32;
-                let gy = y + metrics.ascent as f32 - glyph.offset_y as f32 - glyph.height as f32;
-                let [u, v] = glyph.position.map(|value| value as f32);
-                let w = glyph.width as f32;
-                let h = glyph.height as f32;
-                push_quad(
-                    vertices,
-                    [gx, gy, gx + w, gy + h],
-                    [[u, v], [u + w, v + h]],
-                    color,
-                );
+            if visible_glyph(cell) {
+                if let Some(glyph) = atlas.get(cell.c, cell.flags, fonts) {
+                    if glyph.width > 0 && glyph.height > 0 {
+                        let gx = x + glyph.offset_x as f32;
+                        let gy =
+                            y + metrics.ascent as f32 - glyph.offset_y as f32 - glyph.height as f32;
+                        let [u, v] = glyph.position.map(|value| value as f32);
+                        let w = glyph.width as f32;
+                        let h = glyph.height as f32;
+                        push_quad(
+                            vertices,
+                            [gx, gy, gx + w, gy + h],
+                            [[u, v], [u + w, v + h]],
+                            color,
+                        );
+                    }
+                } else if let Some(fallback) = atlas.get('?', CellFlags::empty(), fonts) {
+                    // Fallback to '?' when the primary character does not fit in the atlas.
+                    if fallback.width > 0 && fallback.height > 0 {
+                        let gx = x + fallback.offset_x as f32;
+                        let gy = y + metrics.ascent as f32
+                            - fallback.offset_y as f32
+                            - fallback.height as f32;
+                        let [u, v] = fallback.position.map(|value| value as f32);
+                        let w = fallback.width as f32;
+                        let h = fallback.height as f32;
+                        push_quad(
+                            vertices,
+                            [gx, gy, gx + w, gy + h],
+                            [[u, v], [u + w, v + h]],
+                            color,
+                        );
+                    }
+                } else {
+                    // Solid placeholder quad if the atlas is entirely exhausted.
+                    let box_top = y + 2.0;
+                    let box_bot = y + ch - 2.0;
+                    if box_bot > box_top {
+                        push_quad(
+                            vertices,
+                            [x + 1.0, box_top, x + cw - 1.0, box_bot],
+                            SOLID_UV,
+                            [color[0], color[1], color[2], color[3] * 0.5],
+                        );
+                    }
+                }
             }
             let width = if cell.flags.contains(CellFlags::WIDE_CHAR) {
                 2.0 * cw
@@ -674,5 +706,43 @@ mod tests {
             assert!(native_size(size).is_err());
         }
         assert_eq!(native_size([720, 480]).unwrap(), [720, 480]);
+    }
+
+    #[test]
+    fn atlas_exhaustion_renders_fallback_instead_of_dropping_text() {
+        let fonts = FontManager::load(14.0).expect("system monospace font");
+        let mut grid = Grid::new(1, 1, 0);
+        grid.cursor.visible = false;
+        grid.lines[0].cells[0].c = 'Z';
+
+        // Empty atlas with no 'Z' cached - fallback '?' or solid quad must be generated.
+        let mut atlas = GlyphAtlas::new(16, 16);
+        let _ = atlas.get_or_insert('?', CellFlags::empty(), &fonts);
+
+        let mut vertices = Vec::new();
+        build_vertices(
+            &mut vertices,
+            &grid,
+            &default_256_palette(),
+            fonts.metrics,
+            &fonts,
+            &atlas,
+        );
+        // Ensure vertices were generated for the character cell rather than dropped.
+        assert_eq!(vertices.len(), 48);
+
+        // Even with a completely empty atlas (no '?' either), a placeholder quad is generated.
+        let empty_atlas = GlyphAtlas::new(16, 16);
+        let mut placeholder_vertices = Vec::new();
+        build_vertices(
+            &mut placeholder_vertices,
+            &grid,
+            &default_256_palette(),
+            fonts.metrics,
+            &fonts,
+            &empty_atlas,
+        );
+        assert_eq!(placeholder_vertices.len(), 48);
+        assert_eq!(placeholder_vertices[2], -1.0); // SOLID_UV placeholder
     }
 }
