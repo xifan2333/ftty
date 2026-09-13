@@ -56,6 +56,62 @@ mise run build          # compile project
 
 All coding agents must strictly adhere to the SOP:
 
-1. `gh issue view <id>` -> checkout branch -> empty commit -> push -> `gh pr create --draft` (all tasks unchecked `- [ ]`).
-2. Single-Item Focused Loop -> Local Quality Gate (`check:plan`, `check:changed`, `fix`) -> Local Atomic Commit.
-3. Unified Push, Checks & Merge (`git push`, `gh pr edit`, `gh pr checks`, `gh pr ready`, `gh pr merge --squash --delete-branch`).
+### Phase 1: Issue Discovery & Branch Initialization
+
+1. Inspect issue: `gh issue view <id>`
+2. Checkout feature branch: `git checkout -b <branch_name>`
+3. Empty commit and push:
+   ```bash
+   git commit --allow-empty -m "<type>(<scope>): start <task_summary> (#<issue_id>)"
+   git push -u origin <branch_name>
+   ```
+4. Create Draft PR with all checklist items unchecked (`- [ ]`):
+   ```bash
+   gh pr create --draft --title "<title>" --body "..."
+   ```
+
+### Phase 2: Single-Item Focused Implementation Loop
+
+For each sub-task in the issue checklist:
+
+1. Implement code changes targeted strictly to that task.
+2. Run local quality gate preview: `mise run check:plan`
+3. Execute quality checks and auto-format: `mise run fix` and `mise run check:changed`
+4. Run tests: `mise run test`
+5. Create local atomic commit following Conventional Commits format.
+
+### Phase 3: PR Finalization & Readiness
+
+1. Push all commits to the branch: `git push origin <branch_name>`
+2. Update PR description to check off completed items (`- [x]`):
+   ```bash
+   gh pr edit --body "..."
+   ```
+3. Mark PR ready for review (this activates review bots: CodeRabbit, Greptile):
+   ```bash
+   gh pr ready
+   ```
+
+### Phase 4: Automated Review Triage & Fix Loop (Post-Ready)
+
+Once the PR is marked ready, CI gates and review bots automatically analyze the changes:
+
+1. **Poll Check Status & Feedback**:
+   - Verify CI status: `gh pr checks`
+   - Inspect PR comments: `gh pr view <pr_id> --comments`
+   - Inspect line-level review comments: `gh api repos/:owner/:repo/pulls/<pr_id>/comments`
+2. **Review Bot Feedback Ingestion**:
+   - **CodeRabbit**: Extract `> Prompt for AI Agents` structured blocks when available.
+   - **Greptile**: Inspect cross-file architecture consistency alerts (`greptile.json`).
+3. **Defensive Fix & Verification**:
+   - Treat all bot feedback as review suggestions; verify against actual code logic.
+   - Run `mise run check:changed` and `mise run test` locally.
+   - Commit atomic fix: `git commit -m "fix(review): address review feedback (#<issue_id>)"` and push.
+
+### Phase 5: Final Squash-Merge
+
+1. Confirm all CI checks and bot checks pass (`gh pr checks`).
+2. Perform squash-merge and delete the remote branch:
+   ```bash
+   gh pr merge --squash --delete-branch
+   ```
