@@ -1,14 +1,31 @@
 //! ftty - Ultra-lightweight, Suckless Wayland terminal emulator with native Kitty graphics protocol
 
-use ftty::Terminal;
+use ftty::{AppState, Pty, Terminal, run_event_loop};
 
 fn main() {
-    println!(
-        "ftty v{} - Suckless Wayland Terminal Emulator",
-        env!("CARGO_PKG_VERSION")
-    );
+    let term = Terminal::new(80, 24, 1000);
+    let pty = match Pty::spawn(None, 80, 24) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("ftty: failed to spawn PTY: {e}");
+            std::process::exit(1);
+        }
+    };
 
-    let mut term = Terminal::new(80, 24, 1000);
-    term.advance_bytes(b"\x1b[1;32mftty core initialized\x1b[0m\r\n");
-    println!("Grid dimensions: {}x{}", term.grid.cols, term.grid.rows);
+    let app_state = AppState::new(term, pty);
+
+    if std::env::var_os("WAYLAND_DISPLAY").is_none() && std::env::var_os("WAYLAND_SOCKET").is_none()
+    {
+        println!(
+            "ftty v{} - Suckless Wayland Terminal Emulator",
+            env!("CARGO_PKG_VERSION")
+        );
+        println!("No active Wayland compositor detected. Core initialized successfully.");
+        return;
+    }
+
+    if let Err(e) = run_event_loop(app_state) {
+        eprintln!("ftty error: {e}");
+        std::process::exit(1);
+    }
 }
