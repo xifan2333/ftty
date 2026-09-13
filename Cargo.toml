@@ -13,6 +13,8 @@ categories = ["command-line-utilities"]
 
 [dependencies]
 bitflags = "2.8"
+calloop = { version = "0.14", features = ["signals"] }
+calloop-wayland-source = "0.4"
 libc = "0.2"
 nix = { version = "0.31", default-features = false, features = [
   "term",
@@ -24,6 +26,12 @@ nix = { version = "0.31", default-features = false, features = [
 ] }
 unicode-width = "0.2"
 vte = "0.15"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = [
+  "client",
+  "wayland-client",
+] }
+xkbcommon = { version = "0.9", features = ["wayland"] }
 
 [profile.release]
 opt-level = 3

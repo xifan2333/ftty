@@ -128,6 +128,14 @@ impl Pty {
         self.master.as_raw_fd()
     }
 
+    /// Returns a duplicate of the master PTY file descriptor.
+    ///
+    /// # Errors
+    /// Returns an [`io::Error`] if duplicating the file descriptor fails.
+    pub fn try_clone_master(&self) -> io::Result<OwnedFd> {
+        self.master.try_clone()
+    }
+
     /// Returns the child process PID.
     #[must_use]
     pub fn child_pid(&self) -> Pid {
