@@ -2,8 +2,7 @@
 
 use wayland_client::QueueHandle;
 use wayland_client::protocol::{
-    wl_buffer::WlBuffer, wl_compositor::WlCompositor, wl_keyboard::WlKeyboard, wl_seat::WlSeat,
-    wl_shm::WlShm, wl_surface::WlSurface,
+    wl_compositor::WlCompositor, wl_keyboard::WlKeyboard, wl_seat::WlSeat, wl_surface::WlSurface,
 };
 use wayland_protocols::xdg::shell::client::{
     xdg_surface::XdgSurface, xdg_toplevel::XdgToplevel, xdg_wm_base::XdgWmBase,
@@ -16,12 +15,10 @@ pub struct WaylandState {
     pub xdg_wm_base: Option<XdgWmBase>,
     pub seat: Option<WlSeat>,
     pub keyboard: Option<WlKeyboard>,
-    pub shm: Option<WlShm>,
 
     pub surface: Option<WlSurface>,
     pub xdg_surface: Option<XdgSurface>,
     pub xdg_toplevel: Option<XdgToplevel>,
-    pub current_buffer: Option<WlBuffer>,
 
     pub width: u32,
     pub height: u32,

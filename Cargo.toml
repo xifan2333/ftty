@@ -15,6 +15,10 @@ categories = ["command-line-utilities"]
 bitflags = "2.8"
 calloop = { version = "0.14", features = ["signals"] }
 calloop-wayland-source = "0.4"
+font-kit = "0.14"
+fontdue = "0.9"
+glow = "0.18"
+khronos-egl = { version = "6.0", features = ["1_5", "dynamic"] }
 libc = "0.2"
 nix = { version = "0.31", default-features = false, features = [
   "term",
@@ -27,6 +31,7 @@ nix = { version = "0.31", default-features = false, features = [
 unicode-width = "0.2"
 vte = "0.15"
 wayland-client = "0.31"
+wayland-egl = "0.32"
 wayland-protocols = { version = "0.32", features = [
   "client",
   "wayland-client",
