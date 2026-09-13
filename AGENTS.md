@@ -38,8 +38,7 @@ This repository uses **hk** (`hk.pkl`) for git hooks and code quality checks:
 
 - **Rust formatting**: `rustfmt`
 - **Rust linting**: `cargo clippy --all-targets -- -D warnings`
-- **TOML**: `taplo` (with `--no-schema`)
-- **Shell / Markdown**: `shellcheck`, `shfmt`, `prettier`
+- **Commit message validation**: hk built-in `check-conventional-commit`
 
 Run quality commands during development:
 

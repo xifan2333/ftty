@@ -2,11 +2,7 @@ min_version = "2026.9.4"
 
 [tools]
 hk = "latest"
-prettier = "latest"
 rust = "latest"
-shellcheck = "latest"
-shfmt = "latest"
-taplo = "latest"
 
 [tasks.hooks]
 description = "Install or refresh hk Git hooks"
@@ -18,19 +14,11 @@ run = "hk check"
 
 [tasks."check:plan"]
 description = "Preview hk check execution plan without running tools"
-run = "hk run check --plan"
+run = "hk check --plan"
 
 [tasks."check:changed"]
 description = "Run hk check only on modified/staged/untracked files"
-run = """
-#!/usr/bin/env bash
-set -euo pipefail
-{
-  git diff --name-only -z
-  git diff --cached --name-only -z
-  git ls-files --others --exclude-standard -z
-} | hk run check --files0-from - "$@"
-"""
+run = "hk check"
 
 [tasks.fix]
 description = "Run all hk fixers to format files"

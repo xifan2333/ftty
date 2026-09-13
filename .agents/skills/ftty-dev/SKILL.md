@@ -15,7 +15,7 @@ This skill governs the development workflows and quality gates for `ftty`.
 ```bash
 mise run check:plan     # preview checks
 mise run check:changed  # run quality checks on changed files
-mise run fix            # auto-format with rustfmt/taplo/prettier
+mise run fix            # auto-format with rustfmt
 mise run build          # cargo build debug
 mise run build:release  # cargo build release
 mise run test           # cargo test
