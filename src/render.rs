@@ -12,9 +12,30 @@ use crate::color::Rgb;
 use crate::font::{CellMetrics, FontManager, GlyphAtlas};
 use crate::grid::{Cell, CellFlags, CursorShape, Grid};
 
+#[cfg(test)]
 const DEFAULT_FG: Rgb = Rgb::new(220, 220, 220);
+#[cfg(test)]
 const DEFAULT_BG: Rgb = Rgb::new(24, 24, 24);
 const SOLID_UV: [[f32; 2]; 2] = [[-1.0, -1.0]; 2];
+
+/// Active color scheme holding the 256-color palette and default foreground/background.
+#[derive(Debug, Clone, Copy)]
+pub struct ColorScheme<'a> {
+    pub palette: &'a [Rgb; 256],
+    pub foreground: Rgb,
+    pub background: Rgb,
+}
+
+impl<'a> ColorScheme<'a> {
+    #[must_use]
+    pub fn new(palette: &'a [Rgb; 256], foreground: Rgb, background: Rgb) -> Self {
+        Self {
+            palette,
+            foreground,
+            background,
+        }
+    }
+}
 
 struct EglContext {
     egl: egl::DynamicInstance<egl::EGL1_5>,
@@ -301,7 +322,7 @@ impl Renderer {
     pub fn render_grid(
         &mut self,
         grid: &Grid,
-        palette: &[Rgb; 256],
+        colors: ColorScheme<'_>,
         fonts: &FontManager,
         atlas: &mut GlyphAtlas,
         size: [u32; 2],
@@ -312,7 +333,7 @@ impl Renderer {
         build_vertices(
             &mut self.vertices,
             grid,
-            palette,
+            colors,
             fonts.metrics,
             fonts,
             atlas,
@@ -321,7 +342,7 @@ impl Renderer {
         unsafe {
             let gl = &self.gl;
             gl.viewport(0, 0, width, height);
-            let [r, g, b, a] = rgba(DEFAULT_BG);
+            let [r, g, b, a] = rgba(colors.background);
             gl.clear_color(r, g, b, a);
             gl.clear(glow::COLOR_BUFFER_BIT);
             gl.active_texture(glow::TEXTURE0);
@@ -437,9 +458,13 @@ fn rgba(color: Rgb) -> [f32; 4] {
     ]
 }
 
-fn cell_colors(cell: &Cell, palette: &[Rgb; 256]) -> (Rgb, Rgb) {
-    let fg = cell.fg.to_rgb(palette, DEFAULT_FG, DEFAULT_BG);
-    let bg = cell.bg.to_rgb(palette, DEFAULT_FG, DEFAULT_BG);
+fn cell_colors(cell: &Cell, colors: ColorScheme<'_>) -> (Rgb, Rgb) {
+    let fg = cell
+        .fg
+        .to_rgb(colors.palette, colors.foreground, colors.background);
+    let bg = cell
+        .bg
+        .to_rgb(colors.palette, colors.foreground, colors.background);
     if cell.flags.contains(CellFlags::REVERSE) {
         (bg, fg)
     } else {
@@ -493,7 +518,7 @@ fn cursor_cell(grid: &Grid) -> Option<(usize, usize, usize)> {
 fn build_vertices(
     vertices: &mut Vec<f32>,
     grid: &Grid,
-    palette: &[Rgb; 256],
+    colors: ColorScheme<'_>,
     metrics: CellMetrics,
     fonts: &FontManager,
     atlas: &GlyphAtlas,
@@ -506,8 +531,8 @@ fn build_vertices(
     // Draw every background first so spacer cells cannot cover wide or overhanging glyphs.
     for (row, line) in grid.lines.iter().enumerate() {
         for (col, cell) in line.cells.iter().enumerate() {
-            let (_, bg) = cell_colors(cell, palette);
-            if bg != DEFAULT_BG {
+            let (_, bg) = cell_colors(cell, colors);
+            if bg != colors.background {
                 let x = col as f32 * cw;
                 let y = row as f32 * ch;
                 push_quad(vertices, [x, y, x + cw, y + ch], SOLID_UV, rgba(bg));
@@ -523,7 +548,7 @@ fn build_vertices(
             vertices,
             [x, y, x + width as f32 * cw, y + ch],
             SOLID_UV,
-            rgba(DEFAULT_FG),
+            rgba(colors.foreground),
         );
     }
 
@@ -537,10 +562,10 @@ fn build_vertices(
             }
             let x = col as f32 * cw;
             let y = row as f32 * ch;
-            let (fg, _) = cell_colors(cell, palette);
+            let (fg, _) = cell_colors(cell, colors);
             let under_block = grid.cursor.shape == CursorShape::Block
                 && cursor.is_some_and(|(r, c, width)| row == r && col >= c && col < c + width);
-            let mut color = rgba(if under_block { DEFAULT_BG } else { fg });
+            let mut color = rgba(if under_block { colors.background } else { fg });
             if cell.flags.contains(CellFlags::DIM) {
                 color[3] = 0.6;
             }
@@ -615,7 +640,7 @@ fn build_vertices(
             CursorShape::Beam => [x, y, x + 2.0_f32.min(cw), y + ch],
             CursorShape::Underline => [x, y + (ch - 2.0).max(0.0), x + width as f32 * cw, y + ch],
         };
-        push_quad(vertices, rect, SOLID_UV, rgba(DEFAULT_FG));
+        push_quad(vertices, rect, SOLID_UV, rgba(colors.foreground));
     }
 }
 
@@ -632,7 +657,7 @@ mod tests {
         build_vertices(
             &mut vertices,
             grid,
-            &default_256_palette(),
+            ColorScheme::new(&default_256_palette(), DEFAULT_FG, DEFAULT_BG),
             fonts.metrics,
             &fonts,
             &atlas,
@@ -667,7 +692,10 @@ mod tests {
             ..Cell::default()
         };
         assert_eq!(
-            cell_colors(&cell, &default_256_palette()),
+            cell_colors(
+                &cell,
+                ColorScheme::new(&default_256_palette(), DEFAULT_FG, DEFAULT_BG)
+            ),
             (DEFAULT_BG, DEFAULT_FG)
         );
     }
@@ -723,7 +751,7 @@ mod tests {
         build_vertices(
             &mut vertices,
             &grid,
-            &default_256_palette(),
+            ColorScheme::new(&default_256_palette(), DEFAULT_FG, DEFAULT_BG),
             fonts.metrics,
             &fonts,
             &atlas,
@@ -737,7 +765,7 @@ mod tests {
         build_vertices(
             &mut placeholder_vertices,
             &grid,
-            &default_256_palette(),
+            ColorScheme::new(&default_256_palette(), DEFAULT_FG, DEFAULT_BG),
             fonts.metrics,
             &fonts,
             &empty_atlas,

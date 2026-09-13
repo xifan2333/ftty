@@ -1,6 +1,7 @@
 //! Unified calloop single-threaded event loop multiplexing Wayland, PTY I/O, and POSIX signals.
 
 use std::io::{self, Read, Write};
+use std::path::PathBuf;
 
 use calloop::generic::Generic;
 use calloop::signals::{Signal, Signals};
@@ -22,12 +23,13 @@ use wayland_protocols::xdg::shell::client::{
     xdg_wm_base::{self, XdgWmBase},
 };
 
-use crate::color::{Rgb, default_256_palette};
+use crate::color::Rgb;
+use crate::config::Config;
 use crate::font::{CellMetrics, FontManager, GlyphAtlas};
 use crate::input::KeyboardHandler;
 use crate::parser::Terminal;
 use crate::pty::Pty;
-use crate::render::Renderer;
+use crate::render::{ColorScheme, Renderer};
 use crate::wayland::WaylandState;
 
 /// Shared application state passed to all calloop sources and Wayland event dispatches.
@@ -40,7 +42,11 @@ pub struct AppState {
     pub wayland: WaylandState,
     pub font_mgr: FontManager,
     pub atlas: GlyphAtlas,
+    pub config: Config,
+    pub config_path: Option<PathBuf>,
     pub palette: [Rgb; 256],
+    pub default_fg: Rgb,
+    pub default_bg: Rgb,
     pub running: bool,
     pub needs_redraw: bool,
     frame_callback: Option<WlCallback>,
@@ -49,14 +55,31 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Creates a new `AppState` with terminal, PTY, system monospace font, and glyph atlas.
+    /// Creates a new `AppState` with default configuration path.
     ///
     /// # Errors
-    /// Returns [`std::io::Error`] if system font discovery fails.
+    /// Returns [`std::io::Error`] if font discovery or configuration loading fails.
     pub fn new(terminal: Terminal, pty: Pty) -> Result<Self, io::Error> {
-        let font_mgr = FontManager::load(14.0)?;
+        Self::with_config(terminal, pty, None)
+    }
+
+    /// Creates a new `AppState` with terminal, PTY, optional custom configuration path.
+    ///
+    /// # Errors
+    /// Returns [`std::io::Error`] if font discovery or configuration loading fails.
+    pub fn with_config(
+        mut terminal: Terminal,
+        pty: Pty,
+        config_path: Option<PathBuf>,
+    ) -> Result<Self, io::Error> {
+        let config = Config::load_from_path_or_default(config_path.as_deref())?;
+        let font_mgr = FontManager::load_with_family(config.font_family(), config.font_size())?;
         let atlas = GlyphAtlas::new(128, 128);
-        let palette = default_256_palette();
+        let palette = config.build_palette();
+        let default_fg = config.foreground();
+        let default_bg = config.background();
+        terminal.grid.cursor.shape = config.cursor_shape();
+
         let mut wayland = WaylandState::new();
         wayland.width = (terminal.grid.cols as u32)
             .saturating_mul(font_mgr.metrics.cell_width)
@@ -72,14 +95,53 @@ impl AppState {
             wayland,
             font_mgr,
             atlas,
+            config,
+            config_path,
             renderer: None,
             palette,
+            default_fg,
+            default_bg,
             running: true,
             needs_redraw: true,
             frame_callback: None,
             pending_size: None,
             render_error: None,
         })
+    }
+
+    /// Reloads the configuration file and dynamically updates palette, fonts, cursor, and metrics.
+    pub fn reload_config(&mut self) {
+        let new_config = match Config::load_from_path_or_default(self.config_path.as_deref()) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("ftty: failed to reload config: {e}");
+                return;
+            }
+        };
+
+        let font_changed = self.config.font_family() != new_config.font_family()
+            || (self.config.font_size() - new_config.font_size()).abs() > f32::EPSILON;
+
+        self.palette = new_config.build_palette();
+        self.default_fg = new_config.foreground();
+        self.default_bg = new_config.background();
+        self.terminal.grid.cursor.shape = new_config.cursor_shape();
+
+        if font_changed {
+            match FontManager::load_with_family(new_config.font_family(), new_config.font_size()) {
+                Ok(new_font_mgr) => {
+                    self.font_mgr = new_font_mgr;
+                    self.atlas.clear();
+                    let _ = self.resize_terminal();
+                }
+                Err(e) => {
+                    eprintln!("ftty: failed to reload font face or size: {e}");
+                }
+            }
+        }
+
+        self.config = new_config;
+        self.needs_redraw = true;
     }
 
     fn resize_terminal(&mut self) -> io::Result<()> {
@@ -421,7 +483,7 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
                     state.running = false;
                 }
                 Signal::SIGUSR1 => {
-                    // Hook for future theme dynamic reload
+                    state.reload_config();
                 }
                 _ => {}
             }
@@ -441,9 +503,14 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
             && app_state.frame_callback.is_none()
             && let Some(renderer) = &mut app_state.renderer
         {
+            let colors = ColorScheme::new(
+                &app_state.palette,
+                app_state.default_fg,
+                app_state.default_bg,
+            );
             renderer.render_grid(
                 &app_state.terminal.grid,
-                &app_state.palette,
+                colors,
                 &app_state.font_mgr,
                 &mut app_state.atlas,
                 [app_state.wayland.width, app_state.wayland.height],
@@ -529,5 +596,60 @@ mod tests {
             }
         }
         assert!(received, "Expected shell echo in terminal grid");
+    }
+
+    #[test]
+    fn test_app_state_reload_config() {
+        use crate::grid::CursorShape;
+
+        let temp_dir = std::env::temp_dir().join(format!("ftty_reload_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let config_path = temp_dir.join("ftty.toml");
+
+        std::fs::write(
+            &config_path,
+            r##"
+            [cursor]
+            shape = "block"
+
+            [colors]
+            foreground = "#ffffff"
+            background = "#000000"
+            "##,
+        )
+        .unwrap();
+
+        let term = Terminal::new(80, 24, 100);
+        let pty = Pty::spawn(Some("/bin/sh"), 80, 24).expect("PTY spawn");
+        let mut app = AppState::with_config(term, pty, Some(config_path.clone()))
+            .expect("AppState with_config");
+
+        assert_eq!(app.default_bg, Rgb::new(0, 0, 0));
+        assert_eq!(app.default_fg, Rgb::new(255, 255, 255));
+        assert_eq!(app.terminal.grid.cursor.shape, CursorShape::Block);
+
+        // Update config file
+        std::fs::write(
+            &config_path,
+            r##"
+            [cursor]
+            shape = "underline"
+
+            [colors]
+            foreground = "#ff0000"
+            background = "#123456"
+            "##,
+        )
+        .unwrap();
+
+        app.needs_redraw = false;
+        app.reload_config();
+
+        assert_eq!(app.default_bg, Rgb::new(18, 52, 86));
+        assert_eq!(app.default_fg, Rgb::new(255, 0, 0));
+        assert_eq!(app.terminal.grid.cursor.shape, CursorShape::Underline);
+        assert!(app.needs_redraw);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
