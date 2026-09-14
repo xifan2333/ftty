@@ -1,42 +1,22 @@
 //! System monospace fonts, cell metrics, and a growing grayscale glyph atlas.
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::io;
-use std::sync::OnceLock;
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 use font_kit::family_name::FamilyName;
 use font_kit::handle::Handle;
 use font_kit::properties::{Properties, Style, Weight};
 use font_kit::source::SystemSource;
+use fontconfig::{CharSet, Fontconfig, Pattern};
 
 use crate::grid::CellFlags;
 
 // OpenGL ES 2 guarantees textures of at least this size. Bound the CPU copy to 4 MiB.
 const MAX_ATLAS_SIZE: u32 = 2048;
-
-/// Ordered list of system families consulted when the primary face has no glyph.
-///
-/// Latin monospace faces almost never cover CJK, so without this chain Chinese text
-/// renders as an empty `.notdef` bitmap.
-const FALLBACK_FAMILIES: &[&str] = &[
-    "Noto Sans Mono CJK SC",
-    "Noto Sans CJK SC",
-    "Noto Serif CJK SC",
-    "Source Han Sans SC",
-    "Source Han Mono SC",
-    "Source Han Serif SC",
-    "Sarasa Mono SC",
-    "Sarasa Gothic SC",
-    "WenQuanYi Micro Hei Mono",
-    "WenQuanYi Micro Hei",
-    "WenQuanYi Zen Hei",
-    "Droid Sans Fallback",
-    "AR PL UMing CN",
-    "Noto Sans Symbols 2",
-    "Noto Emoji",
-];
 
 /// Font metrics in pixels, shared by the renderer and PTY grid sizing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,17 +49,79 @@ pub(crate) struct FaceKey {
     pub(crate) style: u8,
 }
 
-/// A candidate fallback family whose face is parsed on first use.
-struct FallbackFamily {
-    name: &'static str,
-    font: OnceLock<Option<fontdue::Font>>,
+/// A face fontconfig reported as covering a character the primary face lacks.
+struct FallbackFace {
+    path: PathBuf,
+    index: u32,
+    font: fontdue::Font,
+}
+
+/// Faces discovered on demand, keyed by the characters that needed them.
+///
+/// Nothing is parsed until a frame renders a character the primary face cannot draw, so
+/// startup stays independent of how many fonts are installed.
+#[derive(Default)]
+struct FallbackCache {
+    faces: Vec<FallbackFace>,
+    /// `None` records that no installed face covers the character.
+    resolved: HashMap<char, Option<u16>>,
+}
+
+impl FallbackCache {
+    /// Returns the index of a face covering `c`, loading it on first use.
+    fn resolve(&mut self, c: char, font_size: f32) -> Option<u16> {
+        if let Some(cached) = self.resolved.get(&c) {
+            return *cached;
+        }
+        let resolved = self.discover(c, font_size);
+        self.resolved.insert(c, resolved);
+        resolved
+    }
+
+    fn discover(&mut self, c: char, font_size: f32) -> Option<u16> {
+        let (path, index) = query_fontconfig(c)?;
+        let position = match self
+            .faces
+            .iter()
+            .position(|face| face.path == path && face.index == index)
+        {
+            Some(position) => position,
+            None => {
+                let handle = Handle::Path {
+                    path: path.clone(),
+                    font_index: index,
+                };
+                let font = load_handle(&handle, font_size).ok()?;
+                self.faces.push(FallbackFace { path, index, font });
+                self.faces.len() - 1
+            }
+        };
+        // Fontconfig always answers with *some* font, which is not necessarily one that
+        // covers the character, so coverage is verified before the face is accepted.
+        let glyph = self.faces[position].font.lookup_glyph_index(c);
+        (glyph != 0).then_some(position as u16)
+    }
+}
+
+/// Asks fontconfig which installed face covers `c`, equivalent to
+/// `fc-match ':charset=<codepoint>'`, so no font family is hard-coded.
+fn query_fontconfig(c: char) -> Option<(PathBuf, u32)> {
+    let fc = Fontconfig::new()?;
+    let mut pattern = Pattern::new(&fc).ok()?;
+    let mut charset = CharSet::new(&fc).ok()?;
+    charset.add_char(c).ok()?;
+    pattern.add_charset(charset).ok()?;
+    let matched = pattern.font_match().ok()?;
+    let path = PathBuf::from(matched.filename().ok()?);
+    let index = u32::try_from(matched.face_index().ok()?).ok()?;
+    Some((path, index))
 }
 
 /// Loads styled faces on first use rather than during terminal startup.
 pub struct FontManager {
     regular: fontdue::Font,
     styles: [OnceLock<Option<fontdue::Font>>; 3],
-    fallbacks: Vec<FallbackFamily>,
+    fallbacks: Mutex<FallbackCache>,
     family: String,
     font_size: f32,
     pub metrics: CellMetrics,
@@ -137,26 +179,6 @@ fn load_font_face(family: &str, style: usize, font_size: f32) -> io::Result<font
     load_family(&primary_families(family), style, font_size).map(|(_, font)| font)
 }
 
-/// Records the installed fallback families without parsing any of their outlines yet.
-///
-/// Parsing a CJK collection costs tens of milliseconds and tens of megabytes, so faces
-/// stay unloaded until a frame actually needs a glyph they cover. Enumerating the font
-/// source once keeps startup independent of the length of the candidate list.
-fn available_fallback_families() -> Vec<FallbackFamily> {
-    let Ok(installed) = SystemSource::new().all_families() else {
-        return Vec::new();
-    };
-    let installed: HashSet<&str> = installed.iter().map(String::as_str).collect();
-    FALLBACK_FAMILIES
-        .iter()
-        .filter(|family| installed.contains(**family))
-        .map(|name| FallbackFamily {
-            name,
-            font: OnceLock::new(),
-        })
-        .collect()
-}
-
 impl FontManager {
     /// Discovers and loads a font face by family name and size in pixels per em.
     ///
@@ -170,7 +192,6 @@ impl FontManager {
             ));
         }
         let regular = load_font_face(family, 0, font_size)?;
-        let fallbacks = available_fallback_families();
         let cell_width = regular
             .metrics('M', font_size)
             .advance_width
@@ -188,7 +209,7 @@ impl FontManager {
         Ok(Self {
             regular,
             styles: std::array::from_fn(|_| OnceLock::new()),
-            fallbacks,
+            fallbacks: Mutex::new(FallbackCache::default()),
             family: family.to_string(),
             font_size,
             metrics: CellMetrics {
@@ -223,12 +244,6 @@ impl FontManager {
         self.face_for_style(style_index(flags))
     }
 
-    /// Number of installed fallback families, whether or not their faces are parsed yet.
-    #[must_use]
-    pub fn fallback_count(&self) -> usize {
-        self.fallbacks.len()
-    }
-
     fn face_for_style(&self, style: usize) -> &fontdue::Font {
         if style == 0 {
             return &self.regular;
@@ -239,25 +254,15 @@ impl FontManager {
             .unwrap_or(&self.regular)
     }
 
-    fn fallback_font(&self, index: usize) -> Option<&fontdue::Font> {
-        let entry = self.fallbacks.get(index)?;
-        entry
-            .font
-            .get_or_init(|| {
-                load_family(
-                    &[FamilyName::Title(entry.name.to_string())],
-                    0,
-                    self.font_size,
-                )
-                .ok()
-                .map(|(_, font)| font)
-            })
-            .as_ref()
+    fn lock_fallbacks(&self) -> std::sync::MutexGuard<'_, FallbackCache> {
+        self.fallbacks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Resolves a character to the face that can actually render it.
     ///
-    /// Glyph index `0` is `.notdef`, so a zero index means "this face has no glyph".
+    /// Glyph index `0` is `.notdef`, so a zero index means "no face has this glyph".
     pub(crate) fn face_key(&self, c: char, flags: CellFlags) -> FaceKey {
         let style = style_index(flags);
         let glyph = self.face_for_style(style).lookup_glyph_index(c);
@@ -268,31 +273,43 @@ impl FontManager {
                 style: style as u8,
             };
         }
-        for index in 0..self.fallbacks.len() {
-            if let Some(font) = self.fallback_font(index) {
-                let glyph = font.lookup_glyph_index(c);
-                if glyph != 0 {
-                    return FaceKey {
-                        face: index as u16 + 1,
-                        glyph,
-                        style: style as u8,
-                    };
-                }
-            }
-        }
-        FaceKey {
-            face: 0,
-            glyph: 0,
-            style: style as u8,
+        let mut fallbacks = self.lock_fallbacks();
+        match fallbacks.resolve(c, self.font_size) {
+            Some(index) => match fallbacks.faces.get(index as usize) {
+                Some(face) => FaceKey {
+                    face: index + 1,
+                    glyph: face.font.lookup_glyph_index(c),
+                    style: style as u8,
+                },
+                None => FaceKey {
+                    face: 0,
+                    glyph: 0,
+                    style: style as u8,
+                },
+            },
+            None => FaceKey {
+                face: 0,
+                glyph: 0,
+                style: style as u8,
+            },
         }
     }
 
-    fn font_for_face(&self, key: FaceKey) -> &fontdue::Font {
+    /// Rasterizes a resolved glyph. The fallback cache is locked only long enough to own
+    /// the bitmap, so no borrow of it escapes this call.
+    pub(crate) fn rasterize(&self, key: FaceKey) -> (fontdue::Metrics, Vec<u8>) {
         if key.face == 0 {
-            return self.face_for_style(key.style as usize);
+            return self
+                .face_for_style(key.style as usize)
+                .rasterize_indexed(key.glyph, self.font_size);
         }
-        self.fallback_font(key.face as usize - 1)
-            .unwrap_or(&self.regular)
+        let fallbacks = self.lock_fallbacks();
+        match fallbacks.faces.get(key.face as usize - 1) {
+            Some(face) => face.font.rasterize_indexed(key.glyph, self.font_size),
+            None => self
+                .face_for_style(key.style as usize)
+                .rasterize_indexed(0, self.font_size),
+        }
     }
 }
 
@@ -439,8 +456,7 @@ impl GlyphAtlas {
         if let Some(glyph) = self.cache.get(&key) {
             return Some(*glyph);
         }
-        let font = fonts.font_for_face(key);
-        let (metrics, bitmap) = font.rasterize_indexed(key.glyph, fonts.font_size);
+        let (metrics, bitmap) = fonts.rasterize(key);
         let glyph = self.insert_bitmap(metrics, &bitmap)?;
         self.cache.insert(key, glyph);
         Some(glyph)
@@ -500,20 +516,35 @@ mod tests {
     }
 
     #[test]
-    fn fallback_candidates_are_selected_from_installed_families() {
-        let installed: HashSet<String> = SystemSource::new()
-            .all_families()
-            .expect("font enumeration")
-            .into_iter()
-            .collect();
-        assert!(!installed.contains("ftty-not-a-real-font-family"));
-        for family in &available_fallback_families() {
-            assert!(
-                installed.contains(family.name),
-                "{} was not reported by the system font source",
-                family.name
-            );
+    fn fallback_discovery_is_cached_per_character() {
+        let mut cache = FallbackCache::default();
+        let first = cache.resolve('中', 14.0);
+        let loaded = cache.faces.len();
+        assert_eq!(cache.resolved.len(), 1);
+
+        // Repeated lookups must reuse both the resolved answer and the parsed face.
+        assert_eq!(cache.resolve('中', 14.0), first);
+        assert_eq!(cache.faces.len(), loaded);
+        assert_eq!(cache.resolved.len(), 1);
+
+        if let Some(index) = first {
+            assert_ne!(cache.faces[index as usize].font.lookup_glyph_index('中'), 0);
+            // The cached face path/index must round-trip through the handle loader.
+            let face = &cache.faces[index as usize];
+            let handle = Handle::Path {
+                path: face.path.clone(),
+                font_index: face.index,
+            };
+            assert!(load_handle(&handle, 14.0).is_ok());
         }
+    }
+
+    #[test]
+    fn unassigned_codepoints_do_not_resolve_to_a_glyph() {
+        // U+0378 is unassigned, so no installed face should claim coverage for it.
+        let key = fonts().face_key('\u{0378}', CellFlags::empty());
+        assert_eq!(key.glyph, 0);
+        assert_eq!(key.face, 0);
     }
 
     #[test]
@@ -532,7 +563,6 @@ mod tests {
             eprintln!("skipping: no CJK fallback font installed");
             return;
         }
-        assert!(fonts.fallback_count() > 0);
         let mut atlas = GlyphAtlas::new(256, 256);
         let glyph = atlas
             .get_or_insert('中', CellFlags::empty(), fonts)
