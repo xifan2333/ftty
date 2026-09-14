@@ -11,8 +11,12 @@ use calloop_wayland_source::WaylandSource;
 use wayland_client::protocol::{
     wl_callback::{self, WlCallback},
     wl_compositor::WlCompositor,
+    wl_data_device::{self, WlDataDevice},
+    wl_data_device_manager::WlDataDeviceManager,
+    wl_data_offer::{self, WlDataOffer},
+    wl_data_source::{self, WlDataSource},
     wl_keyboard::{self, KeyState, WlKeyboard},
-    wl_pointer::{self, Axis, WlPointer},
+    wl_pointer::{self, Axis, ButtonState, WlPointer},
     wl_registry::{self, WlRegistry},
     wl_seat::{self, Capability, WlSeat},
     wl_surface::WlSurface,
@@ -34,6 +38,7 @@ use crate::input::{KeyAction, KeyboardHandler};
 use crate::parser::Terminal;
 use crate::pty::Pty;
 use crate::render::{ColorScheme, RenderOptions, Renderer};
+use crate::selection::{Selection, SelectionPoint, SelectionType, find_word_boundaries};
 use crate::wayland::WaylandState;
 
 /// Shared application state passed to all calloop sources and Wayland event dispatches.
@@ -53,11 +58,29 @@ pub struct AppState {
     pub default_fg: Rgb,
     pub default_bg: Rgb,
     pub scroll_accumulator: f64,
+    pub selection: Selection,
+    pub mouse_pos: [f64; 2],
+    pub mouse_pressed: bool,
+    pub last_click_time: u32,
+    pub click_count: u8,
+    pub last_click_cell: Option<(usize, usize)>,
+    pub last_serial: u32,
+    pub clipboard_text: Option<String>,
+    pub pending_offers: Vec<crate::wayland::OfferData>,
     pub running: bool,
     pub needs_redraw: bool,
     frame_callback: Option<WlCallback>,
     pending_size: Option<[u32; 2]>,
     render_error: Option<io::Error>,
+}
+
+fn best_text_mime(mimes: &[String]) -> Option<&str> {
+    for candidate in ["text/plain;charset=utf-8", "text/plain", "UTF8_STRING"] {
+        if let Some(found) = mimes.iter().find(|m| m.as_str() == candidate) {
+            return Some(found.as_str());
+        }
+    }
+    None
 }
 
 impl AppState {
@@ -114,12 +137,145 @@ impl AppState {
             default_fg,
             default_bg,
             scroll_accumulator: 0.0,
+            selection: Selection::new(
+                SelectionPoint::new(0, 0),
+                SelectionPoint::new(0, 0),
+                SelectionType::Simple,
+            ),
+            mouse_pos: [0.0, 0.0],
+            mouse_pressed: false,
+            last_click_time: 0,
+            click_count: 0,
+            last_click_cell: None,
+            last_serial: 0,
+            clipboard_text: None,
+            pending_offers: Vec::new(),
             running: true,
             needs_redraw: true,
             frame_callback: None,
             pending_size: None,
             render_error: None,
         })
+    }
+
+    /// Returns the absolute `(line, screen_row, col)` grid coordinates under the surface-relative pointer position.
+    #[must_use]
+    pub fn cell_at_pointer(&self, surface_x: f64, surface_y: f64) -> (usize, usize, usize) {
+        let cw = f64::from(self.font_mgr.metrics.cell_width);
+        let ch = f64::from(self.font_mgr.metrics.cell_height);
+        let pad_x = f64::from(self.config.padding_x());
+        let pad_y = f64::from(self.config.padding_y());
+
+        let col = ((surface_x - pad_x) / cw).max(0.0) as usize;
+        let col = col.min(self.terminal.grid.cols.saturating_sub(1));
+
+        let screen_row = ((surface_y - pad_y) / ch).max(0.0) as usize;
+        let screen_row = screen_row.min(self.terminal.grid.rows.saturating_sub(1));
+
+        let abs_line =
+            self.terminal.grid.scrollback.len() + screen_row - self.terminal.grid.viewport_offset;
+        (abs_line, screen_row, col)
+    }
+
+    /// Copies the currently selected text to the Wayland clipboard and internal buffer.
+    pub fn copy_selection(&mut self, qh: Option<&QueueHandle<Self>>) {
+        let text = self.selection.extract_text(&self.terminal.grid);
+        if text.is_empty() {
+            return;
+        }
+
+        self.clipboard_text = Some(text);
+
+        if let (Some(qh), Some(manager), Some(device)) = (
+            qh,
+            &self.wayland.data_device_manager,
+            &self.wayland.data_device,
+        ) {
+            let source = manager.create_data_source(qh, ());
+            source.offer("text/plain;charset=utf-8".to_string());
+            source.offer("text/plain".to_string());
+            source.offer("UTF8_STRING".to_string());
+            device.set_selection(Some(&source), self.last_serial);
+            self.wayland.data_source = Some(source);
+        }
+    }
+
+    /// Pastes text from the Wayland clipboard into the terminal PTY.
+    pub fn paste_clipboard(&mut self, conn: Option<&Connection>) {
+        if let Some(offer_data) = &self.wayland.current_offer {
+            if let Some(mime) = best_text_mime(&offer_data.mime_types) {
+                use std::os::fd::{AsFd, FromRawFd, OwnedFd};
+                let mut fds = [0i32; 2];
+                if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } == 0 {
+                    let read_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+                    let write_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+
+                    offer_data.offer.receive(mime.to_string(), write_fd.as_fd());
+                    drop(write_fd);
+
+                    if let Some(c) = conn {
+                        let _ = c.flush();
+                    }
+
+                    if let Ok(pty_fd) = self.pty.try_clone_master() {
+                        std::thread::spawn(move || {
+                            use std::io::Read;
+                            use std::os::fd::AsRawFd;
+
+                            // Limit paste payload to at most 10 MiB to prevent memory exhaustion
+                            let mut reader = std::fs::File::from(read_fd).take(10 * 1024 * 1024);
+                            let mut bytes = Vec::new();
+                            if reader.read_to_end(&mut bytes).is_ok() && !bytes.is_empty() {
+                                // PTY master is nonblocking: write with poll readiness loop to avoid truncation
+                                let mut to_write = &bytes[..];
+                                let start = std::time::Instant::now();
+                                while !to_write.is_empty()
+                                    && start.elapsed() < std::time::Duration::from_secs(5)
+                                {
+                                    let mut pfd = libc::pollfd {
+                                        fd: pty_fd.as_raw_fd(),
+                                        events: libc::POLLOUT,
+                                        revents: 0,
+                                    };
+                                    let poll_res = unsafe { libc::poll(&mut pfd, 1, 1000) };
+                                    if poll_res <= 0 {
+                                        break;
+                                    }
+                                    let res = unsafe {
+                                        libc::write(
+                                            pty_fd.as_raw_fd(),
+                                            to_write.as_ptr().cast(),
+                                            to_write.len(),
+                                        )
+                                    };
+                                    if res > 0 {
+                                        to_write = &to_write[res as usize..];
+                                    } else if res < 0 {
+                                        let err = std::io::Error::last_os_error();
+                                        if err.kind() == std::io::ErrorKind::Interrupted {
+                                            continue;
+                                        }
+                                        if err.kind() == std::io::ErrorKind::WouldBlock {
+                                            continue;
+                                        }
+                                        break;
+                                    } else {
+                                        break;
+                                    }
+                                }
+                            }
+                        });
+                        return;
+                    }
+                }
+            }
+            return;
+        }
+
+        // Fallback to internal clipboard buffer if offer not available
+        if let Some(text) = &self.clipboard_text {
+            let _ = self.pty.write_all(text.as_bytes());
+        }
     }
 
     /// Updates the Wayland `text-input-v3` cursor bounding box so the IME popup window tracks the cursor.
@@ -192,7 +348,12 @@ impl AppState {
     }
 
     /// Executes a semantic shortcut action (e.g. scroll page up, zoom font).
-    pub fn handle_key_action(&mut self, action: KeyAction) {
+    pub fn handle_key_action(
+        &mut self,
+        action: KeyAction,
+        qh: Option<&QueueHandle<Self>>,
+        conn: Option<&Connection>,
+    ) {
         match action {
             KeyAction::ScrollbackUpPage => {
                 self.terminal
@@ -234,7 +395,12 @@ impl AppState {
                 let default_size = self.config.font_size();
                 self.update_font_size(default_size);
             }
-            KeyAction::ClipboardCopy | KeyAction::ClipboardPaste | KeyAction::PrimaryPaste => {}
+            KeyAction::ClipboardCopy => {
+                self.copy_selection(qh);
+            }
+            KeyAction::ClipboardPaste | KeyAction::PrimaryPaste => {
+                self.paste_clipboard(conn);
+            }
         }
     }
 
@@ -329,11 +495,17 @@ impl Dispatch<WlRegistry, ()> for AppState {
                     let seat = registry.bind::<WlSeat, _, _>(name, version.min(5), qh, ());
                     state.wayland.seat = Some(seat);
                     state.wayland.init_text_input(qh);
+                    state.wayland.init_data_device(qh);
                 }
                 "zwp_text_input_manager_v3" => {
                     let manager = registry.bind::<ZwpTextInputManagerV3, _, _>(name, 1, qh, ());
                     state.wayland.text_input_manager = Some(manager);
                     state.wayland.init_text_input(qh);
+                }
+                "wl_data_device_manager" => {
+                    let manager = registry.bind::<WlDataDeviceManager, _, _>(name, 3, qh, ());
+                    state.wayland.data_device_manager = Some(manager);
+                    state.wayland.init_data_device(qh);
                 }
                 _ => {}
             }
@@ -467,7 +639,7 @@ impl Dispatch<WlKeyboard, ()> for AppState {
         event: wl_keyboard::Event,
         _data: &(),
         _conn: &Connection,
-        _qh: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
     ) {
         match event {
             wl_keyboard::Event::Keymap {
@@ -515,7 +687,7 @@ impl Dispatch<WlKeyboard, ()> for AppState {
                 ..
             } => {
                 if let Some(action) = state.keyboard.check_action(key, &state.config.keybindings) {
-                    state.handle_key_action(action);
+                    state.handle_key_action(action, Some(qh), Some(_conn));
                 } else if let Some(bytes) = state.keyboard.handle_key(key) {
                     if state.config.auto_scroll() && !state.terminal.grid.is_alt_screen() {
                         state.terminal.grid.scroll_viewport_bottom();
@@ -546,10 +718,94 @@ impl Dispatch<WlPointer, ()> for AppState {
         _proxy: &WlPointer,
         event: wl_pointer::Event,
         _data: &(),
-        _conn: &Connection,
+        conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
         match event {
+            wl_pointer::Event::Enter {
+                surface_x,
+                surface_y,
+                ..
+            } => {
+                state.mouse_pos = [surface_x, surface_y];
+            }
+            wl_pointer::Event::Motion {
+                surface_x,
+                surface_y,
+                ..
+            } => {
+                state.mouse_pos = [surface_x, surface_y];
+                if state.mouse_pressed {
+                    let (line, _, col) = state.cell_at_pointer(surface_x, surface_y);
+                    state.selection.end = SelectionPoint::new(line, col);
+                    state.needs_redraw = true;
+                }
+            }
+            wl_pointer::Event::Button {
+                button,
+                state: WEnum::Value(ButtonState::Pressed),
+                time,
+                serial,
+            } => {
+                state.last_serial = serial;
+                if button == 0x110 {
+                    // BTN_LEFT
+                    let (line, screen_row, col) =
+                        state.cell_at_pointer(state.mouse_pos[0], state.mouse_pos[1]);
+                    let same_cell = state.last_click_cell == Some((line, col));
+                    if same_cell && time.saturating_sub(state.last_click_time) < 350 {
+                        state.click_count = (state.click_count % 3) + 1;
+                    } else {
+                        state.click_count = 1;
+                    }
+                    state.last_click_time = time;
+                    state.last_click_cell = Some((line, col));
+                    state.mouse_pressed = true;
+
+                    match state.click_count {
+                        1 => {
+                            state.selection = Selection::new(
+                                SelectionPoint::new(line, col),
+                                SelectionPoint::new(line, col),
+                                SelectionType::Simple,
+                            );
+                        }
+                        2 => {
+                            let row = state.terminal.grid.visible_line(screen_row);
+                            let (w_start, w_end) = find_word_boundaries(row, col);
+                            state.selection = Selection::new(
+                                SelectionPoint::new(line, w_start),
+                                SelectionPoint::new(line, w_end),
+                                SelectionType::Word,
+                            );
+                        }
+                        3 => {
+                            state.selection = Selection::new(
+                                SelectionPoint::new(line, 0),
+                                SelectionPoint::new(
+                                    line,
+                                    state.terminal.grid.cols.saturating_sub(1),
+                                ),
+                                SelectionType::Line,
+                            );
+                        }
+                        _ => {}
+                    }
+                    state.needs_redraw = true;
+                } else if button == 0x112 {
+                    // BTN_MIDDLE: paste
+                    state.paste_clipboard(Some(conn));
+                }
+            }
+            wl_pointer::Event::Button {
+                button,
+                state: WEnum::Value(ButtonState::Released),
+                ..
+            } => {
+                if button == 0x110 {
+                    state.mouse_pressed = false;
+                }
+            }
             wl_pointer::Event::Axis {
                 axis: WEnum::Value(Axis::VerticalScroll),
                 value,
@@ -586,6 +842,102 @@ impl Dispatch<WlPointer, ()> for AppState {
                 state.scroll_accumulator = 0.0;
             }
             _ => {}
+        }
+    }
+}
+
+impl Dispatch<WlDataDeviceManager, ()> for AppState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WlDataDeviceManager,
+        _event: <WlDataDeviceManager as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<WlDataDevice, ()> for AppState {
+    fn event(
+        state: &mut Self,
+        _proxy: &WlDataDevice,
+        event: wl_data_device::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_data_device::Event::DataOffer { id } => {
+                if state.pending_offers.len() >= 4 {
+                    state.pending_offers.remove(0);
+                }
+                state.pending_offers.push(crate::wayland::OfferData {
+                    offer: id,
+                    mime_types: Vec::new(),
+                });
+            }
+            wl_data_device::Event::Selection { id } => {
+                state.wayland.current_offer = id.and_then(|offer| {
+                    state
+                        .pending_offers
+                        .iter()
+                        .position(|o| o.offer == offer)
+                        .map(|idx| state.pending_offers.swap_remove(idx))
+                });
+                if state.wayland.current_offer.is_none() {
+                    state.pending_offers.clear();
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<WlDataSource, ()> for AppState {
+    fn event(
+        state: &mut Self,
+        _proxy: &WlDataSource,
+        event: wl_data_source::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_data_source::Event::Send { mime_type: _, fd } => {
+                let text = state.clipboard_text.clone();
+                std::thread::spawn(move || {
+                    let mut file = std::fs::File::from(fd);
+                    if let Some(text) = text {
+                        let _ = file.write_all(text.as_bytes());
+                    }
+                });
+            }
+            wl_data_source::Event::Cancelled => {
+                state.wayland.data_source = None;
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<WlDataOffer, ()> for AppState {
+    fn event(
+        state: &mut Self,
+        proxy: &WlDataOffer,
+        event: wl_data_offer::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let wl_data_offer::Event::Offer { mime_type } = event {
+            if let Some(data) = state.pending_offers.iter_mut().find(|o| &o.offer == proxy) {
+                data.mime_types.push(mime_type);
+            } else if let Some(current) = &mut state.wayland.current_offer
+                && &current.offer == proxy
+            {
+                current.mime_types.push(mime_type);
+            }
         }
     }
 }
@@ -789,6 +1141,7 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
             let options = RenderOptions::new(
                 [app_state.config.padding_x(), app_state.config.padding_y()],
                 app_state.ime.preedit.as_ref(),
+                Some(&app_state.selection),
             );
             renderer.render_grid(
                 &app_state.terminal.grid,
@@ -1027,11 +1380,11 @@ mod tests {
         assert_eq!(app.terminal.grid.viewport_offset(), 0);
 
         // Page Up
-        app.handle_key_action(KeyAction::ScrollbackUpPage);
+        app.handle_key_action(KeyAction::ScrollbackUpPage, None, None);
         assert_eq!(app.terminal.grid.viewport_offset(), 24);
 
         // Scroll to Top
-        app.handle_key_action(KeyAction::ScrollbackHome);
+        app.handle_key_action(KeyAction::ScrollbackHome, None, None);
         assert_eq!(
             app.terminal.grid.viewport_offset(),
             app.terminal.grid.scrollback.len()
@@ -1039,22 +1392,67 @@ mod tests {
 
         // Line Down
         let top = app.terminal.grid.viewport_offset();
-        app.handle_key_action(KeyAction::ScrollbackDownLine);
+        app.handle_key_action(KeyAction::ScrollbackDownLine, None, None);
         assert_eq!(app.terminal.grid.viewport_offset(), top - 1);
 
         // Scroll to Bottom
-        app.handle_key_action(KeyAction::ScrollbackEnd);
+        app.handle_key_action(KeyAction::ScrollbackEnd, None, None);
         assert_eq!(app.terminal.grid.viewport_offset(), 0);
 
         // Font zoom actions
         let initial_size = app.font_mgr.font_size();
-        app.handle_key_action(KeyAction::FontIncrease);
+        app.handle_key_action(KeyAction::FontIncrease, None, None);
         assert_eq!(app.font_mgr.font_size(), initial_size + 1.0);
 
-        app.handle_key_action(KeyAction::FontDecrease);
+        app.handle_key_action(KeyAction::FontDecrease, None, None);
         assert_eq!(app.font_mgr.font_size(), initial_size);
 
-        app.handle_key_action(KeyAction::FontReset);
+        app.handle_key_action(KeyAction::FontReset, None, None);
         assert_eq!(app.font_mgr.font_size(), app.config.font_size());
+    }
+
+    #[test]
+    fn test_copy_and_paste_clipboard() {
+        use crate::color::Color;
+        use crate::grid::CellFlags;
+
+        let term = Terminal::new(80, 24, 100);
+        let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
+        let mut app = AppState::new(term, pty).expect("AppState new");
+
+        for c in "copied_text".chars() {
+            app.terminal.grid.write_char(
+                c,
+                Color::DefaultForeground,
+                Color::DefaultBackground,
+                CellFlags::empty(),
+            );
+        }
+
+        app.selection = Selection::new(
+            SelectionPoint::new(0, 0),
+            SelectionPoint::new(0, 10),
+            SelectionType::Simple,
+        );
+
+        app.copy_selection(None);
+        assert_eq!(app.clipboard_text, Some("copied_text".to_string()));
+
+        app.paste_clipboard(None);
+    }
+
+    #[test]
+    fn test_cell_at_pointer_calculation() {
+        let term = Terminal::new(80, 24, 100);
+        let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
+        let app = AppState::new(term, pty).expect("AppState new");
+
+        let cw = f64::from(app.font_mgr.metrics.cell_width);
+        let ch = f64::from(app.font_mgr.metrics.cell_height);
+
+        let (line, screen_row, col) = app.cell_at_pointer(cw * 5.5, ch * 3.5);
+        assert_eq!(col, 5);
+        assert_eq!(screen_row, 3);
+        assert_eq!(line, 3);
     }
 }

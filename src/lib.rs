@@ -10,6 +10,7 @@ pub mod input;
 pub mod parser;
 pub mod pty;
 pub mod render;
+pub mod selection;
 pub mod wayland;
 
 pub use color::{Color, Rgb, default_256_palette};
@@ -22,4 +23,5 @@ pub use input::{KeyAction, KeyboardHandler, parse_key_combo};
 pub use parser::Terminal;
 pub use pty::Pty;
 pub use render::{ColorScheme, RenderOptions, Renderer};
-pub use wayland::WaylandState;
+pub use selection::{Selection, SelectionPoint, SelectionType, find_word_boundaries};
+pub use wayland::{OfferData, WaylandState};

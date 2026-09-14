@@ -12,12 +12,14 @@ use crate::color::Rgb;
 use crate::font::{CellMetrics, FontManager, GlyphAtlas};
 use crate::grid::{Cell, CellFlags, CursorShape, Grid};
 use crate::ime::Preedit;
+use crate::selection::Selection;
 
 #[cfg(test)]
 const DEFAULT_FG: Rgb = Rgb::new(220, 220, 220);
 #[cfg(test)]
 const DEFAULT_BG: Rgb = Rgb::new(24, 24, 24);
 const SOLID_UV: [[f32; 2]; 2] = [[-1.0, -1.0]; 2];
+const SELECTION_BG: [f32; 4] = [0.35, 0.45, 0.70, 0.5];
 
 /// Active color scheme holding the 256-color palette and default foreground/background.
 #[derive(Debug, Clone, Copy)]
@@ -38,17 +40,26 @@ impl<'a> ColorScheme<'a> {
     }
 }
 
-/// Options controlling frame layout, window padding, and active IME composition.
+/// Options controlling frame layout, window padding, active IME composition, and text selection.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RenderOptions<'a> {
     pub padding: [u16; 2],
     pub preedit: Option<&'a Preedit>,
+    pub selection: Option<&'a Selection>,
 }
 
 impl<'a> RenderOptions<'a> {
     #[must_use]
-    pub fn new(padding: [u16; 2], preedit: Option<&'a Preedit>) -> Self {
-        Self { padding, preedit }
+    pub fn new(
+        padding: [u16; 2],
+        preedit: Option<&'a Preedit>,
+        selection: Option<&'a Selection>,
+    ) -> Self {
+        Self {
+            padding,
+            preedit,
+            selection,
+        }
     }
 }
 
@@ -565,13 +576,17 @@ fn build_vertices(
 
     // Draw every background first so spacer cells cannot cover wide or overhanging glyphs.
     for row in 0..grid.rows {
+        let abs_line = grid.scrollback.len() + row - grid.viewport_offset;
         let line = grid.visible_line(row);
         for (col, cell) in line.cells.iter().enumerate() {
             let (_, bg) = cell_colors(cell, colors);
+            let x = pad_x + col as f32 * cw;
+            let y = pad_y + row as f32 * ch;
             if bg != colors.background {
-                let x = pad_x + col as f32 * cw;
-                let y = pad_y + row as f32 * ch;
                 push_quad(vertices, [x, y, x + cw, y + ch], SOLID_UV, rgba(bg));
+            }
+            if options.selection.is_some_and(|s| s.contains(abs_line, col)) {
+                push_quad(vertices, [x, y, x + cw, y + ch], SOLID_UV, SELECTION_BG);
             }
         }
     }
@@ -891,7 +906,7 @@ mod tests {
             fonts.metrics,
             &fonts,
             &atlas,
-            RenderOptions::new([12, 18], None),
+            RenderOptions::new([12, 18], None, None),
         );
         assert_eq!(vertices.len(), 48);
         assert_eq!(vertices[0], 12.0); // x offset by padding_x
@@ -922,7 +937,7 @@ mod tests {
             fonts.metrics,
             &fonts,
             &atlas,
-            RenderOptions::new([0, 0], Some(&preedit)),
+            RenderOptions::new([0, 0], Some(&preedit), None),
         );
 
         // Vertices must contain the block cursor and the preedit quads
@@ -953,7 +968,7 @@ mod tests {
             fonts.metrics,
             &fonts,
             &atlas,
-            RenderOptions::new([10, 10], Some(&preedit)),
+            RenderOptions::new([10, 10], Some(&preedit), None),
         );
 
         let cw = fonts.metrics.cell_width as f32;
