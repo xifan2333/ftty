@@ -219,11 +219,50 @@ impl AppState {
 
                     if let Ok(pty_fd) = self.pty.try_clone_master() {
                         std::thread::spawn(move || {
-                            let mut reader = std::fs::File::from(read_fd);
-                            let mut pty_file = std::fs::File::from(pty_fd);
+                            use std::io::Read;
+                            use std::os::fd::AsRawFd;
+
+                            // Limit paste payload to at most 10 MiB to prevent memory exhaustion
+                            let mut reader = std::fs::File::from(read_fd).take(10 * 1024 * 1024);
                             let mut bytes = Vec::new();
                             if reader.read_to_end(&mut bytes).is_ok() && !bytes.is_empty() {
-                                let _ = pty_file.write_all(&bytes);
+                                // PTY master is nonblocking: write with poll readiness loop to avoid truncation
+                                let mut to_write = &bytes[..];
+                                let start = std::time::Instant::now();
+                                while !to_write.is_empty()
+                                    && start.elapsed() < std::time::Duration::from_secs(5)
+                                {
+                                    let mut pfd = libc::pollfd {
+                                        fd: pty_fd.as_raw_fd(),
+                                        events: libc::POLLOUT,
+                                        revents: 0,
+                                    };
+                                    let poll_res = unsafe { libc::poll(&mut pfd, 1, 1000) };
+                                    if poll_res <= 0 {
+                                        break;
+                                    }
+                                    let res = unsafe {
+                                        libc::write(
+                                            pty_fd.as_raw_fd(),
+                                            to_write.as_ptr().cast(),
+                                            to_write.len(),
+                                        )
+                                    };
+                                    if res > 0 {
+                                        to_write = &to_write[res as usize..];
+                                    } else if res < 0 {
+                                        let err = std::io::Error::last_os_error();
+                                        if err.kind() == std::io::ErrorKind::Interrupted {
+                                            continue;
+                                        }
+                                        if err.kind() == std::io::ErrorKind::WouldBlock {
+                                            continue;
+                                        }
+                                        break;
+                                    } else {
+                                        break;
+                                    }
+                                }
                             }
                         });
                         return;
@@ -868,8 +907,7 @@ impl Dispatch<WlDataSource, ()> for AppState {
             wl_data_source::Event::Send { mime_type: _, fd } => {
                 let text = state.clipboard_text.clone();
                 std::thread::spawn(move || {
-                    use std::os::fd::{AsRawFd, FromRawFd};
-                    let mut file = unsafe { std::fs::File::from_raw_fd(fd.as_raw_fd()) };
+                    let mut file = std::fs::File::from(fd);
                     if let Some(text) = text {
                         let _ = file.write_all(text.as_bytes());
                     }
