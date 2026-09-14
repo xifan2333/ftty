@@ -13,7 +13,7 @@ use wayland_client::protocol::{
     wl_compositor::WlCompositor,
     wl_data_device::{self, WlDataDevice},
     wl_data_device_manager::WlDataDeviceManager,
-    wl_data_offer::WlDataOffer,
+    wl_data_offer::{self, WlDataOffer},
     wl_data_source::{self, WlDataSource},
     wl_keyboard::{self, KeyState, WlKeyboard},
     wl_pointer::{self, Axis, ButtonState, WlPointer},
@@ -63,13 +63,24 @@ pub struct AppState {
     pub mouse_pressed: bool,
     pub last_click_time: u32,
     pub click_count: u8,
+    pub last_click_cell: Option<(usize, usize)>,
     pub last_serial: u32,
     pub clipboard_text: Option<String>,
+    pub pending_offers: Vec<crate::wayland::OfferData>,
     pub running: bool,
     pub needs_redraw: bool,
     frame_callback: Option<WlCallback>,
     pending_size: Option<[u32; 2]>,
     render_error: Option<io::Error>,
+}
+
+fn best_text_mime(mimes: &[String]) -> Option<&str> {
+    for candidate in ["text/plain;charset=utf-8", "text/plain", "UTF8_STRING"] {
+        if let Some(found) = mimes.iter().find(|m| m.as_str() == candidate) {
+            return Some(found.as_str());
+        }
+    }
+    None
 }
 
 impl AppState {
@@ -135,8 +146,10 @@ impl AppState {
             mouse_pressed: false,
             last_click_time: 0,
             click_count: 0,
+            last_click_cell: None,
             last_serial: 0,
             clipboard_text: None,
+            pending_offers: Vec::new(),
             running: true,
             needs_redraw: true,
             frame_callback: None,
@@ -145,9 +158,9 @@ impl AppState {
         })
     }
 
-    /// Returns the absolute `(line, col)` grid coordinates under the surface-relative pointer position.
+    /// Returns the absolute `(line, screen_row, col)` grid coordinates under the surface-relative pointer position.
     #[must_use]
-    pub fn cell_at_pointer(&self, surface_x: f64, surface_y: f64) -> (usize, usize) {
+    pub fn cell_at_pointer(&self, surface_x: f64, surface_y: f64) -> (usize, usize, usize) {
         let cw = f64::from(self.font_mgr.metrics.cell_width);
         let ch = f64::from(self.font_mgr.metrics.cell_height);
         let pad_x = f64::from(self.config.padding_x());
@@ -156,12 +169,12 @@ impl AppState {
         let col = ((surface_x - pad_x) / cw).max(0.0) as usize;
         let col = col.min(self.terminal.grid.cols.saturating_sub(1));
 
-        let row = ((surface_y - pad_y) / ch).max(0.0) as usize;
-        let row = row.min(self.terminal.grid.rows.saturating_sub(1));
+        let screen_row = ((surface_y - pad_y) / ch).max(0.0) as usize;
+        let screen_row = screen_row.min(self.terminal.grid.rows.saturating_sub(1));
 
         let abs_line =
-            self.terminal.grid.scrollback.len() + row - self.terminal.grid.viewport_offset;
-        (abs_line, col)
+            self.terminal.grid.scrollback.len() + screen_row - self.terminal.grid.viewport_offset;
+        (abs_line, screen_row, col)
     }
 
     /// Copies the currently selected text to the Wayland clipboard and internal buffer.
@@ -188,24 +201,39 @@ impl AppState {
     }
 
     /// Pastes text from the Wayland clipboard into the terminal PTY.
-    pub fn paste_clipboard(&mut self) {
-        if let Some(offer) = &self.wayland.current_offer {
-            use std::os::fd::{AsFd, FromRawFd, OwnedFd};
-            let mut fds = [0i32; 2];
-            if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } == 0 {
-                let read_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
-                let write_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+    pub fn paste_clipboard(&mut self, conn: Option<&Connection>) {
+        if let Some(offer_data) = &self.wayland.current_offer {
+            if let Some(mime) = best_text_mime(&offer_data.mime_types) {
+                use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
+                let mut fds = [0i32; 2];
+                if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } == 0 {
+                    let read_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+                    let write_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
 
-                offer.receive("text/plain;charset=utf-8".to_string(), write_fd.as_fd());
-                drop(write_fd);
+                    offer_data.offer.receive(mime.to_string(), write_fd.as_fd());
+                    drop(write_fd);
 
-                let mut reader = std::fs::File::from(read_fd);
-                let mut text = String::new();
-                if reader.read_to_string(&mut text).is_ok() && !text.is_empty() {
-                    let _ = self.pty.write_all(text.as_bytes());
-                    return;
+                    if let Some(c) = conn {
+                        let _ = c.flush();
+                    }
+
+                    let mut pfd = libc::pollfd {
+                        fd: read_fd.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    let poll_res = unsafe { libc::poll(&mut pfd, 1, 100) };
+                    if poll_res > 0 && (pfd.revents & libc::POLLIN != 0) {
+                        let mut reader = std::fs::File::from(read_fd);
+                        let mut text = String::new();
+                        if reader.read_to_string(&mut text).is_ok() && !text.is_empty() {
+                            let _ = self.pty.write_all(text.as_bytes());
+                            return;
+                        }
+                    }
                 }
             }
+            return;
         }
 
         // Fallback to internal clipboard buffer if offer not available
@@ -284,7 +312,12 @@ impl AppState {
     }
 
     /// Executes a semantic shortcut action (e.g. scroll page up, zoom font).
-    pub fn handle_key_action(&mut self, action: KeyAction, qh: Option<&QueueHandle<Self>>) {
+    pub fn handle_key_action(
+        &mut self,
+        action: KeyAction,
+        qh: Option<&QueueHandle<Self>>,
+        conn: Option<&Connection>,
+    ) {
         match action {
             KeyAction::ScrollbackUpPage => {
                 self.terminal
@@ -330,7 +363,7 @@ impl AppState {
                 self.copy_selection(qh);
             }
             KeyAction::ClipboardPaste | KeyAction::PrimaryPaste => {
-                self.paste_clipboard();
+                self.paste_clipboard(conn);
             }
         }
     }
@@ -618,7 +651,7 @@ impl Dispatch<WlKeyboard, ()> for AppState {
                 ..
             } => {
                 if let Some(action) = state.keyboard.check_action(key, &state.config.keybindings) {
-                    state.handle_key_action(action, Some(qh));
+                    state.handle_key_action(action, Some(qh), Some(_conn));
                 } else if let Some(bytes) = state.keyboard.handle_key(key) {
                     if state.config.auto_scroll() && !state.terminal.grid.is_alt_screen() {
                         state.terminal.grid.scroll_viewport_bottom();
@@ -649,10 +682,17 @@ impl Dispatch<WlPointer, ()> for AppState {
         _proxy: &WlPointer,
         event: wl_pointer::Event,
         _data: &(),
-        _conn: &Connection,
-        qh: &QueueHandle<Self>,
+        conn: &Connection,
+        _qh: &QueueHandle<Self>,
     ) {
         match event {
+            wl_pointer::Event::Enter {
+                surface_x,
+                surface_y,
+                ..
+            } => {
+                state.mouse_pos = [surface_x, surface_y];
+            }
             wl_pointer::Event::Motion {
                 surface_x,
                 surface_y,
@@ -660,7 +700,7 @@ impl Dispatch<WlPointer, ()> for AppState {
             } => {
                 state.mouse_pos = [surface_x, surface_y];
                 if state.mouse_pressed {
-                    let (line, col) = state.cell_at_pointer(surface_x, surface_y);
+                    let (line, _, col) = state.cell_at_pointer(surface_x, surface_y);
                     state.selection.end = SelectionPoint::new(line, col);
                     state.needs_redraw = true;
                 }
@@ -674,13 +714,16 @@ impl Dispatch<WlPointer, ()> for AppState {
                 state.last_serial = serial;
                 if button == 0x110 {
                     // BTN_LEFT
-                    let (line, col) = state.cell_at_pointer(state.mouse_pos[0], state.mouse_pos[1]);
-                    if time.saturating_sub(state.last_click_time) < 350 {
+                    let (line, screen_row, col) =
+                        state.cell_at_pointer(state.mouse_pos[0], state.mouse_pos[1]);
+                    let same_cell = state.last_click_cell == Some((line, col));
+                    if same_cell && time.saturating_sub(state.last_click_time) < 350 {
                         state.click_count = (state.click_count % 3) + 1;
                     } else {
                         state.click_count = 1;
                     }
                     state.last_click_time = time;
+                    state.last_click_cell = Some((line, col));
                     state.mouse_pressed = true;
 
                     match state.click_count {
@@ -692,10 +735,7 @@ impl Dispatch<WlPointer, ()> for AppState {
                             );
                         }
                         2 => {
-                            let vis_row = line
-                                .saturating_sub(state.terminal.grid.scrollback.len())
-                                .min(state.terminal.grid.rows.saturating_sub(1));
-                            let row = state.terminal.grid.visible_line(vis_row);
+                            let row = state.terminal.grid.visible_line(screen_row);
                             let (w_start, w_end) = find_word_boundaries(row, col);
                             state.selection = Selection::new(
                                 SelectionPoint::new(line, w_start),
@@ -718,7 +758,7 @@ impl Dispatch<WlPointer, ()> for AppState {
                     state.needs_redraw = true;
                 } else if button == 0x112 {
                     // BTN_MIDDLE: paste
-                    state.paste_clipboard();
+                    state.paste_clipboard(Some(conn));
                 }
             }
             wl_pointer::Event::Button {
@@ -728,9 +768,6 @@ impl Dispatch<WlPointer, ()> for AppState {
             } => {
                 if button == 0x110 {
                     state.mouse_pressed = false;
-                    if !state.selection.is_empty() {
-                        state.copy_selection(Some(qh));
-                    }
                 }
             }
             wl_pointer::Event::Axis {
@@ -796,10 +833,19 @@ impl Dispatch<WlDataDevice, ()> for AppState {
     ) {
         match event {
             wl_data_device::Event::DataOffer { id } => {
-                let _ = id;
+                state.pending_offers.push(crate::wayland::OfferData {
+                    offer: id,
+                    mime_types: Vec::new(),
+                });
             }
             wl_data_device::Event::Selection { id } => {
-                state.wayland.current_offer = id;
+                state.wayland.current_offer = id.and_then(|offer| {
+                    state
+                        .pending_offers
+                        .iter()
+                        .position(|o| o.offer == offer)
+                        .map(|idx| state.pending_offers.swap_remove(idx))
+                });
             }
             _ => {}
         }
@@ -819,9 +865,23 @@ impl Dispatch<WlDataSource, ()> for AppState {
             wl_data_source::Event::Send { mime_type: _, fd } => {
                 if let Some(text) = &state.clipboard_text {
                     use std::os::fd::AsRawFd;
-                    let bytes = text.as_bytes();
-                    let _ =
-                        unsafe { libc::write(fd.as_raw_fd(), bytes.as_ptr().cast(), bytes.len()) };
+                    let mut bytes = text.as_bytes();
+                    while !bytes.is_empty() {
+                        let res = unsafe {
+                            libc::write(fd.as_raw_fd(), bytes.as_ptr().cast(), bytes.len())
+                        };
+                        if res > 0 {
+                            bytes = &bytes[res as usize..];
+                        } else if res < 0 {
+                            let err = std::io::Error::last_os_error();
+                            if err.kind() == std::io::ErrorKind::Interrupted {
+                                continue;
+                            }
+                            break;
+                        } else {
+                            break;
+                        }
+                    }
                 }
             }
             wl_data_source::Event::Cancelled => {
@@ -834,13 +894,22 @@ impl Dispatch<WlDataSource, ()> for AppState {
 
 impl Dispatch<WlDataOffer, ()> for AppState {
     fn event(
-        _state: &mut Self,
-        _proxy: &WlDataOffer,
-        _event: <WlDataOffer as wayland_client::Proxy>::Event,
+        state: &mut Self,
+        proxy: &WlDataOffer,
+        event: wl_data_offer::Event,
         _data: &(),
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
+        if let wl_data_offer::Event::Offer { mime_type } = event {
+            if let Some(data) = state.pending_offers.iter_mut().find(|o| &o.offer == proxy) {
+                data.mime_types.push(mime_type);
+            } else if let Some(current) = &mut state.wayland.current_offer
+                && &current.offer == proxy
+            {
+                current.mime_types.push(mime_type);
+            }
+        }
     }
 }
 
@@ -1282,11 +1351,11 @@ mod tests {
         assert_eq!(app.terminal.grid.viewport_offset(), 0);
 
         // Page Up
-        app.handle_key_action(KeyAction::ScrollbackUpPage, None);
+        app.handle_key_action(KeyAction::ScrollbackUpPage, None, None);
         assert_eq!(app.terminal.grid.viewport_offset(), 24);
 
         // Scroll to Top
-        app.handle_key_action(KeyAction::ScrollbackHome, None);
+        app.handle_key_action(KeyAction::ScrollbackHome, None, None);
         assert_eq!(
             app.terminal.grid.viewport_offset(),
             app.terminal.grid.scrollback.len()
@@ -1294,22 +1363,22 @@ mod tests {
 
         // Line Down
         let top = app.terminal.grid.viewport_offset();
-        app.handle_key_action(KeyAction::ScrollbackDownLine, None);
+        app.handle_key_action(KeyAction::ScrollbackDownLine, None, None);
         assert_eq!(app.terminal.grid.viewport_offset(), top - 1);
 
         // Scroll to Bottom
-        app.handle_key_action(KeyAction::ScrollbackEnd, None);
+        app.handle_key_action(KeyAction::ScrollbackEnd, None, None);
         assert_eq!(app.terminal.grid.viewport_offset(), 0);
 
         // Font zoom actions
         let initial_size = app.font_mgr.font_size();
-        app.handle_key_action(KeyAction::FontIncrease, None);
+        app.handle_key_action(KeyAction::FontIncrease, None, None);
         assert_eq!(app.font_mgr.font_size(), initial_size + 1.0);
 
-        app.handle_key_action(KeyAction::FontDecrease, None);
+        app.handle_key_action(KeyAction::FontDecrease, None, None);
         assert_eq!(app.font_mgr.font_size(), initial_size);
 
-        app.handle_key_action(KeyAction::FontReset, None);
+        app.handle_key_action(KeyAction::FontReset, None, None);
         assert_eq!(app.font_mgr.font_size(), app.config.font_size());
     }
 
@@ -1340,7 +1409,7 @@ mod tests {
         app.copy_selection(None);
         assert_eq!(app.clipboard_text, Some("copied_text".to_string()));
 
-        app.paste_clipboard();
+        app.paste_clipboard(None);
     }
 
     #[test]
@@ -1352,8 +1421,9 @@ mod tests {
         let cw = f64::from(app.font_mgr.metrics.cell_width);
         let ch = f64::from(app.font_mgr.metrics.cell_height);
 
-        let (line, col) = app.cell_at_pointer(cw * 5.5, ch * 3.5);
+        let (line, screen_row, col) = app.cell_at_pointer(cw * 5.5, ch * 3.5);
         assert_eq!(col, 5);
+        assert_eq!(screen_row, 3);
         assert_eq!(line, 3);
     }
 }

@@ -24,4 +24,4 @@ pub use parser::Terminal;
 pub use pty::Pty;
 pub use render::{ColorScheme, RenderOptions, Renderer};
 pub use selection::{Selection, SelectionPoint, SelectionType, find_word_boundaries};
-pub use wayland::WaylandState;
+pub use wayland::{OfferData, WaylandState};

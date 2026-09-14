@@ -13,6 +13,13 @@ use wayland_protocols::xdg::shell::client::{
     xdg_surface::XdgSurface, xdg_toplevel::XdgToplevel, xdg_wm_base::XdgWmBase,
 };
 
+/// An incoming clipboard selection offer together with its advertised MIME types.
+#[derive(Debug, Clone)]
+pub struct OfferData {
+    pub offer: WlDataOffer,
+    pub mime_types: Vec<String>,
+}
+
 /// Tracks the lifecycle and handles of Wayland client globals and window surfaces.
 #[derive(Debug, Default)]
 pub struct WaylandState {
@@ -26,7 +33,7 @@ pub struct WaylandState {
     pub data_device_manager: Option<WlDataDeviceManager>,
     pub data_device: Option<WlDataDevice>,
     pub data_source: Option<WlDataSource>,
-    pub current_offer: Option<WlDataOffer>,
+    pub current_offer: Option<OfferData>,
 
     pub surface: Option<WlSurface>,
     pub xdg_surface: Option<XdgSurface>,
