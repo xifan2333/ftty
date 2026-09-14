@@ -4,6 +4,8 @@ use wayland_client::QueueHandle;
 use wayland_client::protocol::{
     wl_compositor::WlCompositor, wl_keyboard::WlKeyboard, wl_seat::WlSeat, wl_surface::WlSurface,
 };
+use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_manager_v3::ZwpTextInputManagerV3;
+use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::ZwpTextInputV3;
 use wayland_protocols::xdg::shell::client::{
     xdg_surface::XdgSurface, xdg_toplevel::XdgToplevel, xdg_wm_base::XdgWmBase,
 };
@@ -15,6 +17,8 @@ pub struct WaylandState {
     pub xdg_wm_base: Option<XdgWmBase>,
     pub seat: Option<WlSeat>,
     pub keyboard: Option<WlKeyboard>,
+    pub text_input_manager: Option<ZwpTextInputManagerV3>,
+    pub text_input: Option<ZwpTextInputV3>,
 
     pub surface: Option<WlSurface>,
     pub xdg_surface: Option<XdgSurface>,
@@ -68,5 +72,24 @@ impl WaylandState {
         self.surface = Some(surface);
         self.xdg_surface = Some(xdg_surface);
         self.xdg_toplevel = Some(toplevel);
+    }
+
+    /// Creates and initializes the `zwp_text_input_v3` instance once the manager and seat are available.
+    pub fn init_text_input<D>(&mut self, qh: &QueueHandle<D>)
+    where
+        D: wayland_client::Dispatch<ZwpTextInputV3, ()> + 'static,
+    {
+        if self.text_input.is_some() {
+            return;
+        }
+        let Some(manager) = &self.text_input_manager else {
+            return;
+        };
+        let Some(seat) = &self.seat else {
+            return;
+        };
+
+        let text_input = manager.get_text_input(seat, qh, ());
+        self.text_input = Some(text_input);
     }
 }
