@@ -44,6 +44,16 @@ wayland-protocols = { version = "0.32", features = [
 ] }
 xkbcommon = { version = "0.9", features = ["wayland"] }
 
+[lints.rust]
+# `unsafe` is confined to the audited FFI modules (`render`, `pty`), which opt back in
+# with an explicit `allow` so every other module is guaranteed safe Rust.
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+undocumented_unsafe_blocks = "deny"
+
 [profile.release]
 opt-level = 3
 lto = true

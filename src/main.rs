@@ -1,7 +1,5 @@
 //! ftty - Ultra-lightweight, Suckless Wayland terminal emulator with native Kitty graphics protocol
 
-#![deny(clippy::undocumented_unsafe_blocks)]
-
 use std::path::PathBuf;
 
 use ftty::{AppState, Config, Pty, Terminal, run_event_loop};
