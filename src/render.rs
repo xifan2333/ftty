@@ -908,7 +908,9 @@ fn build_vertices(
                 [0.2, 0.25, 0.35, 0.95],
             );
 
-            // Draw preedit glyph
+            // Draw preedit glyph, clipped to the cells that fit on this row so a wide
+            // fallback glyph cannot bleed past the right edge of the terminal.
+            let span_right = px + span_w;
             if let Some(glyph) = atlas.get(c, CellFlags::UNDERLINE, fonts)
                 && glyph.width > 0
                 && glyph.height > 0
@@ -918,12 +920,18 @@ fn build_vertices(
                 let [u, v] = glyph.position.map(|value| value as f32);
                 let w = glyph.width as f32;
                 let h = glyph.height as f32;
-                push_quad(
-                    vertices,
-                    [gx, gy, gx + w, gy + h],
-                    [[u, v], [u + w, v + h]],
-                    rgba(colors.foreground),
-                );
+                let left = gx.max(px);
+                let right = (gx + w).min(span_right);
+                if right > left {
+                    let u_left = u + (left - gx);
+                    let u_right = u + (right - gx);
+                    push_quad(
+                        vertices,
+                        [left, gy, right, gy + h],
+                        [[u_left, v], [u_right, v + h]],
+                        rgba(colors.foreground),
+                    );
+                }
             }
 
             // Draw preedit underline
@@ -1023,6 +1031,36 @@ mod tests {
         assert_eq!(cursor_cell(&grid), Some((0, 1, 2)));
         grid.cursor.visible = false;
         assert_eq!(cursor_cell(&grid), None);
+    }
+
+    #[test]
+    fn cjk_cells_render_through_fallback_faces() {
+        let fonts = FontManager::load(14.0).expect("system monospace font");
+        if fonts.face_key('中', CellFlags::empty()).face == 0 {
+            return; // No CJK-capable face is installed on this machine.
+        }
+        let mut grid = Grid::new(4, 1, 0);
+        grid.cursor.visible = false;
+        grid.lines[0].cells[0].c = '中';
+        grid.lines[0].cells[0].flags = CellFlags::WIDE_CHAR;
+        grid.lines[0].cells[1].flags = CellFlags::WIDE_CHAR_SPACER;
+
+        let mut atlas = GlyphAtlas::new(64, 64);
+        prepare_atlas(&grid, &fonts, &mut atlas, None);
+        let mut vertices = Vec::new();
+        build_vertices(
+            &mut vertices,
+            &grid,
+            ColorScheme::new(&default_256_palette(), DEFAULT_FG, DEFAULT_BG),
+            fonts.metrics,
+            &fonts,
+            &atlas,
+            RenderOptions::default(),
+        );
+        assert_eq!(vertices.len(), 48, "one quad for the wide CJK glyph");
+        // A rasterized glyph samples the atlas instead of using the solid placeholder.
+        assert!(vertices[2] >= 0.0, "expected a rasterized CJK glyph quad");
+        assert!(atlas.pixels.iter().any(|&pixel| pixel != 0));
     }
 
     #[test]
