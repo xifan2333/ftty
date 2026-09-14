@@ -206,7 +206,8 @@ impl AppState {
             if let Some(mime) = best_text_mime(&offer_data.mime_types) {
                 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
                 let mut fds = [0i32; 2];
-                if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } == 0 {
+                if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } == 0
+                {
                     let read_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
                     let write_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
 
@@ -217,19 +218,47 @@ impl AppState {
                         let _ = c.flush();
                     }
 
-                    let mut pfd = libc::pollfd {
-                        fd: read_fd.as_raw_fd(),
-                        events: libc::POLLIN,
-                        revents: 0,
-                    };
-                    let poll_res = unsafe { libc::poll(&mut pfd, 1, 100) };
-                    if poll_res > 0 && (pfd.revents & libc::POLLIN != 0) {
-                        let mut reader = std::fs::File::from(read_fd);
-                        let mut text = String::new();
-                        if reader.read_to_string(&mut text).is_ok() && !text.is_empty() {
-                            let _ = self.pty.write_all(text.as_bytes());
-                            return;
+                    let start = std::time::Instant::now();
+                    let mut text = String::new();
+                    let mut buf = [0u8; 8192];
+
+                    while start.elapsed() < std::time::Duration::from_millis(150) {
+                        let mut pfd = libc::pollfd {
+                            fd: read_fd.as_raw_fd(),
+                            events: libc::POLLIN,
+                            revents: 0,
+                        };
+                        let remaining_ms = 150u32
+                            .saturating_sub(start.elapsed().as_millis() as u32)
+                            .max(1);
+                        let poll_res = unsafe { libc::poll(&mut pfd, 1, remaining_ms as i32) };
+                        if poll_res <= 0 {
+                            break;
                         }
+                        let n = unsafe {
+                            libc::read(read_fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len())
+                        };
+                        if n > 0 {
+                            if let Ok(s) = std::str::from_utf8(&buf[..n as usize]) {
+                                text.push_str(s);
+                            }
+                        } else if n == 0 {
+                            break;
+                        } else {
+                            let err = std::io::Error::last_os_error();
+                            if err.kind() == std::io::ErrorKind::Interrupted {
+                                continue;
+                            }
+                            if err.kind() == std::io::ErrorKind::WouldBlock {
+                                continue;
+                            }
+                            break;
+                        }
+                    }
+
+                    if !text.is_empty() {
+                        let _ = self.pty.write_all(text.as_bytes());
+                        return;
                     }
                 }
             }
@@ -833,6 +862,9 @@ impl Dispatch<WlDataDevice, ()> for AppState {
     ) {
         match event {
             wl_data_device::Event::DataOffer { id } => {
+                if state.pending_offers.len() >= 4 {
+                    state.pending_offers.remove(0);
+                }
                 state.pending_offers.push(crate::wayland::OfferData {
                     offer: id,
                     mime_types: Vec::new(),
@@ -846,6 +878,9 @@ impl Dispatch<WlDataDevice, ()> for AppState {
                         .position(|o| o.offer == offer)
                         .map(|idx| state.pending_offers.swap_remove(idx))
                 });
+                if state.wayland.current_offer.is_none() {
+                    state.pending_offers.clear();
+                }
             }
             _ => {}
         }
@@ -865,8 +900,31 @@ impl Dispatch<WlDataSource, ()> for AppState {
             wl_data_source::Event::Send { mime_type: _, fd } => {
                 if let Some(text) = &state.clipboard_text {
                     use std::os::fd::AsRawFd;
+                    unsafe {
+                        let flags = libc::fcntl(fd.as_raw_fd(), libc::F_GETFL);
+                        if flags >= 0 {
+                            libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK);
+                        }
+                    }
+
+                    let start = std::time::Instant::now();
                     let mut bytes = text.as_bytes();
-                    while !bytes.is_empty() {
+
+                    while !bytes.is_empty()
+                        && start.elapsed() < std::time::Duration::from_millis(150)
+                    {
+                        let mut pfd = libc::pollfd {
+                            fd: fd.as_raw_fd(),
+                            events: libc::POLLOUT,
+                            revents: 0,
+                        };
+                        let remaining_ms = 150u32
+                            .saturating_sub(start.elapsed().as_millis() as u32)
+                            .max(1);
+                        let poll_res = unsafe { libc::poll(&mut pfd, 1, remaining_ms as i32) };
+                        if poll_res <= 0 {
+                            break;
+                        }
                         let res = unsafe {
                             libc::write(fd.as_raw_fd(), bytes.as_ptr().cast(), bytes.len())
                         };
@@ -875,6 +933,9 @@ impl Dispatch<WlDataSource, ()> for AppState {
                         } else if res < 0 {
                             let err = std::io::Error::last_os_error();
                             if err.kind() == std::io::ErrorKind::Interrupted {
+                                continue;
+                            }
+                            if err.kind() == std::io::ErrorKind::WouldBlock {
                                 continue;
                             }
                             break;
