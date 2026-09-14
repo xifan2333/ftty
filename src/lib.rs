@@ -10,6 +10,7 @@ pub mod grid;
 pub mod ime;
 pub mod input;
 pub mod kitty;
+pub mod mouse;
 pub mod parser;
 pub mod pty;
 pub mod render;
@@ -27,6 +28,7 @@ pub use kitty::{
     DeleteTarget, ImageData, ImagePlacement, KittyAction, KittyCommand, KittyEvent, KittyFormat,
     KittyMedium, KittyParser, kitty_response,
 };
+pub use mouse::{MouseEncoding, MouseModifiers, MouseState, MouseTracking, encode_mouse_event};
 pub use parser::Terminal;
 pub use pty::Pty;
 pub use render::{ColorScheme, RenderOptions, Renderer};

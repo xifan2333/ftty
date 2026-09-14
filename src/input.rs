@@ -202,22 +202,27 @@ impl KeyboardHandler {
         }
     }
 
+    /// Returns the currently effective modifier state.
+    #[must_use]
+    pub fn modifiers(&self) -> Modifiers {
+        let Some(state) = self.state.as_ref() else {
+            return Modifiers::default();
+        };
+        Modifiers {
+            ctrl: state.mod_name_is_active("Control", xkb::STATE_MODS_EFFECTIVE),
+            alt: state.mod_name_is_active("Mod1", xkb::STATE_MODS_EFFECTIVE),
+            shift: state.mod_name_is_active("Shift", xkb::STATE_MODS_EFFECTIVE),
+            logo: state.mod_name_is_active("Mod4", xkb::STATE_MODS_EFFECTIVE),
+        }
+    }
+
     /// Checks if a keycode matches an action in `KeybindingsConfig`.
     #[must_use]
     pub fn check_action(&self, key: u32, config: &KeybindingsConfig) -> Option<KeyAction> {
         let state = self.state.as_ref()?;
         let keycode = Keycode::new(key + 8);
         let sym = state.key_get_one_sym(keycode);
-        let ctrl = state.mod_name_is_active("Control", xkb::STATE_MODS_EFFECTIVE);
-        let alt = state.mod_name_is_active("Mod1", xkb::STATE_MODS_EFFECTIVE);
-        let shift = state.mod_name_is_active("Shift", xkb::STATE_MODS_EFFECTIVE);
-        let logo = state.mod_name_is_active("Mod4", xkb::STATE_MODS_EFFECTIVE);
-        let current_mods = Modifiers {
-            ctrl,
-            alt,
-            shift,
-            logo,
-        };
+        let current_mods = self.modifiers();
 
         let bindings = [
             (

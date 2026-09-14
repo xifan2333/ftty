@@ -4,6 +4,7 @@ use vte::{Params, Parser, Perform};
 
 use crate::color::Color;
 use crate::grid::{CellFlags, ClearMode, Grid};
+use crate::mouse::MouseState;
 
 /// Terminal emulation state machine combining a screen grid, current formatting attributes,
 /// and a VT parser.
@@ -12,6 +13,7 @@ pub struct Terminal {
     pub active_fg: Color,
     pub active_bg: Color,
     pub active_flags: CellFlags,
+    pub mouse: MouseState,
     pub title: String,
     parser: Parser,
 }
@@ -24,6 +26,7 @@ impl Terminal {
             active_fg: Color::DefaultForeground,
             active_bg: Color::DefaultBackground,
             active_flags: CellFlags::empty(),
+            mouse: MouseState::default(),
             title: String::new(),
             parser: Parser::new(),
         }
@@ -165,6 +168,14 @@ impl Perform for Terminal {
                 ('l', 1049) => self.grid.exit_alt_screen(),
                 _ => {}
             }
+            // Mouse modes are frequently bundled with other private modes in one
+            // sequence, so every parameter is offered to the mouse state.
+            if action == 'h' || action == 'l' {
+                let enabled = action == 'h';
+                for mode in &flat_params {
+                    self.mouse.apply_private_mode(*mode, enabled);
+                }
+            }
             return;
         }
 
@@ -304,6 +315,7 @@ impl Perform for Terminal {
                 // Full Reset (RIS)
                 self.grid.clear_screen(ClearMode::All);
                 self.grid.cursor = crate::grid::Cursor::default();
+                self.mouse = MouseState::default();
                 self.reset_attributes();
             }
             _ => {}
@@ -350,6 +362,41 @@ mod tests {
         let mut term = Terminal::new(80, 24, 100);
         term.advance_bytes(b"\x1b]0;ftty terminal\x07");
         assert_eq!(term.title, "ftty terminal");
+    }
+
+    #[test]
+    fn test_mouse_tracking_modes() {
+        use crate::mouse::{MouseEncoding, MouseTracking};
+
+        let mut term = Terminal::new(80, 24, 100);
+        assert!(!term.mouse.is_reporting());
+
+        term.advance_bytes(b"\x1b[?1002h\x1b[?1006h");
+        assert_eq!(term.mouse.tracking, MouseTracking::Drag);
+        assert_eq!(term.mouse.encoding, MouseEncoding::Sgr);
+        assert!(term.mouse.is_reporting());
+
+        // Bundled private modes must all be applied.
+        term.advance_bytes(b"\x1b[?1002l\x1b[?1006l");
+        assert!(!term.mouse.is_reporting());
+        assert_eq!(term.mouse.encoding, MouseEncoding::X10);
+
+        term.advance_bytes(b"\x1b[?1000;1006h");
+        assert_eq!(term.mouse.tracking, MouseTracking::Click);
+        assert_eq!(term.mouse.encoding, MouseEncoding::Sgr);
+
+        // A full reset returns to local selection.
+        term.advance_bytes(b"\x1bc");
+        assert!(!term.mouse.is_reporting());
+        assert_eq!(term.mouse.encoding, MouseEncoding::X10);
+    }
+
+    #[test]
+    fn test_cursor_visibility_does_not_disturb_mouse_modes() {
+        let mut term = Terminal::new(80, 24, 100);
+        term.advance_bytes(b"\x1b[?1000h\x1b[?25l");
+        assert!(term.mouse.is_reporting());
+        assert!(!term.grid.cursor.visible);
     }
 
     #[test]

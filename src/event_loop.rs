@@ -40,6 +40,7 @@ use crate::font::{CellMetrics, FontManager, GlyphAtlas};
 use crate::ime::ImeState;
 use crate::input::{KeyAction, KeyboardHandler};
 use crate::kitty::{ImagePlacement, KittyAction, KittyEvent, KittyParser, kitty_response};
+use crate::mouse::{MouseModifiers, encode_mouse_event};
 use crate::parser::Terminal;
 use crate::pty::Pty;
 use crate::render::{ColorScheme, RenderOptions, Renderer};
@@ -67,6 +68,10 @@ pub struct AppState {
     pub selection: Selection,
     pub mouse_pos: [f64; 2],
     pub mouse_pressed: bool,
+    /// Set while a button press was forwarded to a mouse-tracking application.
+    pub mouse_reported: bool,
+    /// X11 button index most recently forwarded to the PTY, used for drag motion.
+    pub mouse_button: u8,
     pub last_click_time: u32,
     pub click_count: u8,
     pub last_click_cell: Option<(usize, usize)>,
@@ -151,6 +156,8 @@ impl AppState {
             ),
             mouse_pos: [0.0, 0.0],
             mouse_pressed: false,
+            mouse_reported: false,
+            mouse_button: 0,
             last_click_time: 0,
             click_count: 0,
             last_click_cell: None,
@@ -182,6 +189,43 @@ impl AppState {
         let abs_line =
             self.terminal.grid.scrollback.len() + screen_row - self.terminal.grid.viewport_offset;
         (abs_line, screen_row, col)
+    }
+
+    /// Encodes a pointer event for the application, or `None` when the event stays local.
+    ///
+    /// Mouse reports are suppressed while tracking is disabled and while Shift is held,
+    /// which is the conventional override that hands the pointer back to text selection.
+    fn mouse_report_bytes(&self, button: u8, pressed: bool, motion: bool) -> Option<Vec<u8>> {
+        if !self.terminal.mouse.is_reporting() {
+            return None;
+        }
+        let modifiers = self.keyboard.modifiers();
+        if modifiers.shift {
+            return None;
+        }
+        let (_, screen_row, col) = self.cell_at_pointer(self.mouse_pos[0], self.mouse_pos[1]);
+        encode_mouse_event(
+            self.terminal.mouse.encoding,
+            button,
+            col,
+            screen_row,
+            pressed,
+            motion,
+            MouseModifiers {
+                shift: false,
+                alt: modifiers.alt,
+                ctrl: modifiers.ctrl,
+            },
+        )
+    }
+
+    /// Forwards a pointer event to the PTY and reports whether the application consumed it.
+    fn report_mouse_event(&mut self, button: u8, pressed: bool, motion: bool) -> bool {
+        let Some(bytes) = self.mouse_report_bytes(button, pressed, motion) else {
+            return false;
+        };
+        self.write_pty_blocking(&bytes);
+        true
     }
 
     /// Copies the currently selected text to the Wayland clipboard and internal buffer.
@@ -448,6 +492,16 @@ impl AppState {
         // A resize must be committed even if the compositor suspended the old frame callback.
         self.frame_callback = None;
         Ok(())
+    }
+}
+
+/// Maps a Linux input button code to the X11 mouse button index used on the wire.
+fn x11_button_index(button: u32) -> Option<u8> {
+    match button {
+        0x110 => Some(0), // BTN_LEFT
+        0x111 => Some(1), // BTN_MIDDLE
+        0x112 => Some(2), // BTN_RIGHT
+        _ => None,
     }
 }
 
@@ -730,6 +784,12 @@ impl Dispatch<WlPointer, ()> for AppState {
                 ..
             } => {
                 state.mouse_pos = [surface_x, surface_y];
+                let held = state.mouse_reported;
+                if state.terminal.mouse.reports_motion(held)
+                    && state.report_mouse_event(state.mouse_button, held, true)
+                {
+                    return;
+                }
                 if state.mouse_pressed {
                     let (line, _, col) = state.cell_at_pointer(surface_x, surface_y);
                     state.selection.end = SelectionPoint::new(line, col);
@@ -743,61 +803,77 @@ impl Dispatch<WlPointer, ()> for AppState {
                 serial,
             } => {
                 state.last_serial = serial;
-                if button == 0x110 {
-                    // BTN_LEFT
-                    let (line, screen_row, col) =
-                        state.cell_at_pointer(state.mouse_pos[0], state.mouse_pos[1]);
-                    let same_cell = state.last_click_cell == Some((line, col));
-                    if same_cell && time.saturating_sub(state.last_click_time) < 350 {
-                        state.click_count = (state.click_count % 3) + 1;
-                    } else {
-                        state.click_count = 1;
-                    }
-                    state.last_click_time = time;
-                    state.last_click_cell = Some((line, col));
-                    state.mouse_pressed = true;
-
-                    match state.click_count {
-                        1 => {
-                            state.selection = Selection::new(
-                                SelectionPoint::new(line, col),
-                                SelectionPoint::new(line, col),
-                                SelectionType::Simple,
-                            );
-                        }
-                        2 => {
-                            let row = state.terminal.grid.visible_line(screen_row);
-                            let (w_start, w_end) = find_word_boundaries(row, col);
-                            state.selection = Selection::new(
-                                SelectionPoint::new(line, w_start),
-                                SelectionPoint::new(line, w_end),
-                                SelectionType::Word,
-                            );
-                        }
-                        3 => {
-                            state.selection = Selection::new(
-                                SelectionPoint::new(line, 0),
-                                SelectionPoint::new(
-                                    line,
-                                    state.terminal.grid.cols.saturating_sub(1),
-                                ),
-                                SelectionType::Line,
-                            );
-                        }
-                        _ => {}
-                    }
-                    state.needs_redraw = true;
-                } else if button == 0x112 {
-                    // BTN_MIDDLE: paste
-                    state.paste_clipboard(Some(conn));
+                let Some(index) = x11_button_index(button) else {
+                    return;
+                };
+                // Applications that requested mouse tracking own the event; Shift
+                // always overrides tracking so text can still be selected.
+                if state.report_mouse_event(index, true, false) {
+                    state.mouse_reported = true;
+                    state.mouse_button = index;
+                    return;
                 }
+                if index == 1 {
+                    // BTN_MIDDLE pastes the primary selection, as elsewhere on X11.
+                    state.paste_clipboard(Some(conn));
+                    return;
+                }
+                if index != 0 {
+                    return;
+                }
+                let (line, screen_row, col) =
+                    state.cell_at_pointer(state.mouse_pos[0], state.mouse_pos[1]);
+                let same_cell = state.last_click_cell == Some((line, col));
+                if same_cell && time.saturating_sub(state.last_click_time) < 350 {
+                    state.click_count = (state.click_count % 3) + 1;
+                } else {
+                    state.click_count = 1;
+                }
+                state.last_click_time = time;
+                state.last_click_cell = Some((line, col));
+                state.mouse_pressed = true;
+
+                match state.click_count {
+                    1 => {
+                        state.selection = Selection::new(
+                            SelectionPoint::new(line, col),
+                            SelectionPoint::new(line, col),
+                            SelectionType::Simple,
+                        );
+                    }
+                    2 => {
+                        let row = state.terminal.grid.visible_line(screen_row);
+                        let (w_start, w_end) = find_word_boundaries(row, col);
+                        state.selection = Selection::new(
+                            SelectionPoint::new(line, w_start),
+                            SelectionPoint::new(line, w_end),
+                            SelectionType::Word,
+                        );
+                    }
+                    3 => {
+                        state.selection = Selection::new(
+                            SelectionPoint::new(line, 0),
+                            SelectionPoint::new(line, state.terminal.grid.cols.saturating_sub(1)),
+                            SelectionType::Line,
+                        );
+                    }
+                    _ => {}
+                }
+                state.needs_redraw = true;
             }
             wl_pointer::Event::Button {
                 button,
                 state: WEnum::Value(ButtonState::Released),
                 ..
             } => {
-                if button == 0x110 {
+                let Some(index) = x11_button_index(button) else {
+                    return;
+                };
+                if state.mouse_reported {
+                    state.mouse_reported = false;
+                    state.report_mouse_event(index, false, false);
+                }
+                if index == 0 {
                     state.mouse_pressed = false;
                 }
             }
@@ -810,27 +886,31 @@ impl Dispatch<WlPointer, ()> for AppState {
                 state.scroll_accumulator += (value / 15.0) * multiplier;
 
                 let lines = state.scroll_accumulator.trunc() as i32;
-                if lines != 0 {
-                    state.scroll_accumulator -= f64::from(lines);
-                    if state.terminal.grid.is_alt_screen() {
-                        let count = (lines.unsigned_abs() as usize).min(100);
-                        let seq: &[u8] = if lines < 0 { b"\x1b[A" } else { b"\x1b[B" };
-                        let batch = seq.repeat(count);
-                        let _ = state.pty.write_all(&batch);
-                    } else {
-                        if lines < 0 {
-                            state
-                                .terminal
-                                .grid
-                                .scroll_viewport_up(lines.unsigned_abs() as usize);
-                        } else {
-                            state
-                                .terminal
-                                .grid
-                                .scroll_viewport_down(lines.unsigned_abs() as usize);
+                if lines == 0 {
+                    return;
+                }
+                state.scroll_accumulator -= f64::from(lines);
+                let count = (lines.unsigned_abs() as usize).min(100);
+
+                if state.terminal.mouse.is_reporting() && !state.keyboard.modifiers().shift {
+                    // Wheel notches are reported as buttons 64 (up) and 65 (down).
+                    let button = if lines < 0 { 64 } else { 65 };
+                    for _ in 0..count {
+                        if !state.report_mouse_event(button, true, false) {
+                            break;
                         }
-                        state.needs_redraw = true;
                     }
+                } else if state.terminal.grid.is_alt_screen() {
+                    let seq: &[u8] = if lines < 0 { b"\x1b[A" } else { b"\x1b[B" };
+                    let batch = seq.repeat(count);
+                    let _ = state.pty.write_all(&batch);
+                } else {
+                    if lines < 0 {
+                        state.terminal.grid.scroll_viewport_up(count);
+                    } else {
+                        state.terminal.grid.scroll_viewport_down(count);
+                    }
+                    state.needs_redraw = true;
                 }
             }
             wl_pointer::Event::AxisStop { .. } => {
@@ -1604,6 +1684,121 @@ mod tests {
         assert_eq!(app.clipboard_text, Some("copied_text".to_string()));
 
         app.paste_clipboard(None);
+    }
+
+    #[test]
+    fn pointer_events_from_the_wire_drive_mouse_reports() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+        use wayland_client::Proxy;
+
+        use crate::mouse::{MouseEncoding, MouseTracking};
+
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let conn = Connection::from_socket(client).unwrap();
+        let mut queue = conn.new_event_queue::<AppState>();
+        let qh = queue.handle();
+        let registry = conn.display().get_registry(&qh, ());
+        let seat = registry.bind::<WlSeat, _, _>(1, 5, &qh, ());
+
+        // wl_seat.capabilities(pointer): the client binds wl_pointer in response.
+        let mut events = Vec::new();
+        for word in [seat.id().protocol_id(), 12 << 16, 1] {
+            events.extend_from_slice(&word.to_ne_bytes());
+        }
+        server.write_all(&events).unwrap();
+
+        let term = Terminal::new(80, 24, 100);
+        let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).unwrap();
+        let mut app = AppState::new(term, pty).unwrap();
+        app.terminal.mouse.tracking = MouseTracking::Drag;
+        app.terminal.mouse.encoding = MouseEncoding::Sgr;
+        conn.prepare_read().unwrap().read().unwrap();
+        queue.dispatch_pending(&mut app).unwrap();
+
+        let pointer = app.wayland.pointer.clone().expect("wl_pointer bound");
+        let pointer_id = pointer.id().protocol_id();
+        let cw = app.font_mgr.metrics.cell_width as f64;
+        let ch = app.font_mgr.metrics.cell_height as f64;
+        let x = ((cw * 2.5) * 256.0) as i32 as u32;
+        let y = ((ch * 1.5) * 256.0) as i32 as u32;
+
+        // wl_pointer.motion(time, x, y) followed by wl_pointer.button(serial, time, BTN_LEFT, pressed).
+        let mut events = Vec::new();
+        for word in [pointer_id, (20 << 16) | 2, 7, x, y] {
+            events.extend_from_slice(&word.to_ne_bytes());
+        }
+        for word in [pointer_id, (24 << 16) | 3, 9, 9, 0x110, 1] {
+            events.extend_from_slice(&word.to_ne_bytes());
+        }
+        server.write_all(&events).unwrap();
+        conn.prepare_read().unwrap().read().unwrap();
+        queue.dispatch_pending(&mut app).unwrap();
+
+        assert!(app.mouse_reported, "left press was not forwarded");
+        assert_eq!(app.mouse_button, 0);
+        assert!(
+            !app.mouse_pressed,
+            "local selection must stay idle while reporting"
+        );
+        assert_eq!(app.last_serial, 9);
+
+        // Turning tracking off hands the very same press back to local selection.
+        app.terminal.mouse.tracking = MouseTracking::Disabled;
+        app.mouse_reported = false;
+        let mut events = Vec::new();
+        for word in [pointer_id, (24 << 16) | 3, 10, 10, 0x110, 1] {
+            events.extend_from_slice(&word.to_ne_bytes());
+        }
+        server.write_all(&events).unwrap();
+        conn.prepare_read().unwrap().read().unwrap();
+        queue.dispatch_pending(&mut app).unwrap();
+        assert!(app.mouse_pressed);
+        assert!(!app.mouse_reported);
+        assert_eq!(app.selection.start, SelectionPoint::new(1, 2));
+    }
+
+    #[test]
+    fn x11_buttons_map_to_protocol_indexes() {
+        assert_eq!(x11_button_index(0x110), Some(0));
+        assert_eq!(x11_button_index(0x111), Some(1));
+        assert_eq!(x11_button_index(0x112), Some(2));
+        assert_eq!(x11_button_index(0x113), None);
+    }
+
+    #[test]
+    fn mouse_reports_are_forwarded_only_when_tracking_is_enabled() {
+        use crate::mouse::{MouseEncoding, MouseTracking};
+
+        let term = Terminal::new(80, 24, 100);
+        let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
+        let mut app = AppState::new(term, pty).expect("AppState new");
+        let cw = f64::from(app.font_mgr.metrics.cell_width);
+        let ch = f64::from(app.font_mgr.metrics.cell_height);
+        app.mouse_pos = [cw * 2.5, ch * 1.5];
+
+        // Tracking disabled: the pointer stays available for local text selection.
+        assert!(app.mouse_report_bytes(0, true, false).is_none());
+
+        app.terminal.mouse.tracking = MouseTracking::Drag;
+        app.terminal.mouse.encoding = MouseEncoding::Sgr;
+        assert_eq!(
+            app.mouse_report_bytes(0, true, false),
+            Some(b"\x1b[<0;3;2M".to_vec())
+        );
+        assert_eq!(
+            app.mouse_report_bytes(0, false, false),
+            Some(b"\x1b[<0;3;2m".to_vec())
+        );
+        assert_eq!(
+            app.mouse_report_bytes(64, true, false),
+            Some(b"\x1b[<64;3;2M".to_vec())
+        );
+
+        // Shift is the conventional escape hatch back to local selection.
+        app.keyboard.update_modifiers(1, 0, 0, 0);
+        assert!(app.keyboard.modifiers().shift);
+        assert!(app.mouse_report_bytes(0, true, false).is_none());
     }
 
     #[test]
