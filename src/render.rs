@@ -204,9 +204,16 @@ precision mediump float;
 varying mediump vec2 v_tex_coords;
 varying lowp vec4 v_color;
 uniform sampler2D u_texture;
+// 0 = single-channel glyph coverage, 1 = RGBA kitty image placement.
+uniform int u_image_mode;
 void main() {
-    float alpha = v_tex_coords.x < 0.0 ? 1.0 : texture2D(u_texture, v_tex_coords).a;
-    gl_FragColor = vec4(v_color.rgb, v_color.a * alpha);
+    if (u_image_mode == 1) {
+        vec4 texel = texture2D(u_texture, v_tex_coords);
+        gl_FragColor = vec4(texel.rgb, texel.a * v_color.a);
+    } else {
+        float alpha = v_tex_coords.x < 0.0 ? 1.0 : texture2D(u_texture, v_tex_coords).a;
+        gl_FragColor = vec4(v_color.rgb, v_color.a * alpha);
+    }
 }
 "#;
 
@@ -271,6 +278,7 @@ pub struct Renderer {
     texture: Option<glow::Texture>,
     viewport: Option<glow::UniformLocation>,
     atlas_size: Option<glow::UniformLocation>,
+    image_mode: Option<glow::UniformLocation>,
     image_textures: HashMap<u32, (glow::Texture, u32, u32, u64)>,
     vertices: Vec<f32>,
     egl: EglContext,
@@ -300,19 +308,21 @@ impl Renderer {
             texture: None,
             viewport: None,
             atlas_size: None,
+            image_mode: None,
             image_textures: HashMap::new(),
             vertices: Vec::with_capacity(8192),
             egl,
         };
         // SAFETY: the owned EGL context is current for all initialization calls.
         unsafe {
-            renderer.program = Some(create_program(&renderer.gl)?);
+            let program = create_program(&renderer.gl)?;
+            renderer.program = Some(program);
             renderer.vbo = Some(renderer.gl.create_buffer().map_err(io::Error::other)?);
             renderer.texture = Some(renderer.gl.create_texture().map_err(io::Error::other)?);
             let gl = &renderer.gl;
-            let program = renderer.program.expect("initialized program");
             renderer.viewport = gl.get_uniform_location(program, "u_viewport");
             renderer.atlas_size = gl.get_uniform_location(program, "u_atlas_size");
+            renderer.image_mode = gl.get_uniform_location(program, "u_image_mode");
             gl.use_program(Some(program));
             gl.uniform_1_i32(gl.get_uniform_location(program, "u_texture").as_ref(), 0);
             gl.active_texture(glow::TEXTURE0);
@@ -407,6 +417,7 @@ impl Renderer {
                 atlas.dirty = false;
             }
             gl.use_program(self.program);
+            gl.uniform_1_i32(self.image_mode.as_ref(), 0);
             gl.uniform_2_f32(self.viewport.as_ref(), width as f32, height as f32);
             gl.uniform_2_f32(
                 self.atlas_size.as_ref(),
@@ -559,8 +570,10 @@ impl Renderer {
             // belong to it. img_vertices contains six initialized vertices of eight
             // f32 values, with no padding, and remains live throughout the byte upload.
             unsafe {
+                gl.use_program(self.program);
                 gl.active_texture(glow::TEXTURE0);
                 gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                gl.uniform_1_i32(self.image_mode.as_ref(), 1);
                 gl.uniform_2_f32(self.atlas_size.as_ref(), img_w as f32, img_h as f32);
 
                 gl.bind_buffer(glow::ARRAY_BUFFER, self.vbo);
@@ -585,12 +598,13 @@ impl Renderer {
     /// # Errors
     /// Returns an error if EGL cannot present the buffer.
     pub fn present(&self) -> io::Result<()> {
+        let surface = self
+            .egl
+            .surface
+            .ok_or_else(|| io::Error::other("EGL window surface is not initialized"))?;
         self.egl
             .egl
-            .swap_buffers(
-                self.egl.display,
-                self.egl.surface.expect("initialized EGL surface"),
-            )
+            .swap_buffers(self.egl.display, surface)
             .map_err(io::Error::other)
     }
 }
@@ -1009,6 +1023,15 @@ mod tests {
         assert_eq!(cursor_cell(&grid), Some((0, 1, 2)));
         grid.cursor.visible = false;
         assert_eq!(cursor_cell(&grid), None);
+    }
+
+    #[test]
+    fn image_fragment_shader_preserves_rgba_channels() {
+        // Regression guard: image placements must sample the uploaded RGBA texture rather
+        // than reusing the alpha-only glyph path, which renders every image as a white box.
+        assert!(FRAGMENT_SHADER.contains("u_image_mode"));
+        assert!(FRAGMENT_SHADER.contains("texel.rgb"));
+        assert!(FRAGMENT_SHADER.contains("texel.a"));
     }
 
     #[test]

@@ -25,7 +25,7 @@ pub use ime::{ImeState, Preedit, calculate_cursor_rect};
 pub use input::{KeyAction, KeyboardHandler, parse_key_combo};
 pub use kitty::{
     DeleteTarget, ImageData, ImagePlacement, KittyAction, KittyCommand, KittyEvent, KittyFormat,
-    KittyMedium, KittyParser,
+    KittyMedium, KittyParser, kitty_response,
 };
 pub use parser::Terminal;
 pub use pty::Pty;

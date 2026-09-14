@@ -39,7 +39,7 @@ use crate::config::Config;
 use crate::font::{CellMetrics, FontManager, GlyphAtlas};
 use crate::ime::ImeState;
 use crate::input::{KeyAction, KeyboardHandler};
-use crate::kitty::{ImagePlacement, KittyAction, KittyEvent, KittyParser};
+use crate::kitty::{ImagePlacement, KittyAction, KittyEvent, KittyParser, kitty_response};
 use crate::parser::Terminal;
 use crate::pty::Pty;
 use crate::render::{ColorScheme, RenderOptions, Renderer};
@@ -1080,6 +1080,7 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
                             KittyEvent::Transmit { command, image } => {
                                 let image_id = image.id;
                                 let placement_id = command.placement_id.unwrap_or(0);
+                                let ack_id = command.placement_id.filter(|id| *id != 0);
                                 let img_w = (image.width as f32).max(1.0);
                                 let img_h = (image.height as f32).max(1.0);
                                 state.terminal.grid.add_image(image);
@@ -1128,29 +1129,52 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
                                             .min(state.terminal.grid.cols.saturating_sub(1));
                                 }
 
-                                if command.action == KittyAction::TransmitAndDisplayWithResponse {
-                                    let resp = format!("\x1b_Gi={image_id};OK\x1b\\").into_bytes();
+                                // `a=T` always wants an acknowledgement; `a=t` only when
+                                // the client opted in with an explicit image id. `q=1`
+                                // suppresses OK responses and `q=2` suppresses everything.
+                                let wants_ack = command.action
+                                    == KittyAction::TransmitAndDisplayWithResponse
+                                    || command.id_explicit;
+                                if wants_ack && command.quiet == 0 {
+                                    let resp = kitty_response(image_id, ack_id, "OK");
                                     state.write_pty_blocking(&resp);
                                 }
                             }
                             KittyEvent::Place { command } => {
-                                if let Some(image_id) = command.image_id {
-                                    let placement_id = command.placement_id.unwrap_or(0);
-                                    let cols = command.cols.unwrap_or(1) as usize;
-                                    let rows = command.rows.unwrap_or(1) as usize;
-                                    let abs_line = state.terminal.grid.scrollback.len()
-                                        + state.terminal.grid.cursor.row;
-                                    state.terminal.grid.add_placement(ImagePlacement {
-                                        image_id,
-                                        placement_id,
-                                        line: abs_line,
-                                        col: state.terminal.grid.cursor.col,
-                                        cols,
-                                        rows,
-                                        offset_x: command.offset_x,
-                                        offset_y: command.offset_y,
-                                        z_index: command.z_index,
-                                    });
+                                let Some(image_id) = command.image_id else {
+                                    continue;
+                                };
+                                let placement_id = command.placement_id.unwrap_or(0);
+                                let ack_id = command.placement_id.filter(|id| *id != 0);
+                                if !state.terminal.grid.images.contains_key(&image_id) {
+                                    if command.quiet < 2 {
+                                        let resp = kitty_response(
+                                            image_id,
+                                            ack_id,
+                                            "ENOENT:image not found",
+                                        );
+                                        state.write_pty_blocking(&resp);
+                                    }
+                                    continue;
+                                }
+                                let cols = command.cols.unwrap_or(1) as usize;
+                                let rows = command.rows.unwrap_or(1) as usize;
+                                let abs_line = state.terminal.grid.scrollback.len()
+                                    + state.terminal.grid.cursor.row;
+                                state.terminal.grid.add_placement(ImagePlacement {
+                                    image_id,
+                                    placement_id,
+                                    line: abs_line,
+                                    col: state.terminal.grid.cursor.col,
+                                    cols,
+                                    rows,
+                                    offset_x: command.offset_x,
+                                    offset_y: command.offset_y,
+                                    z_index: command.z_index,
+                                });
+                                if command.quiet == 0 {
+                                    let resp = kitty_response(image_id, ack_id, "OK");
+                                    state.write_pty_blocking(&resp);
                                 }
                             }
                             KittyEvent::Delete { target } => {

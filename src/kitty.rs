@@ -57,6 +57,9 @@ pub struct KittyCommand {
     pub medium: KittyMedium,
     pub delete_target: DeleteTarget,
     pub image_id: Option<u32>,
+    /// Whether the client sent an explicit `i=` key. The protocol only requires an
+    /// `OK`/error acknowledgement when the client opted in by supplying an image id.
+    pub id_explicit: bool,
     pub placement_id: Option<u32>,
     pub width: Option<u32>,
     pub height: Option<u32>,
@@ -234,8 +237,7 @@ impl KittyParser {
         // Capability probing query (a=q)
         if command.action == KittyAction::Query {
             let id = command.image_id.unwrap_or(0);
-            let response = format!("\x1b_Gi={id};OK\x1b\\").into_bytes();
-            return Some(KittyEvent::Response(response));
+            return Some(KittyEvent::Response(kitty_response(id, None, "OK")));
         }
 
         // Delete action (a=d)
@@ -284,13 +286,29 @@ impl KittyParser {
             }
             Err(err) => {
                 if full_command.quiet < 2 {
-                    let response = format!("\x1b_Gi={image_id};{err}\x1b\\").into_bytes();
-                    Some(KittyEvent::Response(response))
+                    Some(KittyEvent::Response(kitty_response(
+                        image_id,
+                        full_command.placement_id,
+                        &err.to_string(),
+                    )))
                 } else {
                     None
                 }
             }
         }
+    }
+}
+
+/// Encodes a Kitty graphics acknowledgement for an image and optional placement id.
+///
+/// The wire format is `<ESC>_Gi=<id>[,p=<placement id>];<message><ESC>\\`.
+#[must_use]
+pub fn kitty_response(image_id: u32, placement_id: Option<u32>, message: &str) -> Vec<u8> {
+    match placement_id.filter(|id| *id != 0) {
+        Some(placement_id) => {
+            format!("\x1b_Gi={image_id},p={placement_id};{message}\x1b\\").into_bytes()
+        }
+        None => format!("\x1b_Gi={image_id};{message}\x1b\\").into_bytes(),
     }
 }
 
@@ -343,6 +361,7 @@ pub fn parse_control_keys(s: &str) -> KittyCommand {
             "v" => cmd.height = val.parse().ok(),
             "i" => {
                 cmd.image_id = val.parse().ok();
+                cmd.id_explicit = true;
             }
             "p" => cmd.placement_id = val.parse().ok(),
             "c" => cmd.cols = val.parse().ok(),
@@ -774,5 +793,47 @@ mod tests {
         let cmd = parse_control_keys("d=i,i=7,a=d");
         assert_eq!(cmd.action, KittyAction::Delete);
         assert_eq!(cmd.delete_target, DeleteTarget::ById(7));
+    }
+
+    #[test]
+    fn explicit_image_id_tracking() {
+        assert!(parse_control_keys("a=t,i=7").id_explicit);
+        assert!(parse_control_keys("i=7").image_id == Some(7));
+        assert!(!parse_control_keys("a=t").id_explicit);
+        assert!(parse_control_keys("a=t").image_id.is_none());
+    }
+
+    #[test]
+    fn response_encoding_includes_only_real_placement_ids() {
+        assert_eq!(
+            kitty_response(3, None, "OK"),
+            b"\x1b_Gi=3;OK\x1b\\".to_vec()
+        );
+        assert_eq!(
+            kitty_response(3, Some(0), "OK"),
+            b"\x1b_Gi=3;OK\x1b\\".to_vec()
+        );
+        assert_eq!(
+            kitty_response(3, Some(5), "ENOENT:image not found"),
+            b"\x1b_Gi=3,p=5;ENOENT:image not found\x1b\\".to_vec()
+        );
+    }
+
+    #[test]
+    fn chunked_transmit_preserves_explicit_id_and_quiet() {
+        let b64 = BASE64_STANDARD.encode([1u8, 2, 3, 4]);
+        let first = format!("\x1b_Ga=t,f=32,s=1,v=1,i=9,q=0,m=1;{}\x1b\\", &b64[..2]);
+        let last = format!("\x1b_Gm=0;{}\x1b\\", &b64[2..]);
+        let mut parser = KittyParser::new();
+        assert!(parser.filter_bytes(first.as_bytes()).1.is_empty());
+        let (_, events) = parser.filter_bytes(last.as_bytes());
+        match &events[0] {
+            KittyEvent::Transmit { command, .. } => {
+                assert!(command.id_explicit);
+                assert_eq!(command.image_id, Some(9));
+                assert_eq!(command.quiet, 0);
+            }
+            other => panic!("Expected Transmit, got {other:?}"),
+        }
     }
 }
