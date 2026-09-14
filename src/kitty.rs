@@ -1,13 +1,12 @@
 //! Native Kitty Graphics Protocol APC sequence parser and image loader.
 
 use std::fs;
-use std::io::{self, Cursor};
-use std::num::NonZeroUsize;
+use std::io::{self, Cursor, Read};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use nix::fcntl::OFlag;
-use nix::sys::mman::{MapFlags, ProtFlags, mmap, munmap, shm_open};
+use nix::sys::mman::shm_open;
 use nix::sys::stat::Mode;
 
 /// Kitty graphics action requested by the client.
@@ -111,6 +110,8 @@ pub enum KittyEvent {
 }
 
 const MAX_APC_PAYLOAD: usize = 32 * 1024 * 1024;
+// A shared-memory APC contains only a name, so its backing object needs a separate cap.
+const MAX_SHM_PAYLOAD: u64 = 32 * 1024 * 1024;
 
 /// State machine intercepting Kitty APC graphics sequences (`\x1b_G...;payload\x1b\`) from the byte stream.
 #[derive(Default)]
@@ -468,35 +469,28 @@ fn decode_image_data(id: u32, cmd: &KittyCommand, raw_payload: &[u8]) -> io::Res
 
 fn read_shm_payload(name: &str) -> io::Result<Vec<u8>> {
     let file = fs::File::from(shm_open(name, OFlag::O_RDONLY, Mode::empty())?);
-    let size = usize::try_from(file.metadata()?.len())
-        .ok()
-        .filter(|&size| size <= isize::MAX as usize)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "shared memory is too large"))?;
-    let Some(length) = NonZeroUsize::new(size) else {
-        return Ok(Vec::new());
-    };
+    let size = file.metadata()?.len();
+    read_shm_bytes(file, size)
+}
 
-    // SAFETY: file owns a readable shm descriptor and length is its nonzero size.
-    // No fixed address is requested, and the mapping is only read, never written.
-    let ptr = unsafe {
-        mmap(
-            None,
-            length,
-            ProtFlags::PROT_READ,
-            MapFlags::MAP_SHARED,
-            &file,
-            0,
-        )
-    }?;
+fn read_shm_bytes(mut file: fs::File, size: u64) -> io::Result<Vec<u8>> {
+    if size > MAX_SHM_PAYLOAD {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "shared memory exceeds the 32 MiB image payload limit",
+        ));
+    }
 
-    // SAFETY: mmap returned a non-null, readable region of size bytes, bounded by
-    // isize::MAX. Kitty senders must keep its contents and size stable during the
-    // transfer. The slice is copied before the mapping is released below.
-    let bytes = unsafe { std::slice::from_raw_parts(ptr.as_ptr().cast::<u8>(), size) }.to_vec();
-
-    // SAFETY: ptr and size describe the live mapping created above; no references
-    // to it remain, since bytes owns a separate copy of the payload.
-    unsafe { munmap(ptr, size) }?;
+    // The sender may resize its object at any time. Read into owned memory so a
+    // concurrent truncate returns an I/O error instead of faulting mapped pages.
+    let mut bytes = vec![0; size as usize];
+    file.read_exact(&mut bytes)?;
+    if file.metadata()?.len() != size {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "shared memory changed size during transfer",
+        ));
+    }
 
     Ok(bytes)
 }
@@ -561,7 +555,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shared_memory_loads_empty_and_rgba_payloads() {
+    fn shared_memory_loads_images_and_rejects_oversized_payloads() {
         use nix::sys::mman::shm_unlink;
         use std::io::Write;
 
@@ -595,6 +589,36 @@ mod tests {
             decode_image_data(7, &command, BASE64_STANDARD.encode(&name.0).as_bytes()).unwrap();
         assert_eq!(image.rgba, pixels);
         assert_eq!((image.id, image.width, image.height), (7, 1, 1));
+
+        // A sparse object can exceed the cap without consuming that much RAM.
+        file.set_len(MAX_SHM_PAYLOAD + 1).unwrap();
+        assert_eq!(
+            read_shm_payload(&name.0).unwrap_err().kind(),
+            io::ErrorKind::InvalidData,
+        );
+    }
+
+    #[test]
+    fn shared_memory_size_changes_are_rejected() {
+        use nix::sys::memfd::{MFdFlags, memfd_create};
+
+        for (initial, changed, error_kind) in [
+            (4, 2, io::ErrorKind::UnexpectedEof),
+            (4, 8, io::ErrorKind::InvalidData),
+            (0, 1, io::ErrorKind::InvalidData),
+        ] {
+            let fd = memfd_create(c"ftty-shm-resize-test", MFdFlags::MFD_CLOEXEC).unwrap();
+            let file = fs::File::from(fd);
+            file.set_len(initial).unwrap();
+            let observed_size = file.metadata().unwrap().len();
+
+            // Deterministically simulate the sender resizing after the size query.
+            file.set_len(changed).unwrap();
+            assert_eq!(
+                read_shm_bytes(file, observed_size).unwrap_err().kind(),
+                error_kind,
+            );
+        }
     }
 
     #[test]
