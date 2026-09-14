@@ -17,6 +17,8 @@ use wayland_client::protocol::{
     wl_surface::WlSurface,
 };
 use wayland_client::{Connection, Dispatch, QueueHandle, WEnum};
+use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_manager_v3::ZwpTextInputManagerV3;
+use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::{self, ZwpTextInputV3};
 use wayland_protocols::xdg::shell::client::{
     xdg_surface::{self, XdgSurface},
     xdg_toplevel::{self, XdgToplevel},
@@ -26,6 +28,7 @@ use wayland_protocols::xdg::shell::client::{
 use crate::color::Rgb;
 use crate::config::Config;
 use crate::font::{CellMetrics, FontManager, GlyphAtlas};
+use crate::ime::ImeState;
 use crate::input::KeyboardHandler;
 use crate::parser::Terminal;
 use crate::pty::Pty;
@@ -42,6 +45,7 @@ pub struct AppState {
     pub wayland: WaylandState,
     pub font_mgr: FontManager,
     pub atlas: GlyphAtlas,
+    pub ime: ImeState,
     pub config: Config,
     pub config_path: Option<PathBuf>,
     pub palette: [Rgb; 256],
@@ -99,6 +103,7 @@ impl AppState {
             wayland,
             font_mgr,
             atlas,
+            ime: ImeState::new(),
             config,
             config_path,
             renderer: None,
@@ -111,6 +116,20 @@ impl AppState {
             pending_size: None,
             render_error: None,
         })
+    }
+
+    /// Updates the Wayland `text-input-v3` cursor bounding box so the IME popup window tracks the cursor.
+    pub fn update_ime_cursor_area(&self) {
+        let Some(text_input) = &self.wayland.text_input else {
+            return;
+        };
+        let (x, y, w, h) = crate::ime::calculate_cursor_rect(
+            &self.terminal.grid,
+            self.font_mgr.metrics,
+            [self.config.padding_x(), self.config.padding_y()],
+        );
+        text_input.set_cursor_rectangle(x, y, w, h);
+        text_input.commit();
     }
 
     /// Reloads the configuration file and dynamically updates palette, fonts, cursor, and metrics.
@@ -236,6 +255,12 @@ impl Dispatch<WlRegistry, ()> for AppState {
                 "wl_seat" => {
                     let seat = registry.bind::<WlSeat, _, _>(name, version.min(5), qh, ());
                     state.wayland.seat = Some(seat);
+                    state.wayland.init_text_input(qh);
+                }
+                "zwp_text_input_manager_v3" => {
+                    let manager = registry.bind::<ZwpTextInputManagerV3, _, _>(name, 1, qh, ());
+                    state.wayland.text_input_manager = Some(manager);
+                    state.wayland.init_text_input(qh);
                 }
                 _ => {}
             }
@@ -378,6 +403,36 @@ impl Dispatch<WlKeyboard, ()> for AppState {
                     .keyboard
                     .set_keymap_from_fd(fd.as_raw_fd(), size as usize);
             },
+            wl_keyboard::Event::Enter { surface, .. } => {
+                if state.wayland.surface.as_ref() == Some(&surface) {
+                    state.ime.active = true;
+                    if let Some(text_input) = &state.wayland.text_input {
+                        text_input.enable();
+                        text_input.set_content_type(
+                            zwp_text_input_v3::ContentHint::None,
+                            zwp_text_input_v3::ContentPurpose::Terminal,
+                        );
+                        let (x, y, w, h) = crate::ime::calculate_cursor_rect(
+                            &state.terminal.grid,
+                            state.font_mgr.metrics,
+                            [state.config.padding_x(), state.config.padding_y()],
+                        );
+                        text_input.set_cursor_rectangle(x, y, w, h);
+                        text_input.commit();
+                    }
+                }
+            }
+            wl_keyboard::Event::Leave { surface, .. } => {
+                if state.wayland.surface.as_ref() == Some(&surface) {
+                    state.ime.active = false;
+                    state.ime.clear_preedit();
+                    if let Some(text_input) = &state.wayland.text_input {
+                        text_input.disable();
+                        text_input.commit();
+                    }
+                    state.needs_redraw = true;
+                }
+            }
             wl_keyboard::Event::Key {
                 key,
                 state: WEnum::Value(KeyState::Pressed),
@@ -385,6 +440,7 @@ impl Dispatch<WlKeyboard, ()> for AppState {
             } => {
                 if let Some(bytes) = state.keyboard.handle_key(key) {
                     let _ = state.pty.write_all(&bytes);
+                    state.update_ime_cursor_area();
                 }
             }
             wl_keyboard::Event::Modifiers {
@@ -416,6 +472,74 @@ impl Dispatch<WlCallback, ()> for AppState {
             && state.frame_callback.as_ref() == Some(proxy)
         {
             state.frame_callback = None;
+        }
+    }
+}
+
+impl Dispatch<ZwpTextInputManagerV3, ()> for AppState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &ZwpTextInputManagerV3,
+        _event: <ZwpTextInputManagerV3 as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<ZwpTextInputV3, ()> for AppState {
+    fn event(
+        state: &mut Self,
+        _proxy: &ZwpTextInputV3,
+        event: zwp_text_input_v3::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwp_text_input_v3::Event::Enter { surface } => {
+                if state.wayland.surface.as_ref() == Some(&surface) {
+                    state.ime.active = true;
+                }
+            }
+            zwp_text_input_v3::Event::Leave { surface } => {
+                if state.wayland.surface.as_ref() == Some(&surface) {
+                    state.ime.active = false;
+                    state.ime.clear_preedit();
+                    state.needs_redraw = true;
+                }
+            }
+            zwp_text_input_v3::Event::PreeditString {
+                text,
+                cursor_begin,
+                cursor_end,
+            } => {
+                state.ime.set_preedit(text, cursor_begin, cursor_end);
+                state.needs_redraw = true;
+            }
+            zwp_text_input_v3::Event::CommitString { text } => {
+                if let Some(t) = text {
+                    let _ = state.pty.write_all(t.as_bytes());
+                }
+                state.ime.clear_preedit();
+                state.update_ime_cursor_area();
+                state.needs_redraw = true;
+            }
+            zwp_text_input_v3::Event::DeleteSurroundingText {
+                before_length,
+                after_length,
+            } => {
+                for _ in 0..before_length {
+                    let _ = state.pty.write_all(b"\x08");
+                }
+                for _ in 0..after_length {
+                    let _ = state.pty.write_all(b"\x1b[3~");
+                }
+                state.needs_redraw = true;
+            }
+            zwp_text_input_v3::Event::Done { .. } => {}
+            _ => {}
         }
     }
 }
@@ -460,6 +584,7 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
                 Ok(n) if n > 0 => {
                     state.terminal.advance_bytes(&buf[..n]);
                     state.needs_redraw = true;
+                    state.update_ime_cursor_area();
                     Ok(calloop::PostAction::Continue)
                 }
                 Ok(_) => {
@@ -538,6 +663,7 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
                 app_state.frame_callback = Some(surface.frame(&qh, ()));
             }
             renderer.present()?;
+            app_state.update_ime_cursor_area();
             app_state.needs_redraw = false;
         }
 
