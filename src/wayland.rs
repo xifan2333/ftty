@@ -2,7 +2,9 @@
 
 use wayland_client::QueueHandle;
 use wayland_client::protocol::{
-    wl_compositor::WlCompositor, wl_keyboard::WlKeyboard, wl_pointer::WlPointer, wl_seat::WlSeat,
+    wl_compositor::WlCompositor, wl_data_device::WlDataDevice,
+    wl_data_device_manager::WlDataDeviceManager, wl_data_offer::WlDataOffer,
+    wl_data_source::WlDataSource, wl_keyboard::WlKeyboard, wl_pointer::WlPointer, wl_seat::WlSeat,
     wl_surface::WlSurface,
 };
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_manager_v3::ZwpTextInputManagerV3;
@@ -21,6 +23,10 @@ pub struct WaylandState {
     pub pointer: Option<WlPointer>,
     pub text_input_manager: Option<ZwpTextInputManagerV3>,
     pub text_input: Option<ZwpTextInputV3>,
+    pub data_device_manager: Option<WlDataDeviceManager>,
+    pub data_device: Option<WlDataDevice>,
+    pub data_source: Option<WlDataSource>,
+    pub current_offer: Option<WlDataOffer>,
 
     pub surface: Option<WlSurface>,
     pub xdg_surface: Option<XdgSurface>,
@@ -93,5 +99,24 @@ impl WaylandState {
 
         let text_input = manager.get_text_input(seat, qh, ());
         self.text_input = Some(text_input);
+    }
+
+    /// Creates and initializes the `wl_data_device` instance once the manager and seat are available.
+    pub fn init_data_device<D>(&mut self, qh: &QueueHandle<D>)
+    where
+        D: wayland_client::Dispatch<WlDataDevice, ()> + 'static,
+    {
+        if self.data_device.is_some() {
+            return;
+        }
+        let Some(manager) = &self.data_device_manager else {
+            return;
+        };
+        let Some(seat) = &self.seat else {
+            return;
+        };
+
+        let device = manager.get_data_device(seat, qh, ());
+        self.data_device = Some(device);
     }
 }
