@@ -308,8 +308,9 @@ impl KeyboardHandler {
                     && current_mods.alt == target_mods.alt
                     && current_mods.logo == target_mods.logo
                     && (current_mods.shift == target_mods.shift
-                        || target_sym == xkb::Keysym::new(keysyms::KEY_plus)
-                        || target_sym == xkb::Keysym::new(keysyms::KEY_KP_Add))
+                        || (!target_mods.shift
+                            && current_mods.shift
+                            && target_sym == xkb::Keysym::new(keysyms::KEY_plus)))
                     && sym_matches(sym, target_sym)
                 {
                     return Some(action);

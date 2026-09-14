@@ -319,7 +319,7 @@ impl Config {
 
     #[must_use]
     pub fn scroll_multiplier(&self) -> f32 {
-        self.scrollback.multiplier.unwrap_or(3.0)
+        self.scrollback.multiplier.unwrap_or(3.0).clamp(0.1, 100.0)
     }
 
     #[must_use]

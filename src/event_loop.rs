@@ -562,10 +562,10 @@ impl Dispatch<WlPointer, ()> for AppState {
                 if lines != 0 {
                     state.scroll_accumulator -= f64::from(lines);
                     if state.terminal.grid.is_alt_screen() {
-                        let seq = if lines < 0 { b"\x1b[A" } else { b"\x1b[B" };
-                        for _ in 0..lines.unsigned_abs() {
-                            let _ = state.pty.write_all(seq);
-                        }
+                        let count = (lines.unsigned_abs() as usize).min(100);
+                        let seq: &[u8] = if lines < 0 { b"\x1b[A" } else { b"\x1b[B" };
+                        let batch = seq.repeat(count);
+                        let _ = state.pty.write_all(&batch);
                     } else {
                         if lines < 0 {
                             state
