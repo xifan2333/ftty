@@ -282,17 +282,17 @@ impl KeyboardHandler {
             (
                 KeyAction::ClipboardCopy,
                 config.clipboard_copy.as_ref(),
-                &["Ctrl+Shift+C"][..],
+                &[][..],
             ),
             (
                 KeyAction::ClipboardPaste,
                 config.clipboard_paste.as_ref(),
-                &["Ctrl+Shift+V"][..],
+                &[][..],
             ),
             (
                 KeyAction::PrimaryPaste,
                 config.primary_paste.as_ref(),
-                &["Shift+Insert"][..],
+                &[][..],
             ),
         ];
 
@@ -304,7 +304,12 @@ impl KeyboardHandler {
 
             for combo_str in combos {
                 if let Some((target_mods, target_sym)) = parse_key_combo(combo_str)
-                    && current_mods == target_mods
+                    && current_mods.ctrl == target_mods.ctrl
+                    && current_mods.alt == target_mods.alt
+                    && current_mods.logo == target_mods.logo
+                    && (current_mods.shift == target_mods.shift
+                        || target_sym == xkb::Keysym::new(keysyms::KEY_plus)
+                        || target_sym == xkb::Keysym::new(keysyms::KEY_KP_Add))
                     && sym_matches(sym, target_sym)
                 {
                     return Some(action);

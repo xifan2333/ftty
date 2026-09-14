@@ -52,6 +52,7 @@ pub struct AppState {
     pub palette: [Rgb; 256],
     pub default_fg: Rgb,
     pub default_bg: Rgb,
+    pub scroll_accumulator: f64,
     pub running: bool,
     pub needs_redraw: bool,
     frame_callback: Option<WlCallback>,
@@ -112,6 +113,7 @@ impl AppState {
             palette,
             default_fg,
             default_bg,
+            scroll_accumulator: 0.0,
             running: true,
             needs_redraw: true,
             frame_callback: None,
@@ -547,28 +549,43 @@ impl Dispatch<WlPointer, ()> for AppState {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
-        if let wl_pointer::Event::Axis {
-            axis: WEnum::Value(Axis::VerticalScroll),
-            value,
-            ..
-        } = event
-        {
-            if state.terminal.grid.is_alt_screen() {
-                // Alternate scroll mode: translate wheel into cursor Up/Down escape codes
-                let seq = if value < 0.0 { b"\x1b[A" } else { b"\x1b[B" };
-                let _ = state.pty.write_all(seq);
-            } else {
-                let multiplier = state.config.scroll_multiplier();
-                let lines = ((value.abs() / 15.0) * f64::from(multiplier))
-                    .round()
-                    .max(1.0) as usize;
-                if value < 0.0 {
-                    state.terminal.grid.scroll_viewport_up(lines);
-                } else {
-                    state.terminal.grid.scroll_viewport_down(lines);
+        match event {
+            wl_pointer::Event::Axis {
+                axis: WEnum::Value(Axis::VerticalScroll),
+                value,
+                ..
+            } => {
+                let multiplier = f64::from(state.config.scroll_multiplier());
+                state.scroll_accumulator += (value / 15.0) * multiplier;
+
+                let lines = state.scroll_accumulator.trunc() as i32;
+                if lines != 0 {
+                    state.scroll_accumulator -= f64::from(lines);
+                    if state.terminal.grid.is_alt_screen() {
+                        let seq = if lines < 0 { b"\x1b[A" } else { b"\x1b[B" };
+                        for _ in 0..lines.unsigned_abs() {
+                            let _ = state.pty.write_all(seq);
+                        }
+                    } else {
+                        if lines < 0 {
+                            state
+                                .terminal
+                                .grid
+                                .scroll_viewport_up(lines.unsigned_abs() as usize);
+                        } else {
+                            state
+                                .terminal
+                                .grid
+                                .scroll_viewport_down(lines.unsigned_abs() as usize);
+                        }
+                        state.needs_redraw = true;
+                    }
                 }
-                state.needs_redraw = true;
             }
+            wl_pointer::Event::AxisStop { .. } => {
+                state.scroll_accumulator = 0.0;
+            }
+            _ => {}
         }
     }
 }
