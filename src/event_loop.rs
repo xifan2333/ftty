@@ -133,6 +133,24 @@ impl AppState {
             .saturating_add(pad_y * 2)
             .clamp(100, i32::MAX as u32);
 
+        // Publish the pixel geometry before the first frame so image clients can size
+        // themselves without waiting for a window resize.
+        let cell_pixels = [
+            saturating_u16(font_mgr.metrics.cell_width),
+            saturating_u16(font_mgr.metrics.cell_height),
+        ];
+        let viewport_pixels = [
+            saturating_u16(wayland.width.saturating_sub(pad_x * 2)),
+            saturating_u16(wayland.height.saturating_sub(pad_y * 2)),
+        ];
+        terminal.set_geometry(cell_pixels, viewport_pixels);
+        pty.resize(
+            terminal.grid.cols as u16,
+            terminal.grid.rows as u16,
+            viewport_pixels[0],
+            viewport_pixels[1],
+        )?;
+
         Ok(Self {
             terminal,
             pty,
@@ -459,13 +477,31 @@ impl AppState {
     }
 
     fn resize_terminal(&mut self) -> io::Result<()> {
+        let padding = [self.config.padding_x(), self.config.padding_y()];
         let (cols, rows) = terminal_size(
             [self.wayland.width, self.wayland.height],
             self.font_mgr.metrics,
-            [self.config.padding_x(), self.config.padding_y()],
+            padding,
         );
+        let viewport_pixels = [
+            saturating_u16(self.wayland.width.saturating_sub(u32::from(padding[0]) * 2)),
+            saturating_u16(
+                self.wayland
+                    .height
+                    .saturating_sub(u32::from(padding[1]) * 2),
+            ),
+        ];
+        self.terminal.set_geometry(
+            [
+                saturating_u16(self.font_mgr.metrics.cell_width),
+                saturating_u16(self.font_mgr.metrics.cell_height),
+            ],
+            viewport_pixels,
+        );
+        // The kernel only signals SIGWINCH on an actual change, so this is safe to repeat.
+        self.pty
+            .resize(cols, rows, viewport_pixels[0], viewport_pixels[1])?;
         if (self.terminal.grid.cols, self.terminal.grid.rows) != (cols as usize, rows as usize) {
-            self.pty.resize(cols, rows)?;
             self.terminal.grid.resize(cols as usize, rows as usize);
         }
         Ok(())
@@ -493,6 +529,10 @@ impl AppState {
         self.frame_callback = None;
         Ok(())
     }
+}
+
+fn saturating_u16(value: u32) -> u16 {
+    value.min(u32::from(u16::MAX)) as u16
 }
 
 /// Maps a Linux input button code to the X11 mouse button index used on the wire.
@@ -1150,6 +1190,9 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
                     let (clean_text, events) = state.kitty_parser.filter_bytes(&buf[..n]);
                     if !clean_text.is_empty() {
                         state.terminal.advance_bytes(&clean_text);
+                        for response in state.terminal.take_responses() {
+                            state.write_pty_blocking(&response);
+                        }
                         if state.config.auto_scroll() && !state.terminal.grid.is_alt_screen() {
                             state.terminal.grid.scroll_viewport_bottom();
                         }
