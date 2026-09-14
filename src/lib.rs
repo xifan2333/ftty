@@ -7,6 +7,7 @@ pub mod font;
 pub mod grid;
 pub mod ime;
 pub mod input;
+pub mod kitty;
 pub mod parser;
 pub mod pty;
 pub mod render;
@@ -20,6 +21,10 @@ pub use font::{CellMetrics, FontManager, GlyphAtlas};
 pub use grid::{Cell, CellFlags, ClearMode, Cursor, CursorShape, Grid, Row};
 pub use ime::{ImeState, Preedit, calculate_cursor_rect};
 pub use input::{KeyAction, KeyboardHandler, parse_key_combo};
+pub use kitty::{
+    DeleteTarget, ImageData, ImagePlacement, KittyAction, KittyCommand, KittyEvent, KittyFormat,
+    KittyMedium, KittyParser,
+};
 pub use parser::Terminal;
 pub use pty::Pty;
 pub use render::{ColorScheme, RenderOptions, Renderer};

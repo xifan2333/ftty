@@ -1,9 +1,10 @@
 //! Terminal cell grid, cursor management, and scrollback ring buffer.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use unicode_width::UnicodeWidthChar;
 
 use crate::color::Color;
+use crate::kitty::{DeleteTarget, ImageData, ImagePlacement};
 
 bitflags::bitflags! {
     /// Visual and semantic attributes attached to a terminal cell.
@@ -125,6 +126,9 @@ pub struct Grid {
     pub scrollback: VecDeque<Row>,
     pub viewport_offset: usize,
 
+    pub images: HashMap<u32, ImageData>,
+    pub placements: Vec<ImagePlacement>,
+
     pub cursor: Cursor,
     pub saved_cursor: Cursor,
 
@@ -149,6 +153,8 @@ impl Grid {
             lines,
             scrollback: VecDeque::new(),
             viewport_offset: 0,
+            images: HashMap::new(),
+            placements: Vec::new(),
             cursor: Cursor::default(),
             saved_cursor: Cursor::default(),
             scroll_region_top: 0,
@@ -163,7 +169,40 @@ impl Grid {
         self.alt_lines.is_some()
     }
 
-    /// Switches to the alternate screen buffer.
+    /// Adds a decoded image to the grid's image store.
+    pub fn add_image(&mut self, image: ImageData) {
+        self.images.insert(image.id, image);
+    }
+
+    /// Adds an image placement instance anchored to grid cells.
+    pub fn add_placement(&mut self, placement: ImagePlacement) {
+        self.placements.push(placement);
+    }
+
+    /// Deletes images and/or placements matching the given delete target.
+    pub fn delete_images(&mut self, target: DeleteTarget) {
+        match target {
+            DeleteTarget::All => {
+                self.images.clear();
+                self.placements.clear();
+            }
+            DeleteTarget::ById(id) => {
+                self.images.remove(&id);
+                self.placements.retain(|p| p.image_id != id);
+            }
+            DeleteTarget::ByPlacement(p_id) => {
+                self.placements.retain(|p| p.placement_id != p_id);
+            }
+            DeleteTarget::AtCursor => {
+                let cursor_row = self.cursor.row;
+                let cursor_col = self.cursor.col;
+                let abs_line = self.scrollback.len() + cursor_row - self.viewport_offset;
+                self.placements.retain(|p| {
+                    !(p.line == abs_line && cursor_col >= p.col && cursor_col < p.col + p.cols)
+                });
+            }
+        }
+    }
     pub fn enter_alt_screen(&mut self) {
         if self.alt_lines.is_none() {
             let alt = (0..self.rows).map(|_| Row::new(self.cols)).collect();

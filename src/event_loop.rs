@@ -35,6 +35,7 @@ use crate::config::Config;
 use crate::font::{CellMetrics, FontManager, GlyphAtlas};
 use crate::ime::ImeState;
 use crate::input::{KeyAction, KeyboardHandler};
+use crate::kitty::{ImagePlacement, KittyAction, KittyEvent, KittyParser};
 use crate::parser::Terminal;
 use crate::pty::Pty;
 use crate::render::{ColorScheme, RenderOptions, Renderer};
@@ -52,6 +53,7 @@ pub struct AppState {
     pub font_mgr: FontManager,
     pub atlas: GlyphAtlas,
     pub ime: ImeState,
+    pub kitty_parser: KittyParser,
     pub config: Config,
     pub config_path: Option<PathBuf>,
     pub palette: [Rgb; 256],
@@ -130,6 +132,7 @@ impl AppState {
             font_mgr,
             atlas,
             ime: ImeState::new(),
+            kitty_parser: KittyParser::new(),
             config,
             config_path,
             renderer: None,
@@ -1067,10 +1070,100 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
             let mut buf = [0u8; 8192];
             match state.pty.read(&mut buf) {
                 Ok(n) if n > 0 => {
-                    state.terminal.advance_bytes(&buf[..n]);
-                    if state.config.auto_scroll() && !state.terminal.grid.is_alt_screen() {
-                        state.terminal.grid.scroll_viewport_bottom();
+                    let (clean_text, events) = state.kitty_parser.filter_bytes(&buf[..n]);
+                    if !clean_text.is_empty() {
+                        state.terminal.advance_bytes(&clean_text);
+                        if state.config.auto_scroll() && !state.terminal.grid.is_alt_screen() {
+                            state.terminal.grid.scroll_viewport_bottom();
+                        }
                     }
+
+                    for event in events {
+                        match event {
+                            KittyEvent::Transmit { command, image } => {
+                                let image_id = image.id;
+                                let placement_id = command.placement_id.unwrap_or(0);
+                                state.terminal.grid.add_image(image);
+
+                                let (cols, rows) = match (command.cols, command.rows) {
+                                    (Some(c), Some(r)) => (c as usize, r as usize),
+                                    (Some(c), None) => {
+                                        let r = ((c as f32)
+                                            * state.font_mgr.metrics.cell_width as f32
+                                            / state.font_mgr.metrics.cell_height as f32)
+                                            .ceil()
+                                            .max(1.0)
+                                            as usize;
+                                        (c as usize, r)
+                                    }
+                                    (None, Some(r)) => {
+                                        let c = ((r as f32)
+                                            * state.font_mgr.metrics.cell_height as f32
+                                            / state.font_mgr.metrics.cell_width as f32)
+                                            .ceil()
+                                            .max(1.0)
+                                            as usize;
+                                        (c, r as usize)
+                                    }
+                                    (None, None) => (1, 1),
+                                };
+
+                                let abs_line = state.terminal.grid.scrollback.len()
+                                    + state.terminal.grid.cursor.row
+                                    - state.terminal.grid.viewport_offset;
+                                state.terminal.grid.add_placement(ImagePlacement {
+                                    image_id,
+                                    placement_id,
+                                    line: abs_line,
+                                    col: state.terminal.grid.cursor.col,
+                                    cols,
+                                    rows,
+                                    offset_x: command.offset_x,
+                                    offset_y: command.offset_y,
+                                    z_index: command.z_index,
+                                });
+
+                                if !command.do_not_move_cursor {
+                                    state.terminal.grid.cursor.col =
+                                        (state.terminal.grid.cursor.col + cols)
+                                            .min(state.terminal.grid.cols.saturating_sub(1));
+                                }
+
+                                if command.action == KittyAction::TransmitAndDisplayWithResponse {
+                                    let resp = format!("\x1b_Gi={image_id};OK\x1b\\").into_bytes();
+                                    let _ = state.pty.write_all(&resp);
+                                }
+                            }
+                            KittyEvent::Place { command } => {
+                                if let Some(image_id) = command.image_id {
+                                    let placement_id = command.placement_id.unwrap_or(0);
+                                    let cols = command.cols.unwrap_or(1) as usize;
+                                    let rows = command.rows.unwrap_or(1) as usize;
+                                    let abs_line = state.terminal.grid.scrollback.len()
+                                        + state.terminal.grid.cursor.row
+                                        - state.terminal.grid.viewport_offset;
+                                    state.terminal.grid.add_placement(ImagePlacement {
+                                        image_id,
+                                        placement_id,
+                                        line: abs_line,
+                                        col: state.terminal.grid.cursor.col,
+                                        cols,
+                                        rows,
+                                        offset_x: command.offset_x,
+                                        offset_y: command.offset_y,
+                                        z_index: command.z_index,
+                                    });
+                                }
+                            }
+                            KittyEvent::Delete { target } => {
+                                state.terminal.grid.delete_images(target);
+                            }
+                            KittyEvent::Response(resp) => {
+                                let _ = state.pty.write_all(&resp);
+                            }
+                        }
+                    }
+
                     state.needs_redraw = true;
                     state.update_ime_cursor_area();
                     Ok(calloop::PostAction::Continue)

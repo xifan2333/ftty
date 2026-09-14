@@ -1,5 +1,6 @@
 //! Wayland EGL ownership and batched OpenGL ES 2 terminal rendering.
 
+use std::collections::HashMap;
 use std::io;
 
 use glow::HasContext;
@@ -270,6 +271,7 @@ pub struct Renderer {
     texture: Option<glow::Texture>,
     viewport: Option<glow::UniformLocation>,
     atlas_size: Option<glow::UniformLocation>,
+    image_textures: HashMap<u32, (glow::Texture, u32, u32)>,
     vertices: Vec<f32>,
     egl: EglContext,
 }
@@ -298,6 +300,7 @@ impl Renderer {
             texture: None,
             viewport: None,
             atlas_size: None,
+            image_textures: HashMap::new(),
             vertices: Vec::with_capacity(8192),
             egl,
         };
@@ -367,12 +370,23 @@ impl Renderer {
             options,
         );
         // SAFETY: this renderer owns the current context and all referenced GL objects.
+        self.sync_image_textures(grid);
+
+        // SAFETY: this renderer owns the current context and all referenced GL objects.
         unsafe {
             let gl = &self.gl;
             gl.viewport(0, 0, width, height);
             let [r, g, b, a] = rgba(colors.background);
             gl.clear_color(r, g, b, a);
             gl.clear(glow::COLOR_BUFFER_BIT);
+        }
+
+        // Pass 1: z < 0 images (behind text)
+        self.render_image_placements(grid, true, fonts.metrics, options);
+
+        // Pass 2: text backgrounds, selection, text glyphs, cursor, preedit
+        unsafe {
+            let gl = &self.gl;
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, self.texture);
             if atlas.dirty {
@@ -411,7 +425,143 @@ impl Renderer {
             }
             gl.draw_arrays(glow::TRIANGLES, 0, (self.vertices.len() / 8) as i32);
         }
+
+        // Pass 3: z >= 0 images (above text)
+        self.render_image_placements(grid, false, fonts.metrics, options);
         Ok(())
+    }
+
+    fn sync_image_textures(&mut self, grid: &Grid) {
+        let gl = &self.gl;
+        let mut to_delete = Vec::new();
+        self.image_textures.retain(|id, (tex, _, _)| {
+            if grid.images.contains_key(id) {
+                true
+            } else {
+                to_delete.push(*tex);
+                false
+            }
+        });
+
+        unsafe {
+            for tex in to_delete {
+                gl.delete_texture(tex);
+            }
+        }
+
+        for (id, img) in &grid.images {
+            if !self.image_textures.contains_key(id) {
+                unsafe {
+                    if let Ok(tex) = gl.create_texture() {
+                        gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                        gl.tex_parameter_i32(
+                            glow::TEXTURE_2D,
+                            glow::TEXTURE_MIN_FILTER,
+                            glow::LINEAR as i32,
+                        );
+                        gl.tex_parameter_i32(
+                            glow::TEXTURE_2D,
+                            glow::TEXTURE_MAG_FILTER,
+                            glow::LINEAR as i32,
+                        );
+                        gl.tex_parameter_i32(
+                            glow::TEXTURE_2D,
+                            glow::TEXTURE_WRAP_S,
+                            glow::CLAMP_TO_EDGE as i32,
+                        );
+                        gl.tex_parameter_i32(
+                            glow::TEXTURE_2D,
+                            glow::TEXTURE_WRAP_T,
+                            glow::CLAMP_TO_EDGE as i32,
+                        );
+                        gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+                        gl.tex_image_2d(
+                            glow::TEXTURE_2D,
+                            0,
+                            glow::RGBA as i32,
+                            img.width as i32,
+                            img.height as i32,
+                            0,
+                            glow::RGBA,
+                            glow::UNSIGNED_BYTE,
+                            glow::PixelUnpackData::Slice(Some(&img.rgba)),
+                        );
+                        self.image_textures
+                            .insert(*id, (tex, img.width, img.height));
+                    }
+                }
+            }
+        }
+    }
+
+    fn render_image_placements(
+        &mut self,
+        grid: &Grid,
+        z_negative: bool,
+        metrics: CellMetrics,
+        options: RenderOptions<'_>,
+    ) {
+        let gl = &self.gl;
+        let cw = metrics.cell_width as f32;
+        let ch = metrics.cell_height as f32;
+        let pad_x = f32::from(options.padding[0]);
+        let pad_y = f32::from(options.padding[1]);
+        let h = grid.scrollback.len();
+        let viewport_start = h.saturating_sub(grid.viewport_offset);
+        let viewport_end = viewport_start + grid.rows;
+
+        for placement in &grid.placements {
+            let is_match = if z_negative {
+                placement.z_index < 0
+            } else {
+                placement.z_index >= 0
+            };
+            if !is_match {
+                continue;
+            }
+
+            if placement.line < viewport_start || placement.line >= viewport_end {
+                continue;
+            }
+
+            let Some(&(tex, img_w, img_h)) = self.image_textures.get(&placement.image_id) else {
+                continue;
+            };
+
+            let screen_row = placement.line - viewport_start;
+            let x0 = pad_x + placement.col as f32 * cw + placement.offset_x as f32;
+            let y0 = pad_y + screen_row as f32 * ch + placement.offset_y as f32;
+            let x1 = x0 + placement.cols as f32 * cw;
+            let y1 = y0 + placement.rows as f32 * ch;
+
+            let mut img_vertices = Vec::with_capacity(48);
+            push_quad(
+                &mut img_vertices,
+                [x0, y0, x1, y1],
+                [[0.0, 0.0], [img_w as f32, img_h as f32]],
+                [1.0, 1.0, 1.0, 1.0],
+            );
+
+            unsafe {
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                gl.uniform_2_f32(self.atlas_size.as_ref(), img_w as f32, img_h as f32);
+
+                gl.bind_buffer(glow::ARRAY_BUFFER, self.vbo);
+                let bytes = std::slice::from_raw_parts(
+                    img_vertices.as_ptr().cast::<u8>(),
+                    std::mem::size_of_val(img_vertices.as_slice()),
+                );
+                gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::STREAM_DRAW);
+
+                let stride = 8 * std::mem::size_of::<f32>() as i32;
+                for (index, count, offset) in [(0, 2, 0), (1, 2, 8), (2, 4, 16)] {
+                    gl.enable_vertex_attrib_array(index);
+                    gl.vertex_attrib_pointer_f32(index, count, glow::FLOAT, false, stride, offset);
+                }
+                gl.draw_arrays(glow::TRIANGLES, 0, 6);
+            }
+        }
     }
 
     /// Presents the frame after the caller requests a Wayland frame callback.
@@ -443,6 +593,9 @@ impl Drop for Renderer {
                 }
                 if let Some(texture) = self.texture {
                     self.gl.delete_texture(texture);
+                }
+                for (_, (tex, _, _)) in self.image_textures.drain() {
+                    self.gl.delete_texture(tex);
                 }
             }
         }
