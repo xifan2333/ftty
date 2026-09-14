@@ -11,6 +11,7 @@ use wayland_egl::WlEglSurface;
 use crate::color::Rgb;
 use crate::font::{CellMetrics, FontManager, GlyphAtlas};
 use crate::grid::{Cell, CellFlags, CursorShape, Grid};
+use crate::ime::Preedit;
 
 #[cfg(test)]
 const DEFAULT_FG: Rgb = Rgb::new(220, 220, 220);
@@ -34,6 +35,20 @@ impl<'a> ColorScheme<'a> {
             foreground,
             background,
         }
+    }
+}
+
+/// Options controlling frame layout, window padding, and active IME composition.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RenderOptions<'a> {
+    pub padding: [u16; 2],
+    pub preedit: Option<&'a Preedit>,
+}
+
+impl<'a> RenderOptions<'a> {
+    #[must_use]
+    pub fn new(padding: [u16; 2], preedit: Option<&'a Preedit>) -> Self {
+        Self { padding, preedit }
     }
 }
 
@@ -326,11 +341,11 @@ impl Renderer {
         fonts: &FontManager,
         atlas: &mut GlyphAtlas,
         size: [u32; 2],
-        padding: [u16; 2],
+        options: RenderOptions<'_>,
     ) -> io::Result<()> {
         let [width, height] = native_size(size)?;
         self.egl.make_current()?;
-        prepare_atlas(grid, fonts, atlas);
+        prepare_atlas(grid, fonts, atlas, options.preedit);
         build_vertices(
             &mut self.vertices,
             grid,
@@ -338,7 +353,7 @@ impl Renderer {
             fonts.metrics,
             fonts,
             atlas,
-            padding,
+            options,
         );
         // SAFETY: this renderer owns the current context and all referenced GL objects.
         unsafe {
@@ -430,11 +445,23 @@ fn visible_glyph(cell: &Cell) -> bool {
             .intersects(CellFlags::HIDDEN | CellFlags::WIDE_CHAR_SPACER)
 }
 
-fn prepare_atlas(grid: &Grid, fonts: &FontManager, atlas: &mut GlyphAtlas) {
+fn prepare_atlas(
+    grid: &Grid,
+    fonts: &FontManager,
+    atlas: &mut GlyphAtlas,
+    preedit: Option<&Preedit>,
+) {
     for attempt in 0..2 {
         let mut full = false;
         // Pre-cache fallback glyph '?' so it is guaranteed available if the atlas fills.
         let _ = atlas.get_or_insert('?', CellFlags::empty(), fonts);
+        if let Some(p) = preedit {
+            for c in p.text.chars() {
+                full |= atlas
+                    .get_or_insert(c, CellFlags::UNDERLINE, fonts)
+                    .is_none();
+            }
+        }
         for cell in grid
             .lines
             .iter()
@@ -524,13 +551,13 @@ fn build_vertices(
     metrics: CellMetrics,
     fonts: &FontManager,
     atlas: &GlyphAtlas,
-    padding: [u16; 2],
+    options: RenderOptions<'_>,
 ) {
     vertices.clear();
     let cw = metrics.cell_width as f32;
     let ch = metrics.cell_height as f32;
-    let pad_x = f32::from(padding[0]);
-    let pad_y = f32::from(padding[1]);
+    let pad_x = f32::from(options.padding[0]);
+    let pad_y = f32::from(options.padding[1]);
     let cursor = cursor_cell(grid);
 
     // Draw every background first so spacer cells cannot cover wide or overhanging glyphs.
@@ -641,11 +668,70 @@ fn build_vertices(
         let x = pad_x + col as f32 * cw;
         let y = pad_y + row as f32 * ch;
         let rect = match grid.cursor.shape {
-            CursorShape::Block => return,
+            CursorShape::Block => {
+                // If preedit is active, don't early return so preedit can be drawn on top of the block
+                [x, y, x + width as f32 * cw, y + ch]
+            }
             CursorShape::Beam => [x, y, x + 2.0_f32.min(cw), y + ch],
             CursorShape::Underline => [x, y + (ch - 2.0).max(0.0), x + width as f32 * cw, y + ch],
         };
-        push_quad(vertices, rect, SOLID_UV, rgba(colors.foreground));
+        if grid.cursor.shape != CursorShape::Block {
+            push_quad(vertices, rect, SOLID_UV, rgba(colors.foreground));
+        }
+    }
+
+    // If an IME pre-edit string is active, render it inline starting at cursor position
+    if let Some(preedit) = options.preedit
+        && !preedit.text.is_empty()
+        && let Some((crow, ccol, _)) = cursor
+    {
+        let mut cur_col = ccol;
+        for c in preedit.text.chars() {
+            if cur_col >= grid.cols {
+                break;
+            }
+            let char_width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(1);
+            let px = pad_x + cur_col as f32 * cw;
+            let py = pad_y + crow as f32 * ch;
+            let span_w = char_width as f32 * cw;
+
+            // Draw preedit cell background
+            push_quad(
+                vertices,
+                [px, py, px + span_w, py + ch],
+                SOLID_UV,
+                [0.2, 0.25, 0.35, 0.95],
+            );
+
+            // Draw preedit glyph
+            if let Some(glyph) = atlas.get(c, CellFlags::UNDERLINE, fonts)
+                && glyph.width > 0
+                && glyph.height > 0
+            {
+                let gx = px + glyph.offset_x as f32;
+                let gy = py + metrics.ascent as f32 - glyph.offset_y as f32 - glyph.height as f32;
+                let [u, v] = glyph.position.map(|value| value as f32);
+                let w = glyph.width as f32;
+                let h = glyph.height as f32;
+                push_quad(
+                    vertices,
+                    [gx, gy, gx + w, gy + h],
+                    [[u, v], [u + w, v + h]],
+                    rgba(colors.foreground),
+                );
+            }
+
+            // Draw preedit underline
+            let top = py + (metrics.ascent as f32 + 1.0).min(ch - 1.0);
+            push_quad(
+                vertices,
+                [px, top, px + span_w, top + 1.0],
+                SOLID_UV,
+                rgba(colors.foreground),
+            );
+
+            cur_col += char_width;
+        }
     }
 }
 
@@ -657,7 +743,7 @@ mod tests {
     fn frame(grid: &Grid) -> (Vec<f32>, GlyphAtlas) {
         let fonts = FontManager::load(14.0).expect("system monospace font");
         let mut atlas = GlyphAtlas::new(16, 16);
-        prepare_atlas(grid, &fonts, &mut atlas);
+        prepare_atlas(grid, &fonts, &mut atlas, None);
         let mut vertices = Vec::new();
         build_vertices(
             &mut vertices,
@@ -666,7 +752,7 @@ mod tests {
             fonts.metrics,
             &fonts,
             &atlas,
-            [0, 0],
+            RenderOptions::default(),
         );
         (vertices, atlas)
     }
@@ -761,7 +847,7 @@ mod tests {
             fonts.metrics,
             &fonts,
             &atlas,
-            [0, 0],
+            RenderOptions::default(),
         );
         // Ensure vertices were generated for the character cell rather than dropped.
         assert_eq!(vertices.len(), 48);
@@ -776,7 +862,7 @@ mod tests {
             fonts.metrics,
             &fonts,
             &empty_atlas,
-            [0, 0],
+            RenderOptions::default(),
         );
         assert_eq!(placeholder_vertices.len(), 48);
         assert_eq!(placeholder_vertices[2], -1.0); // SOLID_UV placeholder
@@ -798,10 +884,41 @@ mod tests {
             fonts.metrics,
             &fonts,
             &atlas,
-            [12, 18],
+            RenderOptions::new([12, 18], None),
         );
         assert_eq!(vertices.len(), 48);
         assert_eq!(vertices[0], 12.0); // x offset by padding_x
         assert_eq!(vertices[1], 18.0); // y offset by padding_y
+    }
+
+    #[test]
+    fn test_preedit_renders_inline_at_cursor() {
+        let fonts = FontManager::load(14.0).expect("system monospace font");
+        let mut grid = Grid::new(20, 5, 0);
+        grid.cursor.row = 1;
+        grid.cursor.col = 2;
+
+        let preedit = Preedit {
+            text: "test".to_string(),
+            cursor_begin: 0,
+            cursor_end: 4,
+        };
+
+        let mut atlas = GlyphAtlas::new(64, 64);
+        prepare_atlas(&grid, &fonts, &mut atlas, Some(&preedit));
+
+        let mut vertices = Vec::new();
+        build_vertices(
+            &mut vertices,
+            &grid,
+            ColorScheme::new(&default_256_palette(), DEFAULT_FG, DEFAULT_BG),
+            fonts.metrics,
+            &fonts,
+            &atlas,
+            RenderOptions::new([0, 0], Some(&preedit)),
+        );
+
+        // Vertices must contain the block cursor and the preedit quads
+        assert!(vertices.len() >= 4 * 48);
     }
 }

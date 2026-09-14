@@ -21,5 +21,5 @@ pub use ime::{ImeState, Preedit, calculate_cursor_rect};
 pub use input::KeyboardHandler;
 pub use parser::Terminal;
 pub use pty::Pty;
-pub use render::{ColorScheme, Renderer};
+pub use render::{ColorScheme, RenderOptions, Renderer};
 pub use wayland::WaylandState;

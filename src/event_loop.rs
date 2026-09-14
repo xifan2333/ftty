@@ -32,7 +32,7 @@ use crate::ime::ImeState;
 use crate::input::KeyboardHandler;
 use crate::parser::Terminal;
 use crate::pty::Pty;
-use crate::render::{ColorScheme, Renderer};
+use crate::render::{ColorScheme, RenderOptions, Renderer};
 use crate::wayland::WaylandState;
 
 /// Shared application state passed to all calloop sources and Wayland event dispatches.
@@ -424,8 +424,7 @@ impl Dispatch<WlKeyboard, ()> for AppState {
             }
             wl_keyboard::Event::Leave { surface, .. } => {
                 if state.wayland.surface.as_ref() == Some(&surface) {
-                    state.ime.active = false;
-                    state.ime.clear_preedit();
+                    state.ime.clear();
                     if let Some(text_input) = &state.wayland.text_input {
                         text_input.disable();
                         text_input.commit();
@@ -505,8 +504,7 @@ impl Dispatch<ZwpTextInputV3, ()> for AppState {
             }
             zwp_text_input_v3::Event::Leave { surface } => {
                 if state.wayland.surface.as_ref() == Some(&surface) {
-                    state.ime.active = false;
-                    state.ime.clear_preedit();
+                    state.ime.clear();
                     state.needs_redraw = true;
                 }
             }
@@ -515,30 +513,33 @@ impl Dispatch<ZwpTextInputV3, ()> for AppState {
                 cursor_begin,
                 cursor_end,
             } => {
-                state.ime.set_preedit(text, cursor_begin, cursor_end);
-                state.needs_redraw = true;
+                state.ime.stage_preedit(text, cursor_begin, cursor_end);
             }
             zwp_text_input_v3::Event::CommitString { text } => {
-                if let Some(t) = text {
-                    let _ = state.pty.write_all(t.as_bytes());
-                }
-                state.ime.clear_preedit();
-                state.update_ime_cursor_area();
-                state.needs_redraw = true;
+                state.ime.stage_commit(text);
             }
             zwp_text_input_v3::Event::DeleteSurroundingText {
                 before_length,
                 after_length,
             } => {
-                for _ in 0..before_length {
-                    let _ = state.pty.write_all(b"\x08");
+                state.ime.stage_delete(before_length, after_length);
+            }
+            zwp_text_input_v3::Event::Done { .. } => {
+                let (delete, commit) = state.ime.apply_done();
+                if let Some((before, after)) = delete {
+                    for _ in 0..before {
+                        let _ = state.pty.write_all(b"\x08");
+                    }
+                    for _ in 0..after {
+                        let _ = state.pty.write_all(b"\x1b[3~");
+                    }
                 }
-                for _ in 0..after_length {
-                    let _ = state.pty.write_all(b"\x1b[3~");
+                if let Some(text) = commit {
+                    let _ = state.pty.write_all(text.as_bytes());
                 }
+                state.update_ime_cursor_area();
                 state.needs_redraw = true;
             }
-            zwp_text_input_v3::Event::Done { .. } => {}
             _ => {}
         }
     }
@@ -650,14 +651,17 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
                 app_state.default_fg,
                 app_state.default_bg,
             );
-            let padding = [app_state.config.padding_x(), app_state.config.padding_y()];
+            let options = RenderOptions::new(
+                [app_state.config.padding_x(), app_state.config.padding_y()],
+                app_state.ime.preedit.as_ref(),
+            );
             renderer.render_grid(
                 &app_state.terminal.grid,
                 colors,
                 &app_state.font_mgr,
                 &mut app_state.atlas,
                 [app_state.wayland.width, app_state.wayland.height],
-                padding,
+                options,
             )?;
             if let Some(surface) = &app_state.wayland.surface {
                 app_state.frame_callback = Some(surface.frame(&qh, ()));
