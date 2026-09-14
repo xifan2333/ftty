@@ -369,7 +369,6 @@ impl Renderer {
             atlas,
             options,
         );
-        // SAFETY: this renderer owns the current context and all referenced GL objects.
         self.sync_image_textures(grid);
 
         // SAFETY: this renderer owns the current context and all referenced GL objects.
@@ -385,6 +384,9 @@ impl Renderer {
         self.render_image_placements(grid, true, fonts.metrics, options);
 
         // Pass 2: text backgrounds, selection, text glyphs, cursor, preedit
+        // SAFETY: draw made this renderer's EGL context current. The texture and VBO
+        // belong to it, atlas.pixels covers the upload, and the vertex byte slice
+        // covers initialized f32 values without padding and is used only for this upload.
         unsafe {
             let gl = &self.gl;
             gl.active_texture(glow::TEXTURE0);
@@ -449,6 +451,8 @@ impl Renderer {
             }
         });
 
+        // SAFETY: called only by draw with this renderer's EGL context current;
+        // every texture in to_delete was removed from this renderer's texture map.
         unsafe {
             for tex in to_delete {
                 gl.delete_texture(tex);
@@ -458,6 +462,8 @@ impl Renderer {
         for (id, img) in &grid.images {
             if !self.image_textures.contains_key(id) {
                 let ver = grid.image_versions.get(id).copied().unwrap_or(0);
+                // SAFETY: draw holds this renderer's current EGL context. New textures
+                // belong to it, and decoded RGBA pixels remain borrowed for the upload.
                 unsafe {
                     if let Ok(tex) = gl.create_texture() {
                         gl.bind_texture(glow::TEXTURE_2D, Some(tex));
@@ -549,6 +555,9 @@ impl Renderer {
                 [1.0, 1.0, 1.0, 1.0],
             );
 
+            // SAFETY: draw holds this renderer's current EGL context; tex and the VBO
+            // belong to it. img_vertices contains six initialized vertices of eight
+            // f32 values, with no padding, and remains live throughout the byte upload.
             unsafe {
                 gl.active_texture(glow::TEXTURE0);
                 gl.bind_texture(glow::TEXTURE_2D, Some(tex));

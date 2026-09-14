@@ -2,9 +2,13 @@
 
 use std::fs;
 use std::io::{self, Cursor};
+use std::num::NonZeroUsize;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use nix::fcntl::OFlag;
+use nix::sys::mman::{MapFlags, ProtFlags, mmap, munmap, shm_open};
+use nix::sys::stat::Mode;
 
 /// Kitty graphics action requested by the client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -463,50 +467,36 @@ fn decode_image_data(id: u32, cmd: &KittyCommand, raw_payload: &[u8]) -> io::Res
 }
 
 fn read_shm_payload(name: &str) -> io::Result<Vec<u8>> {
-    let c_name =
-        std::ffi::CString::new(name).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-    let fd = unsafe { libc::shm_open(c_name.as_ptr(), libc::O_RDONLY, 0) };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(fd, &mut stat) } < 0 {
-        let err = io::Error::last_os_error();
-        unsafe { libc::close(fd) };
-        return Err(err);
-    }
-
-    let size = stat.st_size as usize;
-    if size == 0 {
-        unsafe { libc::close(fd) };
+    let file = fs::File::from(shm_open(name, OFlag::O_RDONLY, Mode::empty())?);
+    let size = usize::try_from(file.metadata()?.len())
+        .ok()
+        .filter(|&size| size <= isize::MAX as usize)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "shared memory is too large"))?;
+    let Some(length) = NonZeroUsize::new(size) else {
         return Ok(Vec::new());
-    }
-
-    let ptr = unsafe {
-        libc::mmap(
-            std::ptr::null_mut(),
-            size,
-            libc::PROT_READ,
-            libc::MAP_SHARED,
-            fd,
-            0,
-        )
     };
 
-    if ptr == libc::MAP_FAILED {
-        let err = io::Error::last_os_error();
-        unsafe { libc::close(fd) };
-        return Err(err);
-    }
+    // SAFETY: file owns a readable shm descriptor and length is its nonzero size.
+    // No fixed address is requested, and the mapping is only read, never written.
+    let ptr = unsafe {
+        mmap(
+            None,
+            length,
+            ProtFlags::PROT_READ,
+            MapFlags::MAP_SHARED,
+            &file,
+            0,
+        )
+    }?;
 
-    let slice = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), size) };
-    let bytes = slice.to_vec();
+    // SAFETY: mmap returned a non-null, readable region of size bytes, bounded by
+    // isize::MAX. Kitty senders must keep its contents and size stable during the
+    // transfer. The slice is copied before the mapping is released below.
+    let bytes = unsafe { std::slice::from_raw_parts(ptr.as_ptr().cast::<u8>(), size) }.to_vec();
 
-    unsafe {
-        libc::munmap(ptr, size);
-        libc::close(fd);
-    }
+    // SAFETY: ptr and size describe the live mapping created above; no references
+    // to it remain, since bytes owns a separate copy of the payload.
+    unsafe { munmap(ptr, size) }?;
 
     Ok(bytes)
 }
@@ -569,6 +559,43 @@ fn decode_png(id: u32, bytes: &[u8]) -> io::Result<ImageData> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_memory_loads_empty_and_rgba_payloads() {
+        use nix::sys::mman::shm_unlink;
+        use std::io::Write;
+
+        struct ShmName(String);
+        impl Drop for ShmName {
+            fn drop(&mut self) {
+                let _ = shm_unlink(self.0.as_str());
+            }
+        }
+
+        let name = format!("/ftty-kitty-test-{}", std::process::id());
+        let fd = shm_open(
+            name.as_str(),
+            OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_RDWR,
+            Mode::S_IRUSR | Mode::S_IWUSR,
+        )
+        .unwrap();
+        let name = ShmName(name);
+        let mut file = fs::File::from(fd);
+        assert_eq!(read_shm_payload(&name.0).unwrap(), Vec::<u8>::new());
+
+        let pixels = [255, 128, 0, 255];
+        file.write_all(&pixels).unwrap();
+        let command = KittyCommand {
+            medium: KittyMedium::SharedMemory,
+            width: Some(1),
+            height: Some(1),
+            ..Default::default()
+        };
+        let image =
+            decode_image_data(7, &command, BASE64_STANDARD.encode(&name.0).as_bytes()).unwrap();
+        assert_eq!(image.rgba, pixels);
+        assert_eq!((image.id, image.width, image.height), (7, 1, 1));
+    }
 
     #[test]
     fn test_parse_kitty_query() {

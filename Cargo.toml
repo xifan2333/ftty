@@ -28,6 +28,7 @@ nix = { version = "0.31", default-features = false, features = [
   "fs",
   "ioctl",
   "poll",
+  "mman",
 ] }
 png = "0.18.1"
 serde = { version = "1.0.229", features = ["derive"] }

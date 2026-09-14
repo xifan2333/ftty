@@ -1,6 +1,7 @@
 //! Keyboard input handling and key-to-VT escape sequence translation via xkbcommon.
 
-use std::os::fd::RawFd;
+use std::io::Read;
+use std::os::fd::OwnedFd;
 use xkbcommon::xkb::{self, Context, KEYMAP_FORMAT_TEXT_V1, Keycode, Keymap, State, keysyms};
 
 use crate::config::KeybindingsConfig;
@@ -174,32 +175,17 @@ impl KeyboardHandler {
         }
     }
 
-    /// Initializes keymap from a raw file descriptor (e.g. from Wayland `wl_keyboard.keymap`).
-    ///
-    /// # Safety
-    /// Caller must ensure `fd` is a valid, readable file descriptor representing a keymap.
-    pub unsafe fn set_keymap_from_fd(&mut self, fd: RawFd, size: usize) {
-        let mut buf = vec![0u8; size];
-        let mut total_read = 0;
-
-        while total_read < size {
-            let res =
-                unsafe { libc::read(fd, buf[total_read..].as_mut_ptr().cast(), size - total_read) };
-            if res > 0 {
-                total_read += res as usize;
-            } else if res == 0 {
-                break;
-            } else {
-                let err = std::io::Error::last_os_error();
-                if err.kind() == std::io::ErrorKind::Interrupted {
-                    continue;
-                }
-                eprintln!("ftty: failed reading keymap from fd: {err}");
-                return;
-            }
+    /// Reads at most `size` bytes from an owned Wayland keymap descriptor, then closes it.
+    pub fn set_keymap_from_fd(&mut self, fd: OwnedFd, size: usize) {
+        let mut buf = Vec::new();
+        if let Err(err) = std::fs::File::from(fd)
+            .take(size as u64)
+            .read_to_end(&mut buf)
+        {
+            eprintln!("ftty: failed reading keymap from fd: {err}");
+            return;
         }
 
-        buf.truncate(total_read);
         if let Some(&0) = buf.last() {
             buf.pop();
         }
@@ -430,6 +416,37 @@ impl KeyboardHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keymap_fd_loads_the_advertised_bytes_and_strips_the_trailing_nul() {
+        use nix::sys::memfd::{MFdFlags, memfd_create};
+        use std::io::{Seek, Write};
+
+        let mut handler = KeyboardHandler::new();
+        let keymap = Keymap::new_from_names(
+            &handler.context,
+            "",
+            "",
+            "de",
+            "",
+            None,
+            xkb::KEYMAP_COMPILE_NO_FLAGS,
+        )
+        .unwrap();
+        let mut bytes = keymap.get_as_string(KEYMAP_FORMAT_TEXT_V1).into_bytes();
+        bytes.push(0);
+        let size = bytes.len();
+        bytes.extend_from_slice(b"ignored bytes after the advertised keymap");
+
+        let fd = memfd_create(c"ftty-keymap-test", MFdFlags::MFD_CLOEXEC).unwrap();
+        let mut file = std::fs::File::from(fd);
+        file.write_all(&bytes).unwrap();
+        file.rewind().unwrap();
+        handler.set_keymap_from_fd(file.into(), size);
+
+        // The German layout maps the physical Y key to Z.
+        assert_eq!(handler.handle_key(21), Some(b"z".to_vec()));
+    }
 
     #[test]
     fn test_keyboard_handler_initialization() {

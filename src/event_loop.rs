@@ -1,12 +1,16 @@
 //! Unified calloop single-threaded event loop multiplexing Wayland, PTY I/O, and POSIX signals.
 
 use std::io::{self, Read, Write};
+use std::os::fd::AsFd;
 use std::path::PathBuf;
 
 use calloop::generic::Generic;
 use calloop::signals::{Signal, Signals};
 use calloop::{EventLoop, Interest, Mode};
 use calloop_wayland_source::WaylandSource;
+use nix::errno::Errno;
+use nix::fcntl::OFlag;
+use nix::poll::{PollFd, PollFlags, poll};
 
 use wayland_client::protocol::{
     wl_callback::{self, WlCallback},
@@ -207,29 +211,17 @@ impl AppState {
     pub fn write_pty_blocking(&mut self, mut bytes: &[u8]) {
         let start = std::time::Instant::now();
         while !bytes.is_empty() && start.elapsed() < std::time::Duration::from_millis(500) {
-            let res =
-                unsafe { libc::write(self.pty.as_raw_fd(), bytes.as_ptr().cast(), bytes.len()) };
-            if res > 0 {
-                bytes = &bytes[res as usize..];
-            } else if res < 0 {
-                let err = io::Error::last_os_error();
-                if err.kind() == io::ErrorKind::Interrupted {
-                    continue;
-                }
-                if err.kind() == io::ErrorKind::WouldBlock {
-                    let mut pfd = libc::pollfd {
-                        fd: self.pty.as_raw_fd(),
-                        events: libc::POLLOUT,
-                        revents: 0,
-                    };
-                    let poll_res = unsafe { libc::poll(&mut pfd, 1, 100) };
-                    if poll_res > 0 {
-                        continue;
+            match self.pty.write(bytes) {
+                Ok(0) => break,
+                Ok(written) => bytes = &bytes[written..],
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    let mut fds = [PollFd::new(self.pty.as_fd(), PollFlags::POLLOUT)];
+                    if !poll(&mut fds, 100u16).is_ok_and(|ready| ready > 0) {
+                        break;
                     }
                 }
-                break;
-            } else {
-                break;
+                Err(_) => break,
             }
         }
     }
@@ -237,70 +229,42 @@ impl AppState {
     /// Pastes text from the Wayland clipboard into the terminal PTY.
     pub fn paste_clipboard(&mut self, conn: Option<&Connection>) {
         if let Some(offer_data) = &self.wayland.current_offer {
-            if let Some(mime) = best_text_mime(&offer_data.mime_types) {
-                use std::os::fd::{AsFd, FromRawFd, OwnedFd};
-                let mut fds = [0i32; 2];
-                if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } == 0 {
-                    let read_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
-                    let write_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+            if let Some(mime) = best_text_mime(&offer_data.mime_types)
+                && let Ok((read_fd, write_fd)) = nix::unistd::pipe2(OFlag::O_CLOEXEC)
+            {
+                offer_data.offer.receive(mime.to_string(), write_fd.as_fd());
+                drop(write_fd);
 
-                    offer_data.offer.receive(mime.to_string(), write_fd.as_fd());
-                    drop(write_fd);
+                if let Some(c) = conn {
+                    let _ = c.flush();
+                }
 
-                    if let Some(c) = conn {
-                        let _ = c.flush();
-                    }
-
-                    if let Ok(pty_fd) = self.pty.try_clone_master() {
-                        std::thread::spawn(move || {
-                            use std::io::Read;
-                            use std::os::fd::AsRawFd;
-
-                            // Limit paste payload to at most 10 MiB to prevent memory exhaustion
-                            let mut reader = std::fs::File::from(read_fd).take(10 * 1024 * 1024);
-                            let mut bytes = Vec::new();
-                            if reader.read_to_end(&mut bytes).is_ok() && !bytes.is_empty() {
-                                // PTY master is nonblocking: write with poll readiness loop to avoid truncation
-                                let mut to_write = &bytes[..];
-                                let start = std::time::Instant::now();
-                                while !to_write.is_empty()
-                                    && start.elapsed() < std::time::Duration::from_secs(5)
-                                {
-                                    let mut pfd = libc::pollfd {
-                                        fd: pty_fd.as_raw_fd(),
-                                        events: libc::POLLOUT,
-                                        revents: 0,
-                                    };
-                                    let poll_res = unsafe { libc::poll(&mut pfd, 1, 1000) };
-                                    if poll_res <= 0 {
-                                        break;
-                                    }
-                                    let res = unsafe {
-                                        libc::write(
-                                            pty_fd.as_raw_fd(),
-                                            to_write.as_ptr().cast(),
-                                            to_write.len(),
-                                        )
-                                    };
-                                    if res > 0 {
-                                        to_write = &to_write[res as usize..];
-                                    } else if res < 0 {
-                                        let err = std::io::Error::last_os_error();
-                                        if err.kind() == std::io::ErrorKind::Interrupted {
-                                            continue;
-                                        }
-                                        if err.kind() == std::io::ErrorKind::WouldBlock {
-                                            continue;
-                                        }
-                                        break;
-                                    } else {
-                                        break;
-                                    }
+                if let Ok(pty_fd) = self.pty.try_clone_master() {
+                    std::thread::spawn(move || {
+                        // Limit paste payload to at most 10 MiB to prevent memory exhaustion
+                        let mut reader = std::fs::File::from(read_fd).take(10 * 1024 * 1024);
+                        let mut bytes = Vec::new();
+                        if reader.read_to_end(&mut bytes).is_ok() && !bytes.is_empty() {
+                            // PTY master is nonblocking: write with poll readiness loop to avoid truncation
+                            let mut to_write = &bytes[..];
+                            let start = std::time::Instant::now();
+                            while !to_write.is_empty()
+                                && start.elapsed() < std::time::Duration::from_secs(5)
+                            {
+                                let mut fds = [PollFd::new(pty_fd.as_fd(), PollFlags::POLLOUT)];
+                                if !poll(&mut fds, 1000u16).is_ok_and(|ready| ready > 0) {
+                                    break;
+                                }
+                                match nix::unistd::write(&pty_fd, to_write) {
+                                    Ok(0) => break,
+                                    Ok(written) => to_write = &to_write[written..],
+                                    Err(Errno::EINTR | Errno::EAGAIN) => continue,
+                                    Err(_) => break,
                                 }
                             }
-                        });
-                        return;
-                    }
+                        }
+                    });
+                    return;
                 }
             }
             return;
@@ -677,15 +641,12 @@ impl Dispatch<WlKeyboard, ()> for AppState {
     ) {
         match event {
             wl_keyboard::Event::Keymap {
-                format: _,
+                format: WEnum::Value(wl_keyboard::KeymapFormat::XkbV1),
                 fd,
                 size,
-            } => unsafe {
-                use std::os::fd::AsRawFd;
-                state
-                    .keyboard
-                    .set_keymap_from_fd(fd.as_raw_fd(), size as usize);
-            },
+            } => {
+                state.keyboard.set_keymap_from_fd(fd, size as usize);
+            }
             wl_keyboard::Event::Enter { surface, .. } => {
                 if state.wayland.surface.as_ref() == Some(&surface) {
                     state.ime.active = true;
