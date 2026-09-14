@@ -687,13 +687,15 @@ fn build_vertices(
     {
         let mut cur_col = ccol;
         for c in preedit.text.chars() {
-            if cur_col >= grid.cols {
+            let remaining_cols = grid.cols.saturating_sub(cur_col);
+            if remaining_cols == 0 {
                 break;
             }
             let char_width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(1);
+            let visible_cols = char_width.min(remaining_cols);
             let px = pad_x + cur_col as f32 * cw;
             let py = pad_y + crow as f32 * ch;
-            let span_w = char_width as f32 * cw;
+            let span_w = visible_cols as f32 * cw;
 
             // Draw preedit cell background
             push_quad(
@@ -920,5 +922,41 @@ mod tests {
 
         // Vertices must contain the block cursor and the preedit quads
         assert!(vertices.len() >= 4 * 48);
+    }
+
+    #[test]
+    fn test_wide_preedit_clamped_at_last_column() {
+        let fonts = FontManager::load(14.0).expect("system monospace font");
+        let mut grid = Grid::new(5, 2, 0);
+        grid.cursor.row = 0;
+        grid.cursor.col = 4; // last column
+
+        let preedit = Preedit {
+            text: "中".to_string(), // wide char (width 2)
+            cursor_begin: 0,
+            cursor_end: 1,
+        };
+
+        let mut atlas = GlyphAtlas::new(64, 64);
+        prepare_atlas(&grid, &fonts, &mut atlas, Some(&preedit));
+
+        let mut vertices = Vec::new();
+        build_vertices(
+            &mut vertices,
+            &grid,
+            ColorScheme::new(&default_256_palette(), DEFAULT_FG, DEFAULT_BG),
+            fonts.metrics,
+            &fonts,
+            &atlas,
+            RenderOptions::new([10, 10], Some(&preedit)),
+        );
+
+        let cw = fonts.metrics.cell_width as f32;
+        // The preedit background quad x1 should be clamped to 10 + 5 * cw, NOT 10 + 6 * cw
+        let expected_right = 10.0 + 5.0 * cw;
+        // Verify no vertex in preedit quad exceeds the right edge
+        for chunk in vertices.chunks(8) {
+            assert!(chunk[0] <= expected_right + 0.01);
+        }
     }
 }
