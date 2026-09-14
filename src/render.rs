@@ -271,7 +271,7 @@ pub struct Renderer {
     texture: Option<glow::Texture>,
     viewport: Option<glow::UniformLocation>,
     atlas_size: Option<glow::UniformLocation>,
-    image_textures: HashMap<u32, (glow::Texture, u32, u32)>,
+    image_textures: HashMap<u32, (glow::Texture, u32, u32, u64)>,
     vertices: Vec<f32>,
     egl: EglContext,
 }
@@ -434,9 +434,15 @@ impl Renderer {
     fn sync_image_textures(&mut self, grid: &Grid) {
         let gl = &self.gl;
         let mut to_delete = Vec::new();
-        self.image_textures.retain(|id, (tex, _, _)| {
-            if grid.images.contains_key(id) {
-                true
+        self.image_textures.retain(|id, (tex, _, _, ver)| {
+            if let Some(_img) = grid.images.get(id) {
+                let current_ver = grid.image_versions.get(id).copied().unwrap_or(0);
+                if *ver == current_ver {
+                    true
+                } else {
+                    to_delete.push(*tex);
+                    false
+                }
             } else {
                 to_delete.push(*tex);
                 false
@@ -451,6 +457,7 @@ impl Renderer {
 
         for (id, img) in &grid.images {
             if !self.image_textures.contains_key(id) {
+                let ver = grid.image_versions.get(id).copied().unwrap_or(0);
                 unsafe {
                     if let Ok(tex) = gl.create_texture() {
                         gl.bind_texture(glow::TEXTURE_2D, Some(tex));
@@ -487,7 +494,7 @@ impl Renderer {
                             glow::PixelUnpackData::Slice(Some(&img.rgba)),
                         );
                         self.image_textures
-                            .insert(*id, (tex, img.width, img.height));
+                            .insert(*id, (tex, img.width, img.height, ver));
                     }
                 }
             }
@@ -524,7 +531,7 @@ impl Renderer {
                 continue;
             }
 
-            let Some(&(tex, img_w, img_h)) = self.image_textures.get(&placement.image_id) else {
+            let Some(&(tex, img_w, img_h, _)) = self.image_textures.get(&placement.image_id) else {
                 continue;
             };
 
@@ -594,7 +601,7 @@ impl Drop for Renderer {
                 if let Some(texture) = self.texture {
                     self.gl.delete_texture(texture);
                 }
-                for (_, (tex, _, _)) in self.image_textures.drain() {
+                for (_, (tex, _, _, _)) in self.image_textures.drain() {
                     self.gl.delete_texture(tex);
                 }
             }

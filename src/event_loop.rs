@@ -203,6 +203,37 @@ impl AppState {
         }
     }
 
+    /// Writes bytes to the non-blocking PTY master with a bounded readiness loop to prevent truncation.
+    pub fn write_pty_blocking(&mut self, mut bytes: &[u8]) {
+        let start = std::time::Instant::now();
+        while !bytes.is_empty() && start.elapsed() < std::time::Duration::from_millis(500) {
+            let res =
+                unsafe { libc::write(self.pty.as_raw_fd(), bytes.as_ptr().cast(), bytes.len()) };
+            if res > 0 {
+                bytes = &bytes[res as usize..];
+            } else if res < 0 {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                if err.kind() == io::ErrorKind::WouldBlock {
+                    let mut pfd = libc::pollfd {
+                        fd: self.pty.as_raw_fd(),
+                        events: libc::POLLOUT,
+                        revents: 0,
+                    };
+                    let poll_res = unsafe { libc::poll(&mut pfd, 1, 100) };
+                    if poll_res > 0 {
+                        continue;
+                    }
+                }
+                break;
+            } else {
+                break;
+            }
+        }
+    }
+
     /// Pastes text from the Wayland clipboard into the terminal PTY.
     pub fn paste_clipboard(&mut self, conn: Option<&Connection>) {
         if let Some(offer_data) = &self.wayland.current_offer {
@@ -1083,34 +1114,36 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
                             KittyEvent::Transmit { command, image } => {
                                 let image_id = image.id;
                                 let placement_id = command.placement_id.unwrap_or(0);
+                                let img_w = (image.width as f32).max(1.0);
+                                let img_h = (image.height as f32).max(1.0);
                                 state.terminal.grid.add_image(image);
+
+                                let cw = state.font_mgr.metrics.cell_width as f32;
+                                let ch = state.font_mgr.metrics.cell_height as f32;
 
                                 let (cols, rows) = match (command.cols, command.rows) {
                                     (Some(c), Some(r)) => (c as usize, r as usize),
                                     (Some(c), None) => {
-                                        let r = ((c as f32)
-                                            * state.font_mgr.metrics.cell_width as f32
-                                            / state.font_mgr.metrics.cell_height as f32)
-                                            .ceil()
-                                            .max(1.0)
-                                            as usize;
+                                        let pixel_w = c as f32 * cw;
+                                        let pixel_h = pixel_w * (img_h / img_w);
+                                        let r = (pixel_h / ch).ceil().max(1.0) as usize;
                                         (c as usize, r)
                                     }
                                     (None, Some(r)) => {
-                                        let c = ((r as f32)
-                                            * state.font_mgr.metrics.cell_height as f32
-                                            / state.font_mgr.metrics.cell_width as f32)
-                                            .ceil()
-                                            .max(1.0)
-                                            as usize;
+                                        let pixel_h = r as f32 * ch;
+                                        let pixel_w = pixel_h * (img_w / img_h);
+                                        let c = (pixel_w / cw).ceil().max(1.0) as usize;
                                         (c, r as usize)
                                     }
-                                    (None, None) => (1, 1),
+                                    (None, None) => {
+                                        let c = (img_w / cw).ceil().max(1.0) as usize;
+                                        let r = (img_h / ch).ceil().max(1.0) as usize;
+                                        (c, r)
+                                    }
                                 };
 
                                 let abs_line = state.terminal.grid.scrollback.len()
-                                    + state.terminal.grid.cursor.row
-                                    - state.terminal.grid.viewport_offset;
+                                    + state.terminal.grid.cursor.row;
                                 state.terminal.grid.add_placement(ImagePlacement {
                                     image_id,
                                     placement_id,
@@ -1131,7 +1164,7 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
 
                                 if command.action == KittyAction::TransmitAndDisplayWithResponse {
                                     let resp = format!("\x1b_Gi={image_id};OK\x1b\\").into_bytes();
-                                    let _ = state.pty.write_all(&resp);
+                                    state.write_pty_blocking(&resp);
                                 }
                             }
                             KittyEvent::Place { command } => {
@@ -1140,8 +1173,7 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
                                     let cols = command.cols.unwrap_or(1) as usize;
                                     let rows = command.rows.unwrap_or(1) as usize;
                                     let abs_line = state.terminal.grid.scrollback.len()
-                                        + state.terminal.grid.cursor.row
-                                        - state.terminal.grid.viewport_offset;
+                                        + state.terminal.grid.cursor.row;
                                     state.terminal.grid.add_placement(ImagePlacement {
                                         image_id,
                                         placement_id,
@@ -1159,7 +1191,7 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
                                 state.terminal.grid.delete_images(target);
                             }
                             KittyEvent::Response(resp) => {
-                                let _ = state.pty.write_all(&resp);
+                                state.write_pty_blocking(&resp);
                             }
                         }
                     }

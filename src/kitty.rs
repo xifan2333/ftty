@@ -106,11 +106,14 @@ pub enum KittyEvent {
     Response(Vec<u8>),
 }
 
+const MAX_APC_PAYLOAD: usize = 32 * 1024 * 1024;
+
 /// State machine intercepting Kitty APC graphics sequences (`\x1b_G...;payload\x1b\`) from the byte stream.
 #[derive(Default)]
 pub struct KittyParser {
     in_apc: bool,
     apc_buffer: Vec<u8>,
+    pending_stream: Vec<u8>,
     chunked_command: Option<KittyCommand>,
     chunked_payload: Vec<u8>,
     next_image_id: u32,
@@ -128,13 +131,31 @@ impl KittyParser {
     /// Filters an incoming byte stream, stripping Kitty APC sequences and emitting parsed graphics events.
     ///
     /// Non-graphics bytes are returned in the first vector to be processed by the standard VT parser.
-    pub fn filter_bytes(&mut self, bytes: &[u8]) -> (Vec<u8>, Vec<KittyEvent>) {
+    pub fn filter_bytes(&mut self, incoming: &[u8]) -> (Vec<u8>, Vec<KittyEvent>) {
+        let mut bytes_buf;
+        let bytes: &[u8] = if self.pending_stream.is_empty() {
+            incoming
+        } else {
+            bytes_buf = std::mem::take(&mut self.pending_stream);
+            bytes_buf.extend_from_slice(incoming);
+            &bytes_buf
+        };
+
         let mut text_output = Vec::with_capacity(bytes.len());
         let mut events = Vec::new();
         let mut i = 0;
 
         while i < bytes.len() {
             if self.in_apc {
+                if self.apc_buffer.len() > MAX_APC_PAYLOAD {
+                    self.in_apc = false;
+                    self.apc_buffer.clear();
+                    self.chunked_payload.clear();
+                    self.chunked_command = None;
+                    i += 1;
+                    continue;
+                }
+
                 // Look for APC terminator: \x1b\ (ST) or \x07 (BEL)
                 let byte = bytes[i];
                 if byte == 0x07 {
@@ -144,26 +165,49 @@ impl KittyParser {
                     }
                     self.apc_buffer.clear();
                     i += 1;
-                } else if byte == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
-                    self.in_apc = false;
-                    if let Some(event) = self.finish_apc() {
-                        events.push(event);
+                } else if byte == 0x1b {
+                    if i + 1 < bytes.len() {
+                        if bytes[i + 1] == b'\\' {
+                            self.in_apc = false;
+                            if let Some(event) = self.finish_apc() {
+                                events.push(event);
+                            }
+                            self.apc_buffer.clear();
+                            i += 2;
+                        } else {
+                            self.apc_buffer.push(byte);
+                            i += 1;
+                        }
+                    } else {
+                        self.pending_stream.push(byte);
+                        break;
                     }
-                    self.apc_buffer.clear();
-                    i += 2;
                 } else {
                     self.apc_buffer.push(byte);
                     i += 1;
                 }
-            } else if bytes[i] == 0x1b
-                && i + 2 < bytes.len()
-                && bytes[i + 1] == b'_'
-                && bytes[i + 2] == b'G'
-            {
-                // Detected start of Kitty APC: \x1b_G
-                self.in_apc = true;
-                self.apc_buffer.clear();
-                i += 3;
+            } else if bytes[i] == 0x1b {
+                if i + 2 < bytes.len() {
+                    if bytes[i + 1] == b'_' && bytes[i + 2] == b'G' {
+                        self.in_apc = true;
+                        self.apc_buffer.clear();
+                        i += 3;
+                    } else {
+                        text_output.push(bytes[i]);
+                        i += 1;
+                    }
+                } else if i + 1 < bytes.len() {
+                    if bytes[i + 1] == b'_' {
+                        self.pending_stream.extend_from_slice(&bytes[i..]);
+                        break;
+                    } else {
+                        text_output.push(bytes[i]);
+                        i += 1;
+                    }
+                } else {
+                    self.pending_stream.push(bytes[i]);
+                    break;
+                }
             } else {
                 text_output.push(bytes[i]);
                 i += 1;
@@ -248,6 +292,7 @@ impl KittyParser {
 /// Parses the comma-separated control keys string into a `KittyCommand`.
 pub fn parse_control_keys(s: &str) -> KittyCommand {
     let mut cmd = KittyCommand::default();
+    let mut delete_selector = None;
 
     for pair in s.split(',') {
         let pair = pair.trim();
@@ -287,25 +332,12 @@ pub fn parse_control_keys(s: &str) -> KittyCommand {
                 };
             }
             "d" => {
-                cmd.delete_target = match val {
-                    "a" | "A" => DeleteTarget::All,
-                    "c" | "C" => DeleteTarget::AtCursor,
-                    "i" | "I" => cmd.image_id.map_or(DeleteTarget::All, DeleteTarget::ById),
-                    "p" | "P" => cmd
-                        .placement_id
-                        .map_or(DeleteTarget::All, DeleteTarget::ByPlacement),
-                    _ => DeleteTarget::All,
-                };
+                delete_selector = Some(val);
             }
             "s" => cmd.width = val.parse().ok(),
             "v" => cmd.height = val.parse().ok(),
             "i" => {
-                if let Ok(id) = val.parse() {
-                    cmd.image_id = Some(id);
-                    if cmd.action == KittyAction::Delete {
-                        cmd.delete_target = DeleteTarget::ById(id);
-                    }
-                }
+                cmd.image_id = val.parse().ok();
             }
             "p" => cmd.placement_id = val.parse().ok(),
             "c" => cmd.cols = val.parse().ok(),
@@ -318,6 +350,18 @@ pub fn parse_control_keys(s: &str) -> KittyCommand {
             "q" => cmd.quiet = val.parse().unwrap_or(0),
             _ => {}
         }
+    }
+
+    if let Some(val) = delete_selector {
+        cmd.delete_target = match val {
+            "a" | "A" => DeleteTarget::All,
+            "c" | "C" => DeleteTarget::AtCursor,
+            "i" | "I" => cmd.image_id.map_or(DeleteTarget::All, DeleteTarget::ById),
+            "p" | "P" => cmd
+                .placement_id
+                .map_or(DeleteTarget::All, DeleteTarget::ByPlacement),
+            _ => DeleteTarget::All,
+        };
     }
 
     cmd
@@ -337,9 +381,17 @@ fn decode_image_data(id: u32, cmd: &KittyCommand, raw_payload: &[u8]) -> io::Res
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
             let path_str = std::str::from_utf8(&path_bytes)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            let data = fs::read(path_str)?;
+            let path = std::path::Path::new(path_str);
+            let data = fs::read(path)?;
             if cmd.medium == KittyMedium::TempFile {
-                let _ = fs::remove_file(path_str);
+                let temp_dir = std::env::temp_dir();
+                // Security: only remove file if it resides in an approved temporary directory
+                if path.starts_with(&temp_dir)
+                    || path.starts_with("/tmp")
+                    || path.starts_with("/dev/shm")
+                {
+                    let _ = fs::remove_file(path);
+                }
             }
             data
         }
@@ -460,7 +512,10 @@ fn read_shm_payload(name: &str) -> io::Result<Vec<u8>> {
 }
 
 fn decode_png(id: u32, bytes: &[u8]) -> io::Result<ImageData> {
-    let decoder = png::Decoder::new(Cursor::new(bytes));
+    let mut decoder = png::Decoder::new(Cursor::new(bytes));
+    decoder.set_transformations(
+        png::Transformations::EXPAND | png::Transformations::STRIP_16 | png::Transformations::ALPHA,
+    );
     let mut reader = decoder
         .read_info()
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -471,7 +526,8 @@ fn decode_png(id: u32, bytes: &[u8]) -> io::Result<ImageData> {
     let width = info.width;
     let height = info.height;
 
-    let rgba = match info.color_type {
+    let (color_type, _) = reader.output_color_type();
+    let rgba = match color_type {
         png::ColorType::Rgba => buf[..info.buffer_size()].to_vec(),
         png::ColorType::Rgb => {
             let mut out = Vec::with_capacity((width as usize) * (height as usize) * 4);
@@ -494,10 +550,10 @@ fn decode_png(id: u32, bytes: &[u8]) -> io::Result<ImageData> {
             }
             out
         }
-        png::ColorType::Indexed => {
+        _ => {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "indexed PNG color format not supported",
+                "unsupported PNG color format",
             ));
         }
     };
@@ -643,5 +699,29 @@ mod tests {
             }
             other => panic!("Expected Transmit with response, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_split_apc_framing() {
+        let mut parser = KittyParser::new();
+        let (t1, e1) = parser.filter_bytes(b"hello\x1b");
+        assert_eq!(t1, b"hello");
+        assert!(e1.is_empty());
+
+        let (t2, e2) = parser.filter_bytes(b"_Gi=1,a=q;\x1b");
+        assert!(t2.is_empty());
+        assert!(e2.is_empty());
+
+        let (t3, e3) = parser.filter_bytes(b"\\world");
+        assert_eq!(t3, b"world");
+        assert_eq!(e3.len(), 1);
+        assert_eq!(e3[0], KittyEvent::Response(b"\x1b_Gi=1;OK\x1b\\".to_vec()));
+    }
+
+    #[test]
+    fn test_order_independent_delete() {
+        let cmd = parse_control_keys("d=i,i=7,a=d");
+        assert_eq!(cmd.action, KittyAction::Delete);
+        assert_eq!(cmd.delete_target, DeleteTarget::ById(7));
     }
 }
