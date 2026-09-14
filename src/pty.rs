@@ -1,13 +1,14 @@
 //! POSIX pseudo-terminal (PTY) allocation and child process management.
 
-use nix::fcntl::{FcntlArg, OFlag, fcntl};
+use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl};
 use nix::pty::{Winsize, openpty};
 use nix::sys::signal::{Signal, kill};
 use nix::sys::wait::{WaitPidFlag, waitpid};
-use nix::unistd::{ForkResult, Pid, execvp, fork, setsid};
-use std::ffi::CString;
+use nix::unistd::{Pid, setsid};
 use std::io::{self, Read, Write};
-use std::os::fd::{AsFd, AsRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
+use std::os::unix::process::CommandExt;
+use std::process::{Command, Stdio};
 
 /// Manages a PTY master file descriptor and its associated child process.
 #[derive(Debug)]
@@ -20,7 +21,7 @@ impl Pty {
     /// Spawns a shell or specific command inside a new PTY session.
     ///
     /// # Errors
-    /// Returns an [`io::Error`] if PTY allocation, forking, or file descriptor manipulation fails.
+    /// Returns an [`io::Error`] if PTY allocation, process setup, or command execution fails.
     pub fn spawn(command: Option<&[&str]>, cols: u16, rows: u16) -> io::Result<Self> {
         let winsize = Winsize {
             ws_row: rows,
@@ -35,6 +36,11 @@ impl Pty {
         let master = pty_res.master;
         let slave = pty_res.slave;
 
+        // Neither PTY descriptor should leak into an executed child beyond its stdio.
+        for fd in [&master, &slave] {
+            fcntl(fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
+        }
+
         // Configure non-blocking reads on master fd
         let flags = fcntl(master.as_fd(), FcntlArg::F_GETFL)
             .map_err(|e| io::Error::from_raw_os_error(e as i32))?;
@@ -44,70 +50,41 @@ impl Pty {
         )
         .map_err(|e| io::Error::from_raw_os_error(e as i32))?;
 
-        match unsafe { fork() } {
-            Ok(ForkResult::Parent { child }) => {
-                // In parent: close slave
-                drop(slave);
-                Ok(Self {
-                    master,
-                    child_pid: child,
-                })
+        let default_shell = std::env::var_os("SHELL").unwrap_or_else(|| "/bin/sh".into());
+        let mut child = match command.and_then(|args| args.split_first()) {
+            Some((program, args)) => {
+                let mut child = Command::new(program);
+                child.args(args);
+                child
             }
-            Ok(ForkResult::Child) => {
-                // In child process
-                drop(master);
+            None => Command::new(default_shell),
+        };
+        child
+            .env("TERM", "xterm-256color")
+            .env("COLORTERM", "truecolor")
+            .stdin(Stdio::from(slave.try_clone()?))
+            .stdout(Stdio::from(slave.try_clone()?))
+            .stderr(Stdio::from(slave));
 
-                // Create new session
-                if setsid().is_err() {
-                    unsafe { libc::_exit(1) };
+        // SAFETY: Command prepares arguments, environment, and stdio before this hook.
+        // The child hook only performs system calls and constructs OS errors; it does
+        // not allocate, acquire Rust locks, or run destructors between fork and exec.
+        unsafe {
+            child.pre_exec(|| {
+                setsid()?;
+                // Command has already connected stdin to the live PTY slave.
+                // TIOCSCTTY takes an integer argument, not a pointer.
+                if libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY as _, 0) < 0 {
+                    return Err(io::Error::last_os_error());
                 }
-
-                // Acquire controlling terminal
-                unsafe {
-                    libc::ioctl(slave.as_raw_fd(), libc::TIOCSCTTY as _, 0);
-                }
-
-                // Redirect stdin, stdout, stderr to slave
-                let slave_raw = slave.as_raw_fd();
-                unsafe {
-                    if libc::dup2(slave_raw, 0) < 0
-                        || libc::dup2(slave_raw, 1) < 0
-                        || libc::dup2(slave_raw, 2) < 0
-                    {
-                        libc::_exit(1);
-                    }
-                }
-
-                if slave_raw > 2 {
-                    drop(slave);
-                }
-
-                // Terminal identification environment variables
-                unsafe {
-                    std::env::set_var("TERM", "xterm-256color");
-                    std::env::set_var("COLORTERM", "truecolor");
-                }
-
-                let default_shell =
-                    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-                let (prog, arg_strings): (&str, Vec<&str>) = match command {
-                    Some(args) if !args.is_empty() => (args[0], args.to_vec()),
-                    _ => (default_shell.as_str(), vec![default_shell.as_str()]),
-                };
-
-                let prog_c = CString::new(prog).unwrap_or_default();
-                let c_args: Vec<CString> = arg_strings
-                    .into_iter()
-                    .map(|s| CString::new(s).unwrap_or_default())
-                    .collect();
-                let c_arg_ptrs: Vec<&std::ffi::CStr> =
-                    c_args.iter().map(|c| c.as_c_str()).collect();
-
-                let _ = execvp(&prog_c, &c_arg_ptrs);
-                unsafe { libc::_exit(127) };
-            }
-            Err(e) => Err(io::Error::from_raw_os_error(e as i32)),
+                Ok(())
+            });
         }
+        let child = child.spawn()?;
+        Ok(Self {
+            master,
+            child_pid: Pid::from_raw(child.id() as i32),
+        })
     }
 
     /// Resizes the PTY terminal window size (`TIOCSWINSZ`).
@@ -121,6 +98,8 @@ impl Pty {
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
+        // SAFETY: master owns a live PTY descriptor, and ws is an initialized Winsize
+        // with the layout required by TIOCSWINSZ; the ioctl does not retain its pointer.
         let res = unsafe { libc::ioctl(self.master.as_raw_fd(), libc::TIOCSWINSZ, &ws) };
         if res < 0 {
             Err(io::Error::last_os_error())
@@ -158,26 +137,21 @@ impl Pty {
     }
 }
 
+impl AsFd for Pty {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.master.as_fd()
+    }
+}
+
 impl Read for Pty {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let res =
-            unsafe { libc::read(self.master.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
-        if res < 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(res as usize)
-        }
+        nix::unistd::read(&self.master, buf).map_err(Into::into)
     }
 }
 
 impl Write for Pty {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let res = unsafe { libc::write(self.master.as_raw_fd(), buf.as_ptr().cast(), buf.len()) };
-        if res < 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(res as usize)
-        }
+        nix::unistd::write(&self.master, buf).map_err(Into::into)
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -196,6 +170,66 @@ impl Drop for Pty {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_has_terminal_stdio_environment_and_a_controlling_tty() {
+        use nix::poll::{PollFd, PollFlags, poll};
+        use std::time::{Duration, Instant};
+
+        let parent_term = std::env::var_os("TERM");
+        let parent_colorterm = std::env::var_os("COLORTERM");
+        let mut pty = Pty::spawn(
+            Some(&[
+                "/bin/sh",
+                "-c",
+                "test -t 0 && test -t 1 && test -t 2 && stty size </dev/tty && printf '%s|%s\\n' \"$TERM\" \"$COLORTERM\"",
+            ]),
+            80,
+            24,
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut output = Vec::new();
+        let mut closed = false;
+        while Instant::now() < deadline {
+            let mut buf = [0; 1024];
+            match pty.read(&mut buf) {
+                Ok(0) => {
+                    closed = true;
+                    break;
+                }
+                Ok(n) => output.extend_from_slice(&buf[..n]),
+                Err(err) if err.raw_os_error() == Some(libc::EIO) => {
+                    closed = true;
+                    break;
+                }
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    let mut fds = [PollFd::new(pty.as_fd(), PollFlags::POLLIN)];
+                    poll(&mut fds, 100u16).unwrap();
+                }
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                Err(err) => panic!("PTY read failed: {err}"),
+            }
+        }
+        let output = String::from_utf8(output).unwrap();
+        assert!(
+            closed,
+            "PTY did not close after the command exited: {output:?}"
+        );
+        assert!(
+            output.contains("24 80"),
+            "missing controlling TTY: {output:?}"
+        );
+        assert!(output.contains("xterm-256color|truecolor"), "{output:?}");
+        assert_eq!(std::env::var_os("TERM"), parent_term);
+        assert_eq!(std::env::var_os("COLORTERM"), parent_colorterm);
+    }
+
+    #[test]
+    fn nonexistent_command_reports_an_exec_error() {
+        let error = Pty::spawn(Some(&["/ftty-test-nonexistent-command"]), 80, 24).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
 
     #[test]
     fn test_pty_spawn_and_resize() {

@@ -1,5 +1,7 @@
 //! ftty - Ultra-lightweight, Suckless Wayland terminal emulator with native Kitty graphics protocol
 
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 pub mod color;
 pub mod config;
 pub mod event_loop;

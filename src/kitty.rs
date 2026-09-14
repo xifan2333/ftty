@@ -1,10 +1,13 @@
 //! Native Kitty Graphics Protocol APC sequence parser and image loader.
 
 use std::fs;
-use std::io::{self, Cursor};
+use std::io::{self, Cursor, Read};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use nix::fcntl::OFlag;
+use nix::sys::mman::shm_open;
+use nix::sys::stat::Mode;
 
 /// Kitty graphics action requested by the client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -107,6 +110,8 @@ pub enum KittyEvent {
 }
 
 const MAX_APC_PAYLOAD: usize = 32 * 1024 * 1024;
+// A shared-memory APC contains only a name, so its backing object needs a separate cap.
+const MAX_SHM_PAYLOAD: u64 = 32 * 1024 * 1024;
 
 /// State machine intercepting Kitty APC graphics sequences (`\x1b_G...;payload\x1b\`) from the byte stream.
 #[derive(Default)]
@@ -463,49 +468,28 @@ fn decode_image_data(id: u32, cmd: &KittyCommand, raw_payload: &[u8]) -> io::Res
 }
 
 fn read_shm_payload(name: &str) -> io::Result<Vec<u8>> {
-    let c_name =
-        std::ffi::CString::new(name).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-    let fd = unsafe { libc::shm_open(c_name.as_ptr(), libc::O_RDONLY, 0) };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
+    let file = fs::File::from(shm_open(name, OFlag::O_RDONLY, Mode::empty())?);
+    let size = file.metadata()?.len();
+    read_shm_bytes(file, size)
+}
+
+fn read_shm_bytes(mut file: fs::File, size: u64) -> io::Result<Vec<u8>> {
+    if size > MAX_SHM_PAYLOAD {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "shared memory exceeds the 32 MiB image payload limit",
+        ));
     }
 
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(fd, &mut stat) } < 0 {
-        let err = io::Error::last_os_error();
-        unsafe { libc::close(fd) };
-        return Err(err);
-    }
-
-    let size = stat.st_size as usize;
-    if size == 0 {
-        unsafe { libc::close(fd) };
-        return Ok(Vec::new());
-    }
-
-    let ptr = unsafe {
-        libc::mmap(
-            std::ptr::null_mut(),
-            size,
-            libc::PROT_READ,
-            libc::MAP_SHARED,
-            fd,
-            0,
-        )
-    };
-
-    if ptr == libc::MAP_FAILED {
-        let err = io::Error::last_os_error();
-        unsafe { libc::close(fd) };
-        return Err(err);
-    }
-
-    let slice = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), size) };
-    let bytes = slice.to_vec();
-
-    unsafe {
-        libc::munmap(ptr, size);
-        libc::close(fd);
+    // The sender may resize its object at any time. Read into owned memory so a
+    // concurrent truncate returns an I/O error instead of faulting mapped pages.
+    let mut bytes = vec![0; size as usize];
+    file.read_exact(&mut bytes)?;
+    if file.metadata()?.len() != size {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "shared memory changed size during transfer",
+        ));
     }
 
     Ok(bytes)
@@ -569,6 +553,73 @@ fn decode_png(id: u32, bytes: &[u8]) -> io::Result<ImageData> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_memory_loads_images_and_rejects_oversized_payloads() {
+        use nix::sys::mman::shm_unlink;
+        use std::io::Write;
+
+        struct ShmName(String);
+        impl Drop for ShmName {
+            fn drop(&mut self) {
+                let _ = shm_unlink(self.0.as_str());
+            }
+        }
+
+        let name = format!("/ftty-kitty-test-{}", std::process::id());
+        let fd = shm_open(
+            name.as_str(),
+            OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_RDWR,
+            Mode::S_IRUSR | Mode::S_IWUSR,
+        )
+        .unwrap();
+        let name = ShmName(name);
+        let mut file = fs::File::from(fd);
+        assert_eq!(read_shm_payload(&name.0).unwrap(), Vec::<u8>::new());
+
+        let pixels = [255, 128, 0, 255];
+        file.write_all(&pixels).unwrap();
+        let command = KittyCommand {
+            medium: KittyMedium::SharedMemory,
+            width: Some(1),
+            height: Some(1),
+            ..Default::default()
+        };
+        let image =
+            decode_image_data(7, &command, BASE64_STANDARD.encode(&name.0).as_bytes()).unwrap();
+        assert_eq!(image.rgba, pixels);
+        assert_eq!((image.id, image.width, image.height), (7, 1, 1));
+
+        // A sparse object can exceed the cap without consuming that much RAM.
+        file.set_len(MAX_SHM_PAYLOAD + 1).unwrap();
+        assert_eq!(
+            read_shm_payload(&name.0).unwrap_err().kind(),
+            io::ErrorKind::InvalidData,
+        );
+    }
+
+    #[test]
+    fn shared_memory_size_changes_are_rejected() {
+        use nix::sys::memfd::{MFdFlags, memfd_create};
+
+        for (initial, changed, error_kind) in [
+            (4, 2, io::ErrorKind::UnexpectedEof),
+            (4, 8, io::ErrorKind::InvalidData),
+            (0, 1, io::ErrorKind::InvalidData),
+        ] {
+            let fd = memfd_create(c"ftty-shm-resize-test", MFdFlags::MFD_CLOEXEC).unwrap();
+            let file = fs::File::from(fd);
+            file.set_len(initial).unwrap();
+            let observed_size = file.metadata().unwrap().len();
+
+            // Deterministically simulate the sender resizing after the size query.
+            file.set_len(changed).unwrap();
+            assert_eq!(
+                read_shm_bytes(file, observed_size).unwrap_err().kind(),
+                error_kind,
+            );
+        }
+    }
 
     #[test]
     fn test_parse_kitty_query() {
