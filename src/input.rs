@@ -3,6 +3,132 @@
 use std::os::fd::RawFd;
 use xkbcommon::xkb::{self, Context, KEYMAP_FORMAT_TEXT_V1, Keycode, Keymap, State, keysyms};
 
+use crate::config::KeybindingsConfig;
+
+/// Semantic actions triggered by key combinations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum KeyAction {
+    ScrollbackUpPage,
+    ScrollbackDownPage,
+    ScrollbackUpLine,
+    ScrollbackDownLine,
+    ScrollbackHome,
+    ScrollbackEnd,
+    FontIncrease,
+    FontDecrease,
+    FontReset,
+    ClipboardCopy,
+    ClipboardPaste,
+    PrimaryPaste,
+}
+
+/// Keyboard modifiers state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Modifiers {
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+    pub logo: bool,
+}
+
+/// Parses a key combination string (e.g. `"Shift+PageUp"` or `"Ctrl+Shift+C"`).
+#[must_use]
+pub fn parse_key_combo(s: &str) -> Option<(Modifiers, xkb::Keysym)> {
+    let s = s.trim();
+    if s.is_empty() || s.eq_ignore_ascii_case("none") {
+        return None;
+    }
+
+    let mut ctrl = false;
+    let mut alt = false;
+    let mut shift = false;
+    let mut logo = false;
+
+    // Handle trailing '+' in combo like "Ctrl++"
+    let (mod_part, key_str) = if let Some(prefix) = s.strip_suffix("++") {
+        (prefix, "+")
+    } else {
+        match s.rfind('+') {
+            Some(idx) => (&s[..idx], &s[idx + 1..]),
+            None => ("", s),
+        }
+    };
+
+    if !mod_part.is_empty() {
+        for part in mod_part.split('+') {
+            let p = part.trim();
+            if p.eq_ignore_ascii_case("ctrl") || p.eq_ignore_ascii_case("control") {
+                ctrl = true;
+            } else if p.eq_ignore_ascii_case("alt") || p.eq_ignore_ascii_case("mod1") {
+                alt = true;
+            } else if p.eq_ignore_ascii_case("shift") {
+                shift = true;
+            } else if p.eq_ignore_ascii_case("super")
+                || p.eq_ignore_ascii_case("mod4")
+                || p.eq_ignore_ascii_case("logo")
+            {
+                logo = true;
+            } else {
+                return None;
+            }
+        }
+    }
+
+    let key_trimmed = key_str.trim();
+    let sym = match key_trimmed.to_ascii_lowercase().as_str() {
+        "pageup" | "page_up" => xkb::Keysym::new(keysyms::KEY_Page_Up),
+        "pagedown" | "page_down" => xkb::Keysym::new(keysyms::KEY_Page_Down),
+        "kp_pageup" | "kp_page_up" => xkb::Keysym::new(keysyms::KEY_KP_Page_Up),
+        "kp_pagedown" | "kp_page_down" => xkb::Keysym::new(keysyms::KEY_KP_Page_Down),
+        "home" => xkb::Keysym::new(keysyms::KEY_Home),
+        "end" => xkb::Keysym::new(keysyms::KEY_End),
+        "up" => xkb::Keysym::new(keysyms::KEY_Up),
+        "down" => xkb::Keysym::new(keysyms::KEY_Down),
+        "left" => xkb::Keysym::new(keysyms::KEY_Left),
+        "right" => xkb::Keysym::new(keysyms::KEY_Right),
+        "insert" => xkb::Keysym::new(keysyms::KEY_Insert),
+        "+" | "plus" | "kp_add" => xkb::Keysym::new(keysyms::KEY_plus),
+        "=" | "equal" => xkb::Keysym::new(keysyms::KEY_equal),
+        "-" | "minus" | "kp_subtract" => xkb::Keysym::new(keysyms::KEY_minus),
+        "0" | "kp_0" => xkb::Keysym::new(keysyms::KEY_0),
+        other => {
+            if other.len() == 1 {
+                let ch = other.chars().next()?;
+                xkb::utf32_to_keysym(ch as u32)
+            } else {
+                xkb::keysym_from_name(other, xkb::KEYSYM_CASE_INSENSITIVE)
+            }
+        }
+    };
+
+    if sym == xkb::Keysym::new(keysyms::KEY_NoSymbol) {
+        None
+    } else {
+        Some((
+            Modifiers {
+                ctrl,
+                alt,
+                shift,
+                logo,
+            },
+            sym,
+        ))
+    }
+}
+
+fn sym_matches(pressed: xkb::Keysym, target: xkb::Keysym) -> bool {
+    if pressed == target {
+        return true;
+    }
+    let p_char = char::from_u32(xkb::keysym_to_utf32(pressed));
+    let t_char = char::from_u32(xkb::keysym_to_utf32(target));
+    if let (Some(p), Some(t)) = (p_char, t_char) {
+        p.eq_ignore_ascii_case(&t)
+    } else {
+        false
+    }
+}
+
 /// Handles key events and produces VT escape sequences or UTF-8 byte streams.
 pub struct KeyboardHandler {
     context: Context,
@@ -88,6 +214,105 @@ impl KeyboardHandler {
         if let Some(state) = &mut self.state {
             state.update_mask(depressed, latched, locked, 0, 0, group);
         }
+    }
+
+    /// Checks if a keycode matches an action in `KeybindingsConfig`.
+    #[must_use]
+    pub fn check_action(&self, key: u32, config: &KeybindingsConfig) -> Option<KeyAction> {
+        let state = self.state.as_ref()?;
+        let keycode = Keycode::new(key + 8);
+        let sym = state.key_get_one_sym(keycode);
+        let ctrl = state.mod_name_is_active("Control", xkb::STATE_MODS_EFFECTIVE);
+        let alt = state.mod_name_is_active("Mod1", xkb::STATE_MODS_EFFECTIVE);
+        let shift = state.mod_name_is_active("Shift", xkb::STATE_MODS_EFFECTIVE);
+        let logo = state.mod_name_is_active("Mod4", xkb::STATE_MODS_EFFECTIVE);
+        let current_mods = Modifiers {
+            ctrl,
+            alt,
+            shift,
+            logo,
+        };
+
+        let bindings = [
+            (
+                KeyAction::ScrollbackUpPage,
+                config.scrollback_up_page.as_ref(),
+                &["Shift+PageUp", "Shift+KP_PageUp"][..],
+            ),
+            (
+                KeyAction::ScrollbackDownPage,
+                config.scrollback_down_page.as_ref(),
+                &["Shift+PageDown", "Shift+KP_PageDown"][..],
+            ),
+            (
+                KeyAction::ScrollbackUpLine,
+                config.scrollback_up_line.as_ref(),
+                &["Ctrl+Shift+Up"][..],
+            ),
+            (
+                KeyAction::ScrollbackDownLine,
+                config.scrollback_down_line.as_ref(),
+                &["Ctrl+Shift+Down"][..],
+            ),
+            (
+                KeyAction::ScrollbackHome,
+                config.scrollback_home.as_ref(),
+                &["Shift+Home"][..],
+            ),
+            (
+                KeyAction::ScrollbackEnd,
+                config.scrollback_end.as_ref(),
+                &["Shift+End"][..],
+            ),
+            (
+                KeyAction::FontIncrease,
+                config.font_increase.as_ref(),
+                &["Ctrl+Plus", "Ctrl+Equal"][..],
+            ),
+            (
+                KeyAction::FontDecrease,
+                config.font_decrease.as_ref(),
+                &["Ctrl+Minus"][..],
+            ),
+            (
+                KeyAction::FontReset,
+                config.font_reset.as_ref(),
+                &["Ctrl+0"][..],
+            ),
+            (
+                KeyAction::ClipboardCopy,
+                config.clipboard_copy.as_ref(),
+                &["Ctrl+Shift+C"][..],
+            ),
+            (
+                KeyAction::ClipboardPaste,
+                config.clipboard_paste.as_ref(),
+                &["Ctrl+Shift+V"][..],
+            ),
+            (
+                KeyAction::PrimaryPaste,
+                config.primary_paste.as_ref(),
+                &["Shift+Insert"][..],
+            ),
+        ];
+
+        for (action, configured, defaults) in bindings {
+            let combos: Vec<&str> = match configured {
+                Some(c) => c.to_combos(),
+                None => defaults.to_vec(),
+            };
+
+            for combo_str in combos {
+                if let Some((target_mods, target_sym)) = parse_key_combo(combo_str)
+                    && current_mods == target_mods
+                    && sym_matches(sym, target_sym)
+                {
+                    return Some(action);
+                }
+            }
+        }
+
+        None
     }
 
     /// Translates a raw Linux keycode into bytes to write to the PTY.
@@ -234,5 +459,34 @@ mod tests {
         // Test Arrow Down (evdev code 108)
         let down = handler.handle_key(108);
         assert_eq!(down, Some(b"\x1b[B".to_vec()));
+    }
+
+    #[test]
+    fn test_parse_key_combo() {
+        let (mods, sym) = parse_key_combo("Shift+PageUp").unwrap();
+        assert!(mods.shift);
+        assert!(!mods.ctrl);
+        assert_eq!(sym, xkb::Keysym::new(keysyms::KEY_Page_Up));
+
+        let (mods, sym) = parse_key_combo("Ctrl+Shift+c").unwrap();
+        assert!(mods.ctrl);
+        assert!(mods.shift);
+        assert_eq!(sym, xkb::Keysym::new(keysyms::KEY_c));
+
+        let (mods, sym) = parse_key_combo("Control+Plus").unwrap();
+        assert!(mods.ctrl);
+        assert_eq!(sym, xkb::Keysym::new(keysyms::KEY_plus));
+
+        assert!(parse_key_combo("none").is_none());
+        assert!(parse_key_combo("").is_none());
+    }
+
+    #[test]
+    fn test_check_action_default_bindings() {
+        let handler = KeyboardHandler::new();
+        let config = KeybindingsConfig::default();
+
+        // With no modifiers active, PageUp (evdev 104) is NOT an action
+        assert!(handler.check_action(104, &config).is_none());
     }
 }

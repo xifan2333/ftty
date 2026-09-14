@@ -2,7 +2,8 @@
 
 use wayland_client::QueueHandle;
 use wayland_client::protocol::{
-    wl_compositor::WlCompositor, wl_keyboard::WlKeyboard, wl_seat::WlSeat, wl_surface::WlSurface,
+    wl_compositor::WlCompositor, wl_keyboard::WlKeyboard, wl_pointer::WlPointer, wl_seat::WlSeat,
+    wl_surface::WlSurface,
 };
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_manager_v3::ZwpTextInputManagerV3;
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::ZwpTextInputV3;
@@ -17,6 +18,7 @@ pub struct WaylandState {
     pub xdg_wm_base: Option<XdgWmBase>,
     pub seat: Option<WlSeat>,
     pub keyboard: Option<WlKeyboard>,
+    pub pointer: Option<WlPointer>,
     pub text_input_manager: Option<ZwpTextInputManagerV3>,
     pub text_input: Option<ZwpTextInputV3>,
 

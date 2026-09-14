@@ -87,6 +87,59 @@ pub struct ColorsConfig {
     pub indexed: Option<HashMap<u8, Rgb>>,
 }
 
+/// Scrollback buffer depth and mouse wheel scrolling parameters.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize, Default)]
+pub struct ScrollbackConfig {
+    pub lines: Option<u32>,
+    pub multiplier: Option<f32>,
+    pub auto_scroll: Option<bool>,
+}
+
+/// Flexible key combinations mapping supporting a single combo or a list of combos.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum KeyCombos {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+impl KeyCombos {
+    #[must_use]
+    pub fn to_combos(&self) -> Vec<&str> {
+        match self {
+            Self::Single(s) => {
+                if s.eq_ignore_ascii_case("none") {
+                    Vec::new()
+                } else {
+                    vec![s.as_str()]
+                }
+            }
+            Self::Multiple(list) => list
+                .iter()
+                .filter(|s| !s.eq_ignore_ascii_case("none"))
+                .map(String::as_str)
+                .collect(),
+        }
+    }
+}
+
+/// Action-to-key mapping following foot terminal conventions.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub struct KeybindingsConfig {
+    pub scrollback_up_page: Option<KeyCombos>,
+    pub scrollback_down_page: Option<KeyCombos>,
+    pub scrollback_up_line: Option<KeyCombos>,
+    pub scrollback_down_line: Option<KeyCombos>,
+    pub scrollback_home: Option<KeyCombos>,
+    pub scrollback_end: Option<KeyCombos>,
+    pub font_increase: Option<KeyCombos>,
+    pub font_decrease: Option<KeyCombos>,
+    pub font_reset: Option<KeyCombos>,
+    pub clipboard_copy: Option<KeyCombos>,
+    pub clipboard_paste: Option<KeyCombos>,
+    pub primary_paste: Option<KeyCombos>,
+}
+
 /// Root declarative configuration for `ftty`.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Default)]
 pub struct Config {
@@ -99,6 +152,10 @@ pub struct Config {
     pub cursor: CursorConfig,
     #[serde(default)]
     pub colors: ColorsConfig,
+    #[serde(default)]
+    pub scrollback: ScrollbackConfig,
+    #[serde(default)]
+    pub keybindings: KeybindingsConfig,
 }
 
 impl Config {
@@ -211,6 +268,18 @@ impl Config {
                 indexed.insert(k, v);
             }
         }
+
+        if let Some(lines) = other.scrollback.lines {
+            self.scrollback.lines = Some(lines);
+        }
+        if let Some(mul) = other.scrollback.multiplier {
+            self.scrollback.multiplier = Some(mul);
+        }
+        if let Some(auto) = other.scrollback.auto_scroll {
+            self.scrollback.auto_scroll = Some(auto);
+        }
+
+        merge_keybindings(&mut self.keybindings, other.keybindings);
     }
 
     #[must_use]
@@ -241,6 +310,21 @@ impl Config {
     #[must_use]
     pub fn padding_y(&self) -> u16 {
         self.window.padding_y.unwrap_or(0)
+    }
+
+    #[must_use]
+    pub fn scrollback_lines(&self) -> usize {
+        self.scrollback.lines.unwrap_or(1000) as usize
+    }
+
+    #[must_use]
+    pub fn scroll_multiplier(&self) -> f32 {
+        self.scrollback.multiplier.unwrap_or(3.0)
+    }
+
+    #[must_use]
+    pub fn auto_scroll(&self) -> bool {
+        self.scrollback.auto_scroll.unwrap_or(true)
     }
 
     #[must_use]
@@ -375,6 +459,45 @@ fn merge_palette(dst: &mut PaletteConfig, src: PaletteConfig) {
     }
 }
 
+fn merge_keybindings(dst: &mut KeybindingsConfig, src: KeybindingsConfig) {
+    if let Some(c) = src.scrollback_up_page {
+        dst.scrollback_up_page = Some(c);
+    }
+    if let Some(c) = src.scrollback_down_page {
+        dst.scrollback_down_page = Some(c);
+    }
+    if let Some(c) = src.scrollback_up_line {
+        dst.scrollback_up_line = Some(c);
+    }
+    if let Some(c) = src.scrollback_down_line {
+        dst.scrollback_down_line = Some(c);
+    }
+    if let Some(c) = src.scrollback_home {
+        dst.scrollback_home = Some(c);
+    }
+    if let Some(c) = src.scrollback_end {
+        dst.scrollback_end = Some(c);
+    }
+    if let Some(c) = src.font_increase {
+        dst.font_increase = Some(c);
+    }
+    if let Some(c) = src.font_decrease {
+        dst.font_decrease = Some(c);
+    }
+    if let Some(c) = src.font_reset {
+        dst.font_reset = Some(c);
+    }
+    if let Some(c) = src.clipboard_copy {
+        dst.clipboard_copy = Some(c);
+    }
+    if let Some(c) = src.clipboard_paste {
+        dst.clipboard_paste = Some(c);
+    }
+    if let Some(c) = src.primary_paste {
+        dst.primary_paste = Some(c);
+    }
+}
+
 /// Resolves path strings, expanding leading `~` to the home directory and resolving relative paths.
 #[must_use]
 pub fn resolve_path(path_str: &str, base_dir: &Path) -> PathBuf {
@@ -459,6 +582,36 @@ mod tests {
         let palette = config.build_palette();
         assert_eq!(palette[1], Rgb::new(255, 0, 0));
         assert_eq!(palette[9], Rgb::new(255, 85, 85));
+    }
+
+    #[test]
+    fn test_parse_scrollback_and_keybindings() {
+        let toml_str = r##"
+        [scrollback]
+        lines = 5000
+        multiplier = 5.5
+        auto_scroll = false
+
+        [keybindings]
+        scrollback_up_page = ["Shift+PageUp", "Shift+KP_PageUp"]
+        scrollback_down_page = "Shift+PageDown"
+        clipboard_copy = "Ctrl+Shift+C"
+        clipboard_paste = "none"
+        "##;
+
+        let config: Config = toml::from_str(toml_str).expect("parse toml");
+        assert_eq!(config.scrollback_lines(), 5000);
+        assert_eq!(config.scroll_multiplier(), 5.5);
+        assert!(!config.auto_scroll());
+
+        let up_combos = config.keybindings.scrollback_up_page.unwrap();
+        assert_eq!(
+            up_combos.to_combos(),
+            vec!["Shift+PageUp", "Shift+KP_PageUp"]
+        );
+
+        let paste_combos = config.keybindings.clipboard_paste.unwrap();
+        assert_eq!(paste_combos.to_combos(), Vec::<&str>::new());
     }
 
     #[test]
