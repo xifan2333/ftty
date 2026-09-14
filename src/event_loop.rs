@@ -35,6 +35,7 @@ use crate::config::Config;
 use crate::font::{CellMetrics, FontManager, GlyphAtlas};
 use crate::ime::ImeState;
 use crate::input::{KeyAction, KeyboardHandler};
+use crate::kitty::{ImagePlacement, KittyAction, KittyEvent, KittyParser};
 use crate::parser::Terminal;
 use crate::pty::Pty;
 use crate::render::{ColorScheme, RenderOptions, Renderer};
@@ -52,6 +53,7 @@ pub struct AppState {
     pub font_mgr: FontManager,
     pub atlas: GlyphAtlas,
     pub ime: ImeState,
+    pub kitty_parser: KittyParser,
     pub config: Config,
     pub config_path: Option<PathBuf>,
     pub palette: [Rgb; 256],
@@ -130,6 +132,7 @@ impl AppState {
             font_mgr,
             atlas,
             ime: ImeState::new(),
+            kitty_parser: KittyParser::new(),
             config,
             config_path,
             renderer: None,
@@ -197,6 +200,37 @@ impl AppState {
             source.offer("UTF8_STRING".to_string());
             device.set_selection(Some(&source), self.last_serial);
             self.wayland.data_source = Some(source);
+        }
+    }
+
+    /// Writes bytes to the non-blocking PTY master with a bounded readiness loop to prevent truncation.
+    pub fn write_pty_blocking(&mut self, mut bytes: &[u8]) {
+        let start = std::time::Instant::now();
+        while !bytes.is_empty() && start.elapsed() < std::time::Duration::from_millis(500) {
+            let res =
+                unsafe { libc::write(self.pty.as_raw_fd(), bytes.as_ptr().cast(), bytes.len()) };
+            if res > 0 {
+                bytes = &bytes[res as usize..];
+            } else if res < 0 {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                if err.kind() == io::ErrorKind::WouldBlock {
+                    let mut pfd = libc::pollfd {
+                        fd: self.pty.as_raw_fd(),
+                        events: libc::POLLOUT,
+                        revents: 0,
+                    };
+                    let poll_res = unsafe { libc::poll(&mut pfd, 1, 100) };
+                    if poll_res > 0 {
+                        continue;
+                    }
+                }
+                break;
+            } else {
+                break;
+            }
         }
     }
 
@@ -1067,10 +1101,101 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
             let mut buf = [0u8; 8192];
             match state.pty.read(&mut buf) {
                 Ok(n) if n > 0 => {
-                    state.terminal.advance_bytes(&buf[..n]);
-                    if state.config.auto_scroll() && !state.terminal.grid.is_alt_screen() {
-                        state.terminal.grid.scroll_viewport_bottom();
+                    let (clean_text, events) = state.kitty_parser.filter_bytes(&buf[..n]);
+                    if !clean_text.is_empty() {
+                        state.terminal.advance_bytes(&clean_text);
+                        if state.config.auto_scroll() && !state.terminal.grid.is_alt_screen() {
+                            state.terminal.grid.scroll_viewport_bottom();
+                        }
                     }
+
+                    for event in events {
+                        match event {
+                            KittyEvent::Transmit { command, image } => {
+                                let image_id = image.id;
+                                let placement_id = command.placement_id.unwrap_or(0);
+                                let img_w = (image.width as f32).max(1.0);
+                                let img_h = (image.height as f32).max(1.0);
+                                state.terminal.grid.add_image(image);
+
+                                let cw = state.font_mgr.metrics.cell_width as f32;
+                                let ch = state.font_mgr.metrics.cell_height as f32;
+
+                                let (cols, rows) = match (command.cols, command.rows) {
+                                    (Some(c), Some(r)) => (c as usize, r as usize),
+                                    (Some(c), None) => {
+                                        let pixel_w = c as f32 * cw;
+                                        let pixel_h = pixel_w * (img_h / img_w);
+                                        let r = (pixel_h / ch).ceil().max(1.0) as usize;
+                                        (c as usize, r)
+                                    }
+                                    (None, Some(r)) => {
+                                        let pixel_h = r as f32 * ch;
+                                        let pixel_w = pixel_h * (img_w / img_h);
+                                        let c = (pixel_w / cw).ceil().max(1.0) as usize;
+                                        (c, r as usize)
+                                    }
+                                    (None, None) => {
+                                        let c = (img_w / cw).ceil().max(1.0) as usize;
+                                        let r = (img_h / ch).ceil().max(1.0) as usize;
+                                        (c, r)
+                                    }
+                                };
+
+                                let abs_line = state.terminal.grid.scrollback.len()
+                                    + state.terminal.grid.cursor.row;
+                                state.terminal.grid.add_placement(ImagePlacement {
+                                    image_id,
+                                    placement_id,
+                                    line: abs_line,
+                                    col: state.terminal.grid.cursor.col,
+                                    cols,
+                                    rows,
+                                    offset_x: command.offset_x,
+                                    offset_y: command.offset_y,
+                                    z_index: command.z_index,
+                                });
+
+                                if !command.do_not_move_cursor {
+                                    state.terminal.grid.cursor.col =
+                                        (state.terminal.grid.cursor.col + cols)
+                                            .min(state.terminal.grid.cols.saturating_sub(1));
+                                }
+
+                                if command.action == KittyAction::TransmitAndDisplayWithResponse {
+                                    let resp = format!("\x1b_Gi={image_id};OK\x1b\\").into_bytes();
+                                    state.write_pty_blocking(&resp);
+                                }
+                            }
+                            KittyEvent::Place { command } => {
+                                if let Some(image_id) = command.image_id {
+                                    let placement_id = command.placement_id.unwrap_or(0);
+                                    let cols = command.cols.unwrap_or(1) as usize;
+                                    let rows = command.rows.unwrap_or(1) as usize;
+                                    let abs_line = state.terminal.grid.scrollback.len()
+                                        + state.terminal.grid.cursor.row;
+                                    state.terminal.grid.add_placement(ImagePlacement {
+                                        image_id,
+                                        placement_id,
+                                        line: abs_line,
+                                        col: state.terminal.grid.cursor.col,
+                                        cols,
+                                        rows,
+                                        offset_x: command.offset_x,
+                                        offset_y: command.offset_y,
+                                        z_index: command.z_index,
+                                    });
+                                }
+                            }
+                            KittyEvent::Delete { target } => {
+                                state.terminal.grid.delete_images(target);
+                            }
+                            KittyEvent::Response(resp) => {
+                                state.write_pty_blocking(&resp);
+                            }
+                        }
+                    }
+
                     state.needs_redraw = true;
                     state.update_ime_cursor_area();
                     Ok(calloop::PostAction::Continue)

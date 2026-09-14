@@ -1,9 +1,10 @@
 //! Terminal cell grid, cursor management, and scrollback ring buffer.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use unicode_width::UnicodeWidthChar;
 
 use crate::color::Color;
+use crate::kitty::{DeleteTarget, ImageData, ImagePlacement};
 
 bitflags::bitflags! {
     /// Visual and semantic attributes attached to a terminal cell.
@@ -125,6 +126,10 @@ pub struct Grid {
     pub scrollback: VecDeque<Row>,
     pub viewport_offset: usize,
 
+    pub images: HashMap<u32, ImageData>,
+    pub image_versions: HashMap<u32, u64>,
+    pub placements: Vec<ImagePlacement>,
+
     pub cursor: Cursor,
     pub saved_cursor: Cursor,
 
@@ -149,6 +154,9 @@ impl Grid {
             lines,
             scrollback: VecDeque::new(),
             viewport_offset: 0,
+            images: HashMap::new(),
+            image_versions: HashMap::new(),
+            placements: Vec::new(),
             cursor: Cursor::default(),
             saved_cursor: Cursor::default(),
             scroll_region_top: 0,
@@ -163,7 +171,55 @@ impl Grid {
         self.alt_lines.is_some()
     }
 
-    /// Switches to the alternate screen buffer.
+    /// Adds a decoded image to the grid's image store and bumps its version.
+    pub fn add_image(&mut self, image: ImageData) {
+        let id = image.id;
+        self.images.insert(id, image);
+        let ver = self.image_versions.entry(id).or_insert(0);
+        *ver = ver.wrapping_add(1);
+
+        // Cap stored images to 256 by removing unplaced images
+        if self.images.len() > 256 {
+            let active_ids: std::collections::HashSet<u32> =
+                self.placements.iter().map(|p| p.image_id).collect();
+            self.images
+                .retain(|img_id, _| active_ids.contains(img_id) || *img_id == id);
+            self.image_versions
+                .retain(|img_id, _| self.images.contains_key(img_id));
+        }
+    }
+
+    /// Adds an image placement instance anchored to grid cells.
+    pub fn add_placement(&mut self, placement: ImagePlacement) {
+        self.placements.push(placement);
+    }
+
+    /// Deletes images and/or placements matching the given delete target.
+    pub fn delete_images(&mut self, target: DeleteTarget) {
+        match target {
+            DeleteTarget::All => {
+                self.images.clear();
+                self.image_versions.clear();
+                self.placements.clear();
+            }
+            DeleteTarget::ById(id) => {
+                self.images.remove(&id);
+                self.image_versions.remove(&id);
+                self.placements.retain(|p| p.image_id != id);
+            }
+            DeleteTarget::ByPlacement(p_id) => {
+                self.placements.retain(|p| p.placement_id != p_id);
+            }
+            DeleteTarget::AtCursor => {
+                let cursor_row = self.cursor.row;
+                let cursor_col = self.cursor.col;
+                let abs_line = self.scrollback.len() + cursor_row;
+                self.placements.retain(|p| {
+                    !(p.line == abs_line && cursor_col >= p.col && cursor_col < p.col + p.cols)
+                });
+            }
+        }
+    }
     pub fn enter_alt_screen(&mut self) {
         if self.alt_lines.is_none() {
             let alt = (0..self.rows).map(|_| Row::new(self.cols)).collect();
@@ -238,6 +294,14 @@ impl Grid {
         }
         if self.scrollback.len() >= self.max_scrollback {
             self.scrollback.pop_front();
+            self.placements.retain_mut(|p| {
+                if p.line == 0 {
+                    false
+                } else {
+                    p.line -= 1;
+                    true
+                }
+            });
         }
         self.scrollback.push_back(row);
         // If user is currently viewing history, keep the view anchored on the same lines
@@ -369,8 +433,17 @@ impl Grid {
                 }
             }
             ClearMode::Saved => {
+                let sb_len = self.scrollback.len();
                 self.scrollback.clear();
                 self.viewport_offset = 0;
+                self.placements.retain_mut(|p| {
+                    if p.line < sb_len {
+                        false
+                    } else {
+                        p.line -= sb_len;
+                        true
+                    }
+                });
             }
         }
     }

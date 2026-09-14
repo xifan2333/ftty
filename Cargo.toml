@@ -12,6 +12,7 @@ keywords = ["terminal", "wayland", "kitty-graphics", "suckless", "emulator"]
 categories = ["command-line-utilities"]
 
 [dependencies]
+base64 = "0.23.1"
 bitflags = "2.8"
 calloop = { version = "0.14", features = ["signals"] }
 calloop-wayland-source = "0.4"
@@ -28,6 +29,7 @@ nix = { version = "0.31", default-features = false, features = [
   "ioctl",
   "poll",
 ] }
+png = "0.18.1"
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.6"
 unicode-width = "0.2"
