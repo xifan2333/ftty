@@ -12,6 +12,7 @@ use wayland_client::protocol::{
     wl_callback::{self, WlCallback},
     wl_compositor::WlCompositor,
     wl_keyboard::{self, KeyState, WlKeyboard},
+    wl_pointer::{self, Axis, WlPointer},
     wl_registry::{self, WlRegistry},
     wl_seat::{self, Capability, WlSeat},
     wl_surface::WlSurface,
@@ -29,7 +30,7 @@ use crate::color::Rgb;
 use crate::config::Config;
 use crate::font::{CellMetrics, FontManager, GlyphAtlas};
 use crate::ime::ImeState;
-use crate::input::KeyboardHandler;
+use crate::input::{KeyAction, KeyboardHandler};
 use crate::parser::Terminal;
 use crate::pty::Pty;
 use crate::render::{ColorScheme, RenderOptions, Renderer};
@@ -51,6 +52,7 @@ pub struct AppState {
     pub palette: [Rgb; 256],
     pub default_fg: Rgb,
     pub default_bg: Rgb,
+    pub scroll_accumulator: f64,
     pub running: bool,
     pub needs_redraw: bool,
     frame_callback: Option<WlCallback>,
@@ -83,6 +85,7 @@ impl AppState {
         let default_fg = config.foreground();
         let default_bg = config.background();
         terminal.grid.cursor.shape = config.cursor_shape();
+        terminal.grid.max_scrollback = config.scrollback_lines();
 
         let mut wayland = WaylandState::new();
         let pad_x = u32::from(config.padding_x());
@@ -110,6 +113,7 @@ impl AppState {
             palette,
             default_fg,
             default_bg,
+            scroll_accumulator: 0.0,
             running: true,
             needs_redraw: true,
             frame_callback: None,
@@ -141,6 +145,16 @@ impl AppState {
                 return;
             }
         };
+
+        let max_sb = new_config.scrollback_lines();
+        self.terminal.grid.max_scrollback = max_sb;
+        if self.terminal.grid.scrollback.len() > max_sb {
+            let overflow = self.terminal.grid.scrollback.len() - max_sb;
+            for _ in 0..overflow {
+                self.terminal.grid.scrollback.pop_front();
+            }
+            self.terminal.grid.viewport_offset = self.terminal.grid.viewport_offset.min(max_sb);
+        }
 
         let font_changed = self.config.font_family() != new_config.font_family()
             || (self.config.font_size() - new_config.font_size()).abs() > f32::EPSILON;
@@ -175,6 +189,65 @@ impl AppState {
         }
 
         self.needs_redraw = true;
+    }
+
+    /// Executes a semantic shortcut action (e.g. scroll page up, zoom font).
+    pub fn handle_key_action(&mut self, action: KeyAction) {
+        match action {
+            KeyAction::ScrollbackUpPage => {
+                self.terminal
+                    .grid
+                    .scroll_viewport_up(self.terminal.grid.rows);
+                self.needs_redraw = true;
+            }
+            KeyAction::ScrollbackDownPage => {
+                self.terminal
+                    .grid
+                    .scroll_viewport_down(self.terminal.grid.rows);
+                self.needs_redraw = true;
+            }
+            KeyAction::ScrollbackUpLine => {
+                self.terminal.grid.scroll_viewport_up(1);
+                self.needs_redraw = true;
+            }
+            KeyAction::ScrollbackDownLine => {
+                self.terminal.grid.scroll_viewport_down(1);
+                self.needs_redraw = true;
+            }
+            KeyAction::ScrollbackHome => {
+                self.terminal.grid.scroll_viewport_top();
+                self.needs_redraw = true;
+            }
+            KeyAction::ScrollbackEnd => {
+                self.terminal.grid.scroll_viewport_bottom();
+                self.needs_redraw = true;
+            }
+            KeyAction::FontIncrease => {
+                let new_size = (self.font_mgr.font_size() + 1.0).min(72.0);
+                self.update_font_size(new_size);
+            }
+            KeyAction::FontDecrease => {
+                let new_size = (self.font_mgr.font_size() - 1.0).max(6.0);
+                self.update_font_size(new_size);
+            }
+            KeyAction::FontReset => {
+                let default_size = self.config.font_size();
+                self.update_font_size(default_size);
+            }
+            KeyAction::ClipboardCopy | KeyAction::ClipboardPaste | KeyAction::PrimaryPaste => {}
+        }
+    }
+
+    fn update_font_size(&mut self, new_size: f32) {
+        if (self.font_mgr.font_size() - new_size).abs() < f32::EPSILON {
+            return;
+        }
+        if let Ok(new_font_mgr) = FontManager::load_with_family(self.font_mgr.family(), new_size) {
+            self.font_mgr = new_font_mgr;
+            self.atlas.clear();
+            let _ = self.resize_terminal();
+            self.needs_redraw = true;
+        }
     }
 
     fn resize_terminal(&mut self) -> io::Result<()> {
@@ -374,11 +447,15 @@ impl Dispatch<WlSeat, ()> for AppState {
         if let wl_seat::Event::Capabilities {
             capabilities: WEnum::Value(caps),
         } = event
-            && caps.contains(Capability::Keyboard)
-            && state.wayland.keyboard.is_none()
         {
-            let keyboard = proxy.get_keyboard(qh, ());
-            state.wayland.keyboard = Some(keyboard);
+            if caps.contains(Capability::Keyboard) && state.wayland.keyboard.is_none() {
+                let keyboard = proxy.get_keyboard(qh, ());
+                state.wayland.keyboard = Some(keyboard);
+            }
+            if caps.contains(Capability::Pointer) && state.wayland.pointer.is_none() {
+                let pointer = proxy.get_pointer(qh, ());
+                state.wayland.pointer = Some(pointer);
+            }
         }
     }
 }
@@ -437,7 +514,12 @@ impl Dispatch<WlKeyboard, ()> for AppState {
                 state: WEnum::Value(KeyState::Pressed),
                 ..
             } => {
-                if let Some(bytes) = state.keyboard.handle_key(key) {
+                if let Some(action) = state.keyboard.check_action(key, &state.config.keybindings) {
+                    state.handle_key_action(action);
+                } else if let Some(bytes) = state.keyboard.handle_key(key) {
+                    if state.config.auto_scroll() && !state.terminal.grid.is_alt_screen() {
+                        state.terminal.grid.scroll_viewport_bottom();
+                    }
                     let _ = state.pty.write_all(&bytes);
                     state.update_ime_cursor_area();
                 }
@@ -452,6 +534,56 @@ impl Dispatch<WlKeyboard, ()> for AppState {
                 state
                     .keyboard
                     .update_modifiers(mods_depressed, mods_latched, mods_locked, group);
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<WlPointer, ()> for AppState {
+    fn event(
+        state: &mut Self,
+        _proxy: &WlPointer,
+        event: wl_pointer::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_pointer::Event::Axis {
+                axis: WEnum::Value(Axis::VerticalScroll),
+                value,
+                ..
+            } => {
+                let multiplier = f64::from(state.config.scroll_multiplier());
+                state.scroll_accumulator += (value / 15.0) * multiplier;
+
+                let lines = state.scroll_accumulator.trunc() as i32;
+                if lines != 0 {
+                    state.scroll_accumulator -= f64::from(lines);
+                    if state.terminal.grid.is_alt_screen() {
+                        let count = (lines.unsigned_abs() as usize).min(100);
+                        let seq: &[u8] = if lines < 0 { b"\x1b[A" } else { b"\x1b[B" };
+                        let batch = seq.repeat(count);
+                        let _ = state.pty.write_all(&batch);
+                    } else {
+                        if lines < 0 {
+                            state
+                                .terminal
+                                .grid
+                                .scroll_viewport_up(lines.unsigned_abs() as usize);
+                        } else {
+                            state
+                                .terminal
+                                .grid
+                                .scroll_viewport_down(lines.unsigned_abs() as usize);
+                        }
+                        state.needs_redraw = true;
+                    }
+                }
+            }
+            wl_pointer::Event::AxisStop { .. } => {
+                state.scroll_accumulator = 0.0;
             }
             _ => {}
         }
@@ -584,6 +716,9 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
             match state.pty.read(&mut buf) {
                 Ok(n) if n > 0 => {
                     state.terminal.advance_bytes(&buf[..n]);
+                    if state.config.auto_scroll() && !state.terminal.grid.is_alt_screen() {
+                        state.terminal.grid.scroll_viewport_bottom();
+                    }
                     state.needs_redraw = true;
                     state.update_ime_cursor_area();
                     Ok(calloop::PostAction::Continue)
@@ -867,5 +1002,59 @@ mod tests {
         assert!(!app.needs_redraw);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_handle_key_actions_scrolling_and_zoom() {
+        use crate::color::Color;
+        use crate::grid::CellFlags;
+
+        let term = Terminal::new(80, 24, 100);
+        let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
+        let mut app = AppState::new(term, pty).expect("AppState new");
+
+        // Populate lines and scrollback
+        for _ in 0..50 {
+            app.terminal.grid.write_char(
+                'A',
+                Color::DefaultForeground,
+                Color::DefaultBackground,
+                CellFlags::empty(),
+            );
+            app.terminal.grid.newline();
+        }
+
+        assert_eq!(app.terminal.grid.viewport_offset(), 0);
+
+        // Page Up
+        app.handle_key_action(KeyAction::ScrollbackUpPage);
+        assert_eq!(app.terminal.grid.viewport_offset(), 24);
+
+        // Scroll to Top
+        app.handle_key_action(KeyAction::ScrollbackHome);
+        assert_eq!(
+            app.terminal.grid.viewport_offset(),
+            app.terminal.grid.scrollback.len()
+        );
+
+        // Line Down
+        let top = app.terminal.grid.viewport_offset();
+        app.handle_key_action(KeyAction::ScrollbackDownLine);
+        assert_eq!(app.terminal.grid.viewport_offset(), top - 1);
+
+        // Scroll to Bottom
+        app.handle_key_action(KeyAction::ScrollbackEnd);
+        assert_eq!(app.terminal.grid.viewport_offset(), 0);
+
+        // Font zoom actions
+        let initial_size = app.font_mgr.font_size();
+        app.handle_key_action(KeyAction::FontIncrease);
+        assert_eq!(app.font_mgr.font_size(), initial_size + 1.0);
+
+        app.handle_key_action(KeyAction::FontDecrease);
+        assert_eq!(app.font_mgr.font_size(), initial_size);
+
+        app.handle_key_action(KeyAction::FontReset);
+        assert_eq!(app.font_mgr.font_size(), app.config.font_size());
     }
 }

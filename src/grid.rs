@@ -123,6 +123,7 @@ pub struct Grid {
 
     pub lines: Vec<Row>,
     pub scrollback: VecDeque<Row>,
+    pub viewport_offset: usize,
 
     pub cursor: Cursor,
     pub saved_cursor: Cursor,
@@ -147,6 +148,7 @@ impl Grid {
             max_scrollback,
             lines,
             scrollback: VecDeque::new(),
+            viewport_offset: 0,
             cursor: Cursor::default(),
             saved_cursor: Cursor::default(),
             scroll_region_top: 0,
@@ -168,6 +170,7 @@ impl Grid {
             self.alt_lines = Some(std::mem::replace(&mut self.lines, alt));
             self.alt_cursor = Some(self.cursor);
             self.cursor = Cursor::default();
+            self.viewport_offset = 0;
         }
     }
 
@@ -178,6 +181,7 @@ impl Grid {
             if let Some(cursor) = self.alt_cursor.take() {
                 self.cursor = cursor;
             }
+            self.viewport_offset = 0;
         }
     }
 
@@ -236,6 +240,61 @@ impl Grid {
             self.scrollback.pop_front();
         }
         self.scrollback.push_back(row);
+        // If user is currently viewing history, keep the view anchored on the same lines
+        if self.viewport_offset > 0 {
+            self.viewport_offset = (self.viewport_offset + 1).min(self.scrollback.len());
+        }
+    }
+
+    /// Scrolls the viewport up by `delta` lines to view older history.
+    pub fn scroll_viewport_up(&mut self, delta: usize) {
+        if self.is_alt_screen() {
+            return;
+        }
+        let max_offset = self.scrollback.len();
+        self.viewport_offset = self.viewport_offset.saturating_add(delta).min(max_offset);
+    }
+
+    /// Scrolls the viewport down by `delta` lines toward the active screen.
+    pub fn scroll_viewport_down(&mut self, delta: usize) {
+        if self.is_alt_screen() {
+            return;
+        }
+        self.viewport_offset = self.viewport_offset.saturating_sub(delta);
+    }
+
+    /// Jumps the viewport to the earliest line in the scrollback history.
+    pub fn scroll_viewport_top(&mut self) {
+        if self.is_alt_screen() {
+            return;
+        }
+        self.viewport_offset = self.scrollback.len();
+    }
+
+    /// Resets the viewport offset to 0 (bottom of active screen).
+    pub fn scroll_viewport_bottom(&mut self) {
+        self.viewport_offset = 0;
+    }
+
+    #[must_use]
+    pub fn viewport_offset(&self) -> usize {
+        self.viewport_offset
+    }
+
+    /// Returns a reference to the row currently displayed at the given screen row.
+    #[must_use]
+    pub fn visible_line(&self, row: usize) -> &Row {
+        let h = self.scrollback.len();
+        let offset = self.viewport_offset.min(h);
+        if offset == 0 || self.is_alt_screen() {
+            return &self.lines[row];
+        }
+        let abs_idx = h + row - offset;
+        if abs_idx < h {
+            &self.scrollback[abs_idx]
+        } else {
+            &self.lines[abs_idx - h]
+        }
     }
 
     /// Sets the top and bottom scrolling margins (0-indexed).
@@ -311,6 +370,7 @@ impl Grid {
             }
             ClearMode::Saved => {
                 self.scrollback.clear();
+                self.viewport_offset = 0;
             }
         }
     }
@@ -580,5 +640,125 @@ mod tests {
         grid.exit_alt_screen();
         assert!(!grid.is_alt_screen());
         assert_eq!(grid.lines[0].cells[0].c, 'P');
+    }
+
+    #[test]
+    fn test_viewport_scrolling_and_visible_lines() {
+        let mut grid = Grid::new(10, 2, 100);
+        // Write line 1
+        grid.write_char(
+            '1',
+            Color::DefaultForeground,
+            Color::DefaultBackground,
+            CellFlags::empty(),
+        );
+        grid.carriage_return();
+        grid.newline();
+        // Write line 2
+        grid.write_char(
+            '2',
+            Color::DefaultForeground,
+            Color::DefaultBackground,
+            CellFlags::empty(),
+        );
+        grid.carriage_return();
+        grid.newline();
+        // Write line 3
+        grid.write_char(
+            '3',
+            Color::DefaultForeground,
+            Color::DefaultBackground,
+            CellFlags::empty(),
+        );
+        grid.carriage_return();
+        grid.newline();
+        // Write line 4
+        grid.write_char(
+            '4',
+            Color::DefaultForeground,
+            Color::DefaultBackground,
+            CellFlags::empty(),
+        );
+
+        assert_eq!(grid.scrollback.len(), 2);
+        assert_eq!(grid.viewport_offset(), 0);
+        assert_eq!(grid.visible_line(0).cells[0].c, '3');
+        assert_eq!(grid.visible_line(1).cells[0].c, '4');
+
+        // Scroll up by 1
+        grid.scroll_viewport_up(1);
+        assert_eq!(grid.viewport_offset(), 1);
+        assert_eq!(grid.visible_line(0).cells[0].c, '2');
+        assert_eq!(grid.visible_line(1).cells[0].c, '3');
+
+        // Scroll to top
+        grid.scroll_viewport_top();
+        assert_eq!(grid.viewport_offset(), 2);
+        assert_eq!(grid.visible_line(0).cells[0].c, '1');
+        assert_eq!(grid.visible_line(1).cells[0].c, '2');
+
+        // Scroll down and to bottom
+        grid.scroll_viewport_down(1);
+        assert_eq!(grid.viewport_offset(), 1);
+        grid.scroll_viewport_bottom();
+        assert_eq!(grid.viewport_offset(), 0);
+        assert_eq!(grid.visible_line(1).cells[0].c, '4');
+    }
+
+    #[test]
+    fn test_history_anchoring_on_new_output() {
+        let mut grid = Grid::new(10, 2, 5);
+        for c in ['1', '2', '3', '4'] {
+            grid.write_char(
+                c,
+                Color::DefaultForeground,
+                Color::DefaultBackground,
+                CellFlags::empty(),
+            );
+            grid.carriage_return();
+            grid.newline();
+        }
+
+        // Viewport viewing '3' and '4'
+        grid.scroll_viewport_up(1);
+        assert_eq!(grid.visible_line(0).cells[0].c, '3');
+
+        // New output arrives while scrolled back
+        grid.write_char(
+            '5',
+            Color::DefaultForeground,
+            Color::DefaultBackground,
+            CellFlags::empty(),
+        );
+        grid.carriage_return();
+        grid.newline();
+
+        // History anchor must keep visible lines identical
+        assert_eq!(grid.visible_line(0).cells[0].c, '3');
+    }
+
+    #[test]
+    fn test_clear_saved_scrollback_resets_viewport_offset() {
+        let mut grid = Grid::new(10, 2, 10);
+        for c in ['1', '2', '3'] {
+            grid.write_char(
+                c,
+                Color::DefaultForeground,
+                Color::DefaultBackground,
+                CellFlags::empty(),
+            );
+            grid.carriage_return();
+            grid.newline();
+        }
+
+        grid.scroll_viewport_up(1);
+        assert_eq!(grid.viewport_offset(), 1);
+
+        // CSI 3 J clears saved lines
+        grid.clear_screen(ClearMode::Saved);
+        assert_eq!(grid.viewport_offset(), 0);
+        assert!(grid.scrollback.is_empty());
+        // Must not panic on subsequent visible_line access
+        assert_eq!(grid.visible_line(0).cells.len(), 10);
     }
 }

@@ -67,7 +67,7 @@ fn main() {
     let cols = config.columns();
     let rows = config.rows();
 
-    let term = Terminal::new(cols as usize, rows as usize, 1000);
+    let term = Terminal::new(cols as usize, rows as usize, config.scrollback_lines());
     let cmd_slice: Option<Vec<&str>> = custom_command
         .as_ref()
         .map(|v| v.iter().map(String::as_str).collect());

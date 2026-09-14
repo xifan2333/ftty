@@ -462,13 +462,11 @@ fn prepare_atlas(
                     .is_none();
             }
         }
-        for cell in grid
-            .lines
-            .iter()
-            .flat_map(|row| &row.cells)
-            .filter(|cell| visible_glyph(cell))
-        {
-            full |= atlas.get_or_insert(cell.c, cell.flags, fonts).is_none();
+        for row in 0..grid.rows {
+            let line = grid.visible_line(row);
+            for cell in line.cells.iter().filter(|cell| visible_glyph(cell)) {
+                full |= atlas.get_or_insert(cell.c, cell.flags, fonts).is_none();
+            }
         }
         if !full || attempt == 1 {
             break;
@@ -523,20 +521,25 @@ fn cursor_cell(grid: &Grid) -> Option<(usize, usize, usize)> {
     if !grid.cursor.visible || grid.cursor.row >= grid.rows {
         return None;
     }
-    let row = grid.cursor.row;
+    // If scrolled back into history, only display cursor if its row is still in the visible viewport
+    let row = if grid.viewport_offset == 0 {
+        grid.cursor.row
+    } else if grid.cursor.row + grid.viewport_offset < grid.rows {
+        grid.cursor.row + grid.viewport_offset
+    } else {
+        return None;
+    };
+
     // The grid keeps col == cols while a wrap is pending; display the cursor at the edge.
     let mut col = grid.cursor.col.min(grid.cols - 1);
+    let line = grid.visible_line(row);
     if col > 0
-        && grid.lines[row].cells[col]
-            .flags
-            .contains(CellFlags::WIDE_CHAR_SPACER)
+        && col < line.cells.len()
+        && line.cells[col].flags.contains(CellFlags::WIDE_CHAR_SPACER)
     {
         col -= 1;
     }
-    let width = if grid.lines[row].cells[col]
-        .flags
-        .contains(CellFlags::WIDE_CHAR)
-    {
+    let width = if col < line.cells.len() && line.cells[col].flags.contains(CellFlags::WIDE_CHAR) {
         2.min(grid.cols - col)
     } else {
         1
@@ -561,7 +564,8 @@ fn build_vertices(
     let cursor = cursor_cell(grid);
 
     // Draw every background first so spacer cells cannot cover wide or overhanging glyphs.
-    for (row, line) in grid.lines.iter().enumerate() {
+    for row in 0..grid.rows {
+        let line = grid.visible_line(row);
         for (col, cell) in line.cells.iter().enumerate() {
             let (_, bg) = cell_colors(cell, colors);
             if bg != colors.background {
@@ -584,7 +588,8 @@ fn build_vertices(
         );
     }
 
-    for (row, line) in grid.lines.iter().enumerate() {
+    for row in 0..grid.rows {
+        let line = grid.visible_line(row);
         for (col, cell) in line.cells.iter().enumerate() {
             if cell
                 .flags
