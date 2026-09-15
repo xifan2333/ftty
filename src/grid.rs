@@ -428,6 +428,22 @@ impl Row {
     }
 }
 
+/// Drops `to_remove` rows from `lines`, discarding rows below `cursor_row` first so the
+/// cursor's line survives. Returns the rows removed from the top, in order.
+fn shrink_rows(
+    lines: &mut Vec<Row>,
+    to_remove: usize,
+    cursor_row: usize,
+    new_rows: usize,
+) -> Vec<Row> {
+    let below_cursor = lines.len().saturating_sub(1).saturating_sub(cursor_row);
+    let from_bottom = to_remove.min(below_cursor);
+    let from_top = to_remove - from_bottom;
+    let removed = lines.drain(0..from_top).collect();
+    lines.truncate(new_rows);
+    removed
+}
+
 /// 2D Screen grid with scrollback history and alternate screen support.
 #[derive(Debug, Clone)]
 pub struct Grid {
@@ -585,42 +601,70 @@ impl Grid {
     }
 
     /// Resizes the grid dimensions.
+    ///
+    /// Shrinking keeps the cursor's line on screen and discards rows below it first, so content
+    /// above the cursor does not scroll away while the area beneath it is still empty.
     pub fn resize(&mut self, new_cols: usize, new_rows: usize) {
         let new_cols = new_cols.max(1);
         let new_rows = new_rows.max(1);
+        let old_rows = self.rows;
 
         for row in &mut self.lines {
             row.resize(new_cols);
         }
-
-        if new_rows > self.rows {
-            for _ in self.rows..new_rows {
-                self.lines.push(Row::new(new_cols));
-            }
-        } else if new_rows < self.rows {
-            // Push truncated lines to scrollback if in primary screen
-            if self.alt_lines.is_none() {
-                let to_remove = self.rows - new_rows;
-                for _ in 0..to_remove {
-                    let removed = self.lines.remove(0);
-                    self.push_scrollback(removed);
-                }
-            } else {
-                self.lines.truncate(new_rows);
-            }
-        }
-
         if let Some(alt) = &mut self.alt_lines {
             for row in alt.iter_mut() {
                 row.resize(new_cols);
             }
-            if new_rows > self.rows {
-                for _ in self.rows..new_rows {
+        }
+
+        if new_rows > old_rows {
+            for _ in old_rows..new_rows {
+                self.lines.push(Row::new(new_cols));
+            }
+            if let Some(alt) = &mut self.alt_lines {
+                for _ in old_rows..new_rows {
                     alt.push(Row::new(new_cols));
                 }
-            } else {
-                alt.truncate(new_rows);
             }
+        } else if new_rows < old_rows {
+            let to_remove = old_rows - new_rows;
+
+            // Active screen: trim below the cursor first so its line is always retained.
+            let removed_top = shrink_rows(&mut self.lines, to_remove, self.cursor.row, new_rows);
+            let from_top = removed_top.len();
+            if self.alt_lines.is_none() {
+                for row in removed_top {
+                    self.push_scrollback(row);
+                }
+            }
+            self.cursor.row = self.cursor.row.saturating_sub(from_top);
+            self.saved_cursor.row = self.saved_cursor.row.saturating_sub(from_top);
+
+            // Hidden primary screen while the alternate screen is active.
+            if let Some(alt) = &mut self.alt_lines {
+                let primary_row = self.alt_cursor.unwrap_or_default().row;
+                let primary_removed = shrink_rows(alt, to_remove, primary_row, new_rows);
+                let primary_from_top = primary_removed.len();
+                if let Some(cursor) = &mut self.alt_cursor {
+                    cursor.row = cursor.row.saturating_sub(primary_from_top);
+                }
+            }
+
+            // Placements are anchored to absolute lines. Rows pushed to scrollback keep theirs,
+            // but a screen without scrollback shifts its content up.
+            if self.max_scrollback == 0 && from_top > 0 {
+                self.placements.retain_mut(|p| {
+                    if p.line < from_top {
+                        false
+                    } else {
+                        p.line -= from_top;
+                        true
+                    }
+                });
+            }
+            let bottom_line = self.scrollback.len() + new_rows;
+            self.placements.retain(|p| p.line < bottom_line);
         }
 
         self.cols = new_cols;
@@ -629,6 +673,9 @@ impl Grid {
         self.scroll_region_bottom = new_rows.saturating_sub(1);
         self.cursor.row = self.cursor.row.min(new_rows.saturating_sub(1));
         self.cursor.col = self.cursor.col.min(new_cols.saturating_sub(1));
+        self.saved_cursor.row = self.saved_cursor.row.min(new_rows.saturating_sub(1));
+        self.saved_cursor.col = self.saved_cursor.col.min(new_cols.saturating_sub(1));
+        self.viewport_offset = self.viewport_offset.min(self.scrollback.len());
     }
 
     fn push_scrollback(&mut self, row: Row) {
@@ -1254,5 +1301,166 @@ mod tests {
             grid.images.contains_key(&100),
             "virtual image 100 must be preserved across eviction"
         );
+    }
+
+    /// Writes `count` rows labelled `R0`, `R1`, … and leaves the cursor on the last one.
+    fn fill_rows(grid: &mut Grid, count: usize) {
+        for row in 0..count {
+            for c in format!("R{row}").chars() {
+                grid.write_char(
+                    c,
+                    Color::DefaultForeground,
+                    Color::DefaultBackground,
+                    CellFlags::empty(),
+                );
+            }
+            grid.carriage_return();
+            if row + 1 < count {
+                grid.newline();
+            }
+        }
+    }
+
+    #[test]
+    fn shrink_below_cursor_discards_bottom_rows_and_keeps_content() {
+        let mut grid = Grid::new(10, 10, 100);
+        fill_rows(&mut grid, 3);
+        grid.cursor.row = 2;
+        grid.cursor.col = 0;
+
+        grid.resize(10, 8);
+
+        assert_eq!(grid.rows, 8);
+        assert_eq!(grid.lines.len(), 8);
+        assert_eq!(
+            grid.cursor.row, 2,
+            "cursor must not move when nothing above it is cut"
+        );
+        assert_eq!(grid.visible_line(0).cells[0].c, 'R');
+        assert_eq!(grid.visible_line(0).cells[1].c, '0');
+        assert_eq!(grid.visible_line(2).cells[1].c, '2');
+        assert!(
+            grid.scrollback.is_empty(),
+            "top content must not scroll away"
+        );
+    }
+
+    #[test]
+    fn shrink_above_cursor_scrolls_top_rows_and_keeps_cursor_line() {
+        let mut grid = Grid::new(10, 4, 100);
+        fill_rows(&mut grid, 4);
+        grid.cursor.row = 3;
+        grid.cursor.col = 1;
+
+        grid.resize(10, 2);
+
+        assert_eq!(grid.rows, 2);
+        assert_eq!(grid.cursor.row, 1, "cursor must follow its content up");
+        assert!(grid.cursor.row < grid.rows);
+        // The cursor's own row (`R3`) is the last surviving line.
+        assert_eq!(grid.visible_line(1).cells[1].c, '3');
+        assert_eq!(grid.scrollback.len(), 2, "two top rows move into history");
+        assert_eq!(grid.scrollback[0].cells[1].c, '0');
+    }
+
+    #[test]
+    fn shrink_without_scrollback_discards_top_rows() {
+        let mut grid = Grid::new(10, 4, 0);
+        fill_rows(&mut grid, 4);
+        grid.cursor.row = 3;
+
+        grid.resize(10, 2);
+
+        assert_eq!(grid.rows, 2);
+        assert_eq!(grid.cursor.row, 1);
+        assert!(grid.scrollback.is_empty());
+        assert_eq!(grid.visible_line(1).cells[1].c, '3');
+    }
+
+    #[test]
+    fn shrink_on_alternate_screen_keeps_cursor_visible() {
+        let mut grid = Grid::new(10, 4, 100);
+        fill_rows(&mut grid, 2);
+        grid.enter_alt_screen();
+        fill_rows(&mut grid, 4);
+        grid.cursor.row = 3;
+
+        grid.resize(10, 2);
+
+        assert!(grid.is_alt_screen());
+        assert_eq!(grid.rows, 2);
+        assert_eq!(grid.cursor.row, 1);
+        assert!(
+            grid.scrollback.is_empty(),
+            "the alternate screen has no history"
+        );
+        // The primary screen is restored with its own cursor intact.
+        grid.exit_alt_screen();
+        assert_eq!(grid.rows, 2);
+        assert!(grid.cursor.row < grid.rows);
+    }
+
+    #[test]
+    fn shrink_shifts_saved_cursor() {
+        let mut grid = Grid::new(10, 4, 100);
+        fill_rows(&mut grid, 4);
+        grid.cursor.row = 3;
+        grid.cursor.col = 2;
+        grid.save_cursor();
+
+        grid.resize(10, 2);
+
+        assert_eq!(grid.cursor.row, 1);
+        assert_eq!(
+            grid.saved_cursor.row, 1,
+            "the saved cursor follows the screen"
+        );
+    }
+
+    #[test]
+    fn shrink_evicts_placements_below_the_new_bottom() {
+        let mut grid = Grid::new(10, 4, 100);
+        fill_rows(&mut grid, 4);
+        // Keep the cursor near the top so the bottom row is what gets discarded.
+        grid.cursor.row = 1;
+
+        let scrollback_len = grid.scrollback.len();
+        grid.add_placement(ImagePlacement {
+            image_id: 1,
+            placement_id: 0,
+            line: scrollback_len + 3,
+            col: 0,
+            cols: 1,
+            rows: 1,
+            offset_x: 0,
+            offset_y: 0,
+            z_index: 0,
+        });
+
+        grid.resize(10, 2);
+
+        assert_eq!(grid.cursor.row, 1);
+        assert!(
+            grid.placements.is_empty(),
+            "a placement anchored below the new bottom row is evicted"
+        );
+    }
+
+    #[test]
+    fn grow_appends_rows_and_keeps_cursor_and_scrollback() {
+        let mut grid = Grid::new(10, 2, 100);
+        fill_rows(&mut grid, 2);
+        grid.cursor.row = 1;
+        grid.cursor.col = 1;
+
+        grid.resize(12, 5);
+
+        assert_eq!(grid.rows, 5);
+        assert_eq!(grid.cols, 12);
+        assert_eq!(grid.lines.len(), 5);
+        assert_eq!(grid.cursor.row, 1);
+        assert_eq!(grid.visible_line(1).cells[1].c, '1');
+        assert_eq!(grid.lines[1].cells.len(), 12);
+        assert!(grid.scrollback.is_empty());
     }
 }
