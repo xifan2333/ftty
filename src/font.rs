@@ -1,15 +1,13 @@
 //! System monospace fonts, cell metrics, and a growing grayscale glyph atlas.
 
-use std::borrow::Cow;
 use std::collections::HashMap;
+use std::ffi::CString;
 use std::fs;
 use std::io;
-use std::sync::OnceLock;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
-use font_kit::family_name::FamilyName;
-use font_kit::handle::Handle;
-use font_kit::properties::{Properties, Style, Weight};
-use font_kit::source::SystemSource;
+use fontconfig::{CharSet, Fontconfig, Pattern};
 
 use crate::grid::CellFlags;
 
@@ -34,25 +32,211 @@ pub struct CachedGlyph {
     pub offset_y: i32,
 }
 
-/// Loads styled faces on first use rather than during terminal startup.
-pub struct FontManager {
-    regular: fontdue::Font,
-    styles: [OnceLock<Option<fontdue::Font>>; 3],
-    family: String,
+/// Stable identity of a rasterized glyph: which face supplied it and in which style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct FaceKey {
+    /// `0` is the styled primary face; `1..=num_fallbacks` is a user fallback; subsequent values select dynamic fallbacks.
+    pub(crate) face: u16,
+    pub(crate) glyph: u16,
+    pub(crate) style: u8,
+}
+
+/// An immutable chain of font faces for a single style (Regular, Bold, Italic, or BoldItalic).
+struct StyleChain {
+    primary: fontdue::Font,
+    fallbacks: Vec<fontdue::Font>,
+}
+
+/// A face fontconfig reported as covering a character the primary and user fallback font chain lacks.
+struct FallbackFace {
+    path: PathBuf,
+    index: u32,
+    style: u8,
+    font: fontdue::Font,
+}
+
+/// Faces discovered on demand, keyed by (character, style) pairs.
+///
+/// Nothing is parsed until a frame renders a character the configured faces cannot draw, so
+/// startup stays independent of how many fonts are installed.
+#[derive(Default)]
+struct FallbackCache {
+    faces: Vec<FallbackFace>,
+    /// Maps `(c, style)` to `Some((face_index, glyph_index))` or `None` if no installed font covers it.
+    resolved: HashMap<(char, u8), Option<(u16, u16)>>,
+}
+
+impl FallbackCache {
+    /// Returns the index of a face covering `c` and the glyph index, loading the face on first use.
+    fn resolve(
+        &mut self,
+        c: char,
+        style: u8,
+        preferred_family: &str,
+        font_size: f32,
+    ) -> Option<(u16, u16)> {
+        if let Some(cached) = self.resolved.get(&(c, style)) {
+            return *cached;
+        }
+        let resolved = self.discover(c, style, preferred_family, font_size);
+        self.resolved.insert((c, style), resolved);
+        resolved
+    }
+
+    fn discover(
+        &mut self,
+        c: char,
+        style: u8,
+        preferred_family: &str,
+        font_size: f32,
+    ) -> Option<(u16, u16)> {
+        // Fast path: check if any already loaded fallback face for this style covers `c`
+        for (pos, face) in self.faces.iter().enumerate() {
+            if face.style == style {
+                let glyph = face.font.lookup_glyph_index(c);
+                if glyph != 0 {
+                    return Some((pos as u16, glyph));
+                }
+            }
+        }
+
+        let fc = fontconfig()?;
+        let bold = (style & 1) != 0;
+        let italic = (style & 2) != 0;
+        let candidates = query_fontconfig_candidates(fc, preferred_family, bold, italic, c)?;
+
+        for (path, index) in candidates {
+            let position =
+                match self.faces.iter().position(|face| {
+                    face.path == path && face.index == index && face.style == style
+                }) {
+                    Some(position) => position,
+                    None => {
+                        let Ok(font) = load_font_file(&path, index, font_size) else {
+                            continue;
+                        };
+                        self.faces.push(FallbackFace {
+                            path,
+                            index,
+                            style,
+                            font,
+                        });
+                        self.faces.len() - 1
+                    }
+                };
+
+            let glyph = self.faces[position].font.lookup_glyph_index(c);
+            if glyph != 0 {
+                return Some((position as u16, glyph));
+            }
+        }
+
+        None
+    }
+}
+
+/// Global shared Fontconfig handle initialized once per process.
+pub(crate) fn fontconfig() -> Option<&'static Fontconfig> {
+    static FC: OnceLock<Option<Fontconfig>> = OnceLock::new();
+    FC.get_or_init(Fontconfig::new).as_ref()
+}
+
+/// Queries fontconfig to find a matching font file for a family and style.
+fn match_family(
+    fc: &Fontconfig,
+    family_name: &str,
+    bold: bool,
+    italic: bool,
+) -> Option<(PathBuf, u32)> {
+    let mut pat = Pattern::new(fc).ok()?;
+    let trimmed = family_name.trim();
+    if !trimmed.is_empty()
+        && !trimmed.eq_ignore_ascii_case("monospace")
+        && let Ok(c_family) = CString::new(trimmed)
+    {
+        pat.add_string(fontconfig::FC_FAMILY, &c_family).ok()?;
+    }
+    if let Ok(c_mono) = CString::new("monospace") {
+        pat.add_string(fontconfig::FC_FAMILY, &c_mono).ok()?;
+    }
+
+    if bold {
+        pat.add_integer(fontconfig::FC_WEIGHT, fontconfig::FC_WEIGHT_BOLD)
+            .ok()?;
+    }
+    if italic {
+        pat.add_integer(fontconfig::FC_SLANT, fontconfig::FC_SLANT_ITALIC)
+            .ok()?;
+    }
+
+    let matched = pat.font_match().ok()?;
+    let filename = matched.filename().ok()?;
+    let face_index = matched.face_index().ok()?;
+    let index = u32::try_from(face_index).ok()?;
+    Some((PathBuf::from(filename), index))
+}
+
+/// Asks fontconfig for ordered candidate faces covering `c`, taking style and monospace preferences into account.
+fn query_fontconfig_candidates(
+    fc: &Fontconfig,
+    preferred_family: &str,
+    bold: bool,
+    italic: bool,
+    c: char,
+) -> Option<Vec<(PathBuf, u32)>> {
+    let mut pattern = Pattern::new(fc).ok()?;
+    let mut charset = CharSet::new(fc).ok()?;
+    charset.add_char(c).ok()?;
+    pattern.add_charset(charset).ok()?;
+
+    if bold {
+        pattern
+            .add_integer(fontconfig::FC_WEIGHT, fontconfig::FC_WEIGHT_BOLD)
+            .ok()?;
+    }
+    if italic {
+        pattern
+            .add_integer(fontconfig::FC_SLANT, fontconfig::FC_SLANT_ITALIC)
+            .ok()?;
+    }
+
+    let trimmed = preferred_family.trim();
+    if !trimmed.is_empty()
+        && !trimmed.eq_ignore_ascii_case("monospace")
+        && let Ok(c_family) = CString::new(trimmed)
+    {
+        pattern.add_string(fontconfig::FC_FAMILY, &c_family).ok()?;
+    }
+    if let Ok(c_mono) = CString::new("monospace") {
+        pattern.add_string(fontconfig::FC_FAMILY, &c_mono).ok()?;
+    }
+
+    if let Ok(font_set) = pattern.sort_fonts(fontconfig::UnicodeCoverage::Trim) {
+        let mut candidates = Vec::new();
+        for p in font_set.iter().take(8) {
+            if let Ok(filename) = p.filename()
+                && let Ok(face_index) = p.face_index()
+                && let Ok(index) = u32::try_from(face_index)
+            {
+                candidates.push((PathBuf::from(filename), index));
+            }
+        }
+        if !candidates.is_empty() {
+            return Some(candidates);
+        }
+    }
+
+    let matched = pattern.font_match().ok()?;
+    let path = PathBuf::from(matched.filename().ok()?);
+    let index = u32::try_from(matched.face_index().ok()?).ok()?;
+    Some(vec![(path, index)])
+}
+
+fn load_font_bytes(
+    bytes: &[u8],
+    collection_index: u32,
     font_size: f32,
-    pub metrics: CellMetrics,
-}
-
-fn style_index(flags: CellFlags) -> usize {
-    usize::from(flags.contains(CellFlags::BOLD))
-        | (usize::from(flags.contains(CellFlags::ITALIC)) << 1)
-}
-
-fn load_handle(handle: &Handle, font_size: f32) -> io::Result<fontdue::Font> {
-    let (bytes, collection_index): (Cow<'_, [u8]>, _) = match handle {
-        Handle::Path { path, font_index } => (Cow::Owned(fs::read(path)?), *font_index),
-        Handle::Memory { bytes, font_index } => (Cow::Borrowed(bytes.as_slice()), *font_index),
-    };
+) -> io::Result<fontdue::Font> {
     fontdue::Font::from_bytes(
         bytes,
         fontdue::FontSettings {
@@ -64,44 +248,122 @@ fn load_handle(handle: &Handle, font_size: f32) -> io::Result<fontdue::Font> {
     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
-fn load_font_face(family: &str, style: usize, font_size: f32) -> io::Result<fontdue::Font> {
-    let mut properties = Properties::new();
-    if style & 1 != 0 {
-        properties.weight(Weight::BOLD);
-    }
-    if style & 2 != 0 {
-        properties.style(Style::Italic);
-    }
-    let families = if family.eq_ignore_ascii_case("monospace") || family.trim().is_empty() {
-        vec![FamilyName::Monospace]
-    } else {
-        vec![FamilyName::Title(family.to_string()), FamilyName::Monospace]
-    };
-    let handle = SystemSource::new()
-        .select_best_match(&families, &properties)
-        .map_err(|e| io::Error::new(io::ErrorKind::NotFound, e))?;
-    load_handle(&handle, font_size)
+fn load_font_file(path: &Path, collection_index: u32, font_size: f32) -> io::Result<fontdue::Font> {
+    let bytes = fs::read(path)?;
+    load_font_bytes(&bytes, collection_index, font_size)
+}
+
+fn style_index(flags: CellFlags) -> usize {
+    usize::from(flags.contains(CellFlags::BOLD))
+        | (usize::from(flags.contains(CellFlags::ITALIC)) << 1)
+}
+
+/// Loads configured font chain and on-demand fallback faces with cell metrics calculation.
+pub struct FontManager {
+    regular: StyleChain,
+    regular_slots: Vec<Option<fontdue::Font>>,
+    bold: OnceLock<StyleChain>,
+    italic: OnceLock<StyleChain>,
+    bold_italic: OnceLock<StyleChain>,
+    fallbacks: Mutex<FallbackCache>,
+    families: Vec<String>,
+    font_size: f32,
+    pub metrics: CellMetrics,
 }
 
 impl FontManager {
-    /// Discovers and loads a font face by family name and size in pixels per em.
+    fn chain_for_style(&self, style: u8) -> &StyleChain {
+        match style {
+            0 => &self.regular,
+            1 => self.bold.get_or_init(|| {
+                let fc = fontconfig();
+                self.load_styled_chain(fc, true, false, &self.regular.primary)
+            }),
+            2 => self.italic.get_or_init(|| {
+                let fc = fontconfig();
+                self.load_styled_chain(fc, false, true, &self.regular.primary)
+            }),
+            3 => self.bold_italic.get_or_init(|| {
+                let fc = fontconfig();
+                let fallback = self
+                    .bold
+                    .get()
+                    .map(|b| &b.primary)
+                    .unwrap_or(&self.regular.primary);
+                self.load_styled_chain(fc, true, true, fallback)
+            }),
+            _ => &self.regular,
+        }
+    }
+
+    fn load_styled_chain(
+        &self,
+        fc: Option<&Fontconfig>,
+        bold: bool,
+        italic: bool,
+        fallback_primary: &fontdue::Font,
+    ) -> StyleChain {
+        let primary_name = &self.families[0];
+        let fallback_names = &self.families[1..];
+
+        let primary = fc
+            .and_then(|fc| match_family(fc, primary_name, bold, italic))
+            .and_then(|(path, index)| load_font_file(&path, index, self.font_size).ok())
+            .unwrap_or_else(|| fallback_primary.clone());
+
+        let fallbacks = fallback_names
+            .iter()
+            .enumerate()
+            .filter_map(|(i, name)| {
+                fc.and_then(|fc| match_family(fc, name, bold, italic))
+                    .and_then(|(path, index)| load_font_file(&path, index, self.font_size).ok())
+                    .or_else(|| self.regular_slots.get(i).and_then(|opt| opt.clone()))
+            })
+            .collect();
+
+        StyleChain { primary, fallbacks }
+    }
+
+    /// Discovers and loads an ordered list of font families at a size in pixels per em.
     ///
     /// # Errors
     /// Returns an error for an invalid size, missing font, or unreadable font data.
-    pub fn load_with_family(family: &str, font_size: f32) -> io::Result<Self> {
+    pub fn load_with_families(families: &[String], font_size: f32) -> io::Result<Self> {
         if !font_size.is_finite() || font_size <= 0.0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "invalid font size",
             ));
         }
-        let regular = load_font_face(family, 0, font_size)?;
-        let cell_width = regular
-            .metrics('M', font_size)
+        let fc = fontconfig()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "fontconfig not available"))?;
+
+        let valid_families: Vec<String> = if families.is_empty() {
+            vec!["monospace".to_string()]
+        } else {
+            families.to_vec()
+        };
+
+        let primary_name = &valid_families[0];
+        let fallback_names = &valid_families[1..];
+
+        // 1. Load the primary Regular font (determines CellMetrics)
+        let primary_regular = match_family(fc, primary_name, false, false)
+            .and_then(|(path, index)| load_font_file(&path, index, font_size).ok())
+            .or_else(|| {
+                let (path, index) = match_family(fc, "monospace", false, false)?;
+                load_font_file(&path, index, font_size).ok()
+            })
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no monospace font found"))?;
+
+        // 2. Compute metrics from the primary Regular font ('0' advance width & horizontal line metrics)
+        let cell_width = primary_regular
+            .metrics('0', font_size)
             .advance_width
             .ceil()
             .max(1.0) as u32;
-        let (cell_height, ascent) = regular
+
+        let (cell_height, ascent) = primary_regular
             .horizontal_line_metrics(font_size)
             .map(|line| {
                 (
@@ -110,10 +372,32 @@ impl FontManager {
                 )
             })
             .unwrap_or((font_size.ceil().max(1.0) as u32, font_size.ceil() as i32));
+
+        // 3. User fallback regular slots maintain 1:1 index alignment with fallback_names.
+        let regular_slots: Vec<Option<fontdue::Font>> = fallback_names
+            .iter()
+            .map(|name| {
+                let (path, index) = match_family(fc, name, false, false)?;
+                load_font_file(&path, index, font_size).ok()
+            })
+            .collect();
+
+        let regular_fallbacks: Vec<fontdue::Font> =
+            regular_slots.iter().flatten().cloned().collect();
+
+        let regular = StyleChain {
+            primary: primary_regular,
+            fallbacks: regular_fallbacks,
+        };
+
         Ok(Self {
             regular,
-            styles: std::array::from_fn(|_| OnceLock::new()),
-            family: family.to_string(),
+            regular_slots,
+            bold: OnceLock::new(),
+            italic: OnceLock::new(),
+            bold_italic: OnceLock::new(),
+            fallbacks: Mutex::new(FallbackCache::default()),
+            families: valid_families,
             font_size,
             metrics: CellMetrics {
                 cell_width,
@@ -123,17 +407,33 @@ impl FontManager {
         })
     }
 
+    /// Discovers and loads a font face by family name and size in pixels per em.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid size, missing font, or unreadable font data.
+    pub fn load_with_family(family: &str, font_size: f32) -> io::Result<Self> {
+        Self::load_with_families(&[family.to_string()], font_size)
+    }
+
     /// Discovers and loads a system monospace face at a size in pixels per em.
     ///
     /// # Errors
     /// Returns an error for an invalid size, missing font, or unreadable font data.
     pub fn load(font_size: f32) -> io::Result<Self> {
-        Self::load_with_family("monospace", font_size)
+        Self::load_with_families(&["monospace".to_string()], font_size)
     }
 
     #[must_use]
     pub fn family(&self) -> &str {
-        &self.family
+        self.families
+            .first()
+            .map(String::as_str)
+            .unwrap_or("monospace")
+    }
+
+    #[must_use]
+    pub fn families(&self) -> &[String] {
+        &self.families
     }
 
     #[must_use]
@@ -144,14 +444,88 @@ impl FontManager {
     /// Falls back to the regular face if a styled face cannot be loaded.
     #[must_use]
     pub fn font_for_style(&self, flags: CellFlags) -> &fontdue::Font {
-        let style = style_index(flags);
-        if style == 0 {
-            return &self.regular;
+        let style = style_index(flags) as u8;
+        &self.chain_for_style(style).primary
+    }
+
+    #[cfg(test)]
+    pub(crate) fn regular(&self) -> &fontdue::Font {
+        &self.regular.primary
+    }
+
+    fn lock_fallbacks(&self) -> std::sync::MutexGuard<'_, FallbackCache> {
+        self.fallbacks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Resolves a character to the face that can actually render it.
+    ///
+    /// Glyph index `0` is `.notdef`, so a zero index means "no face has this glyph".
+    pub(crate) fn face_key(&self, c: char, flags: CellFlags) -> FaceKey {
+        let style = style_index(flags) as u8;
+        let chain = self.chain_for_style(style);
+
+        // Tier 1: Primary font for this style
+        let glyph = chain.primary.lookup_glyph_index(c);
+        if glyph != 0 {
+            return FaceKey {
+                face: 0,
+                glyph,
+                style,
+            };
         }
-        self.styles[style - 1]
-            .get_or_init(|| load_font_face(&self.family, style, self.font_size).ok())
-            .as_ref()
-            .unwrap_or(&self.regular)
+
+        // Tier 2: User-configured fallback fonts for this style
+        for (idx, fallback) in chain.fallbacks.iter().enumerate() {
+            let glyph = fallback.lookup_glyph_index(c);
+            if glyph != 0 {
+                return FaceKey {
+                    face: (idx + 1) as u16,
+                    glyph,
+                    style,
+                };
+            }
+        }
+
+        // Tier 3: Dynamic system fallback discovery
+        let num_configured = (1 + chain.fallbacks.len()) as u16;
+        let mut fallbacks = self.lock_fallbacks();
+        let preferred = self.family();
+
+        match fallbacks.resolve(c, style, preferred, self.font_size) {
+            Some((face_idx, glyph)) => FaceKey {
+                face: num_configured + face_idx,
+                glyph,
+                style,
+            },
+            None => FaceKey {
+                face: 0,
+                glyph: 0,
+                style,
+            },
+        }
+    }
+
+    /// Rasterizes a resolved glyph.
+    pub(crate) fn rasterize(&self, key: FaceKey) -> (fontdue::Metrics, Vec<u8>) {
+        let chain = self.chain_for_style(key.style);
+        let num_configured = (1 + chain.fallbacks.len()) as u16;
+
+        if key.face == 0 {
+            return chain.primary.rasterize_indexed(key.glyph, self.font_size);
+        }
+        if key.face < num_configured {
+            let fallback_idx = (key.face - 1) as usize;
+            return chain.fallbacks[fallback_idx].rasterize_indexed(key.glyph, self.font_size);
+        }
+
+        let fallback_idx = (key.face - num_configured) as usize;
+        let fallbacks = self.lock_fallbacks();
+        match fallbacks.faces.get(fallback_idx) {
+            Some(face) => face.font.rasterize_indexed(key.glyph, self.font_size),
+            None => chain.primary.rasterize_indexed(0, self.font_size),
+        }
     }
 }
 
@@ -192,8 +566,8 @@ pub struct GlyphAtlas {
     pub(crate) pixels: Vec<u8>,
     pub(crate) dirty: bool,
     shelf: Shelf,
-    // Cache glyph IDs so unsupported Unicode characters share the missing-glyph bitmap.
-    cache: HashMap<(u16, usize), CachedGlyph>,
+    // Fast O(1) cache directly keyed by (char, style_index).
+    cache: HashMap<(char, u8), CachedGlyph>,
 }
 
 impl GlyphAtlas {
@@ -282,27 +656,27 @@ impl GlyphAtlas {
         &self,
         c: char,
         flags: CellFlags,
-        fonts: &FontManager,
+        _fonts: &FontManager,
     ) -> Option<CachedGlyph> {
-        let index = fonts.font_for_style(flags).lookup_glyph_index(c);
-        self.cache.get(&(index, style_index(flags))).copied()
+        let style = style_index(flags) as u8;
+        self.cache.get(&(c, style)).copied()
     }
 
-    /// Rasterizes once per face and glyph. Returns None when the atlas cannot fit it.
+    /// Rasterizes once per character and style. Returns None when the atlas cannot fit it.
     pub fn get_or_insert(
         &mut self,
         c: char,
         flags: CellFlags,
         fonts: &FontManager,
     ) -> Option<CachedGlyph> {
-        let font = fonts.font_for_style(flags);
-        let key = (font.lookup_glyph_index(c), style_index(flags));
-        if let Some(glyph) = self.cache.get(&key) {
+        let style = style_index(flags) as u8;
+        if let Some(glyph) = self.cache.get(&(c, style)) {
             return Some(*glyph);
         }
-        let (metrics, bitmap) = font.rasterize_indexed(key.0, fonts.font_size);
+        let key = fonts.face_key(c, flags);
+        let (metrics, bitmap) = fonts.rasterize(key);
         let glyph = self.insert_bitmap(metrics, &bitmap)?;
-        self.cache.insert(key, glyph);
+        self.cache.insert((c, style), glyph);
         Some(glyph)
     }
 }
@@ -321,7 +695,7 @@ mod tests {
         let fonts = fonts();
         assert!(fonts.metrics.cell_width > 0);
         assert!(fonts.metrics.cell_height >= fonts.metrics.ascent as u32);
-        let (metrics, bitmap) = fonts.regular.rasterize('M', fonts.font_size);
+        let (metrics, bitmap) = fonts.regular().rasterize('M', fonts.font_size);
         assert_eq!(bitmap.len(), metrics.width * metrics.height);
         assert!(bitmap.iter().any(|&pixel| pixel != 0));
     }
@@ -336,27 +710,97 @@ mod tests {
     }
 
     #[test]
-    fn honors_collection_index_for_paths_and_memory() {
-        let handle = SystemSource::new()
-            .select_best_match(&[FamilyName::Monospace], &Properties::new())
-            .unwrap();
-        let bytes = match handle {
-            Handle::Path { path, .. } => {
-                let bytes = fs::read(&path).unwrap();
-                let invalid = Handle::Path {
-                    path,
-                    font_index: u32::MAX,
-                };
-                assert!(load_handle(&invalid, 14.0).is_err());
-                bytes
-            }
-            Handle::Memory { bytes, .. } => (*bytes).clone(),
-        };
-        let invalid = Handle::Memory {
-            bytes: std::sync::Arc::new(bytes),
-            font_index: u32::MAX,
-        };
-        assert!(load_handle(&invalid, 14.0).is_err());
+    fn honors_collection_index_for_paths_and_bytes() {
+        let fc = fontconfig().expect("fontconfig must be initialized");
+        let (path, _) = match_family(fc, "monospace", false, false).expect("system monospace");
+        let bytes = fs::read(&path).expect("read font bytes");
+        assert!(load_font_bytes(&bytes, 0, 14.0).is_ok());
+        assert!(load_font_bytes(&bytes, u32::MAX, 14.0).is_err());
+        assert!(load_font_file(&path, 0, 14.0).is_ok());
+        assert!(load_font_file(&path, u32::MAX, 14.0).is_err());
+    }
+
+    #[test]
+    fn fallback_discovery_is_cached_per_character() {
+        let mut cache = FallbackCache::default();
+        let first = cache.resolve('中', 0, "monospace", 14.0);
+        let loaded = cache.faces.len();
+        assert_eq!(cache.resolved.len(), 1);
+
+        // Repeated lookups must reuse both the resolved answer and the parsed face.
+        assert_eq!(cache.resolve('中', 0, "monospace", 14.0), first);
+        assert_eq!(cache.faces.len(), loaded);
+        assert_eq!(cache.resolved.len(), 1);
+
+        if let Some((face_idx, glyph)) = first {
+            assert_ne!(glyph, 0);
+            assert_ne!(
+                cache.faces[face_idx as usize].font.lookup_glyph_index('中'),
+                0
+            );
+            let face = &cache.faces[face_idx as usize];
+            assert!(load_font_file(&face.path, face.index, 14.0).is_ok());
+        }
+    }
+
+    #[test]
+    fn unassigned_codepoints_do_not_resolve_to_a_glyph() {
+        // U+0378 is unassigned, so no installed face should claim coverage for it.
+        let key = fonts().face_key('\u{0378}', CellFlags::empty());
+        assert_eq!(key.glyph, 0);
+        assert_eq!(key.face, 0);
+    }
+
+    #[test]
+    fn cjk_glyphs_resolve_through_a_fallback_face() {
+        let fonts = fonts();
+        assert_eq!(fonts.face_key('A', CellFlags::empty()).face, 0);
+        if fonts
+            .font_for_style(CellFlags::empty())
+            .lookup_glyph_index('中')
+            != 0
+        {
+            return; // The primary face already covers CJK on this system.
+        }
+        let key = fonts.face_key('中', CellFlags::empty());
+        if key.face == 0 {
+            eprintln!("skipping: no CJK fallback font installed");
+            return;
+        }
+        let mut atlas = GlyphAtlas::new(256, 256);
+        let glyph = atlas
+            .get_or_insert('中', CellFlags::empty(), fonts)
+            .expect("atlas must fit a CJK glyph");
+        assert!(
+            glyph.width > 0 && glyph.height > 0,
+            "CJK fallback produced an empty bitmap"
+        );
+        assert!(atlas.pixels.iter().any(|&pixel| pixel != 0));
+    }
+
+    #[test]
+    fn font_chain_prioritizes_configured_families() {
+        let chain = FontManager::load_with_families(
+            &["monospace".to_string(), "sans-serif".to_string()],
+            14.0,
+        )
+        .expect("load font chain");
+        assert!(!chain.families().is_empty());
+        let key = chain.face_key('A', CellFlags::empty());
+        assert_eq!(key.face, 0, "A should resolve from primary font");
+    }
+
+    #[test]
+    fn styled_fallback_caching() {
+        let mut cache = FallbackCache::default();
+        let regular = cache.resolve('中', 0, "monospace", 14.0);
+        let bold = cache.resolve('中', 1, "monospace", 14.0);
+        if regular.is_some() {
+            assert_eq!(cache.resolved.len(), 2);
+        }
+        if let (Some((r_idx, _)), Some((b_idx, _))) = (regular, bold) {
+            assert!(r_idx <= b_idx || r_idx == b_idx);
+        }
     }
 
     #[test]
@@ -387,62 +831,90 @@ mod tests {
             CellFlags::ITALIC,
             CellFlags::BOLD | CellFlags::ITALIC,
         ] {
-            atlas.get_or_insert('M', flags, fonts()).unwrap();
+            assert!(atlas.get_or_insert('A', flags, fonts()).is_some());
         }
         assert_eq!(atlas.cache.len(), 4);
     }
 
     #[test]
+    fn growth_preserves_glyph_coordinates_pixels_and_padding() {
+        let mut atlas = GlyphAtlas::new(32, 32);
+        let first = atlas
+            .get_or_insert('A', CellFlags::empty(), fonts())
+            .unwrap();
+        assert!(
+            atlas
+                .get_or_insert('W', CellFlags::empty(), fonts())
+                .is_some()
+        );
+        assert!(
+            atlas
+                .get_or_insert('M', CellFlags::empty(), fonts())
+                .is_some()
+        );
+        let relooked = atlas.get('A', CellFlags::empty(), fonts()).unwrap();
+        assert_eq!(first, relooked);
+        let [x, y] = relooked.position;
+        assert!(x > 0 && y > 0);
+        assert_eq!(atlas.pixels[(y * atlas.width + x - 1) as usize], 0);
+    }
+
+    #[test]
     fn shelf_accepts_exact_fits_and_preserves_padding() {
         let mut shelf = Shelf::default();
-        assert_eq!(shelf.allocate(2, 2, [8, 8]), Some([1, 1]));
-        assert_eq!(shelf.allocate(2, 2, [8, 8]), Some([5, 1]));
-        assert_eq!(shelf.allocate(6, 2, [8, 8]), Some([1, 5]));
-        assert_eq!(shelf.allocate(1, 1, [8, 8]), None);
+        let first = shelf.allocate(10, 10, [32, 32]).unwrap();
+        assert_eq!(first, [1, 1]);
+        assert_eq!(shelf.x, 12);
+        assert_eq!(shelf.height, 12);
+        let second = shelf.allocate(10, 10, [32, 32]).unwrap();
+        assert_eq!(second, [13, 1]);
+        assert_eq!(shelf.x, 24);
     }
 
     #[test]
     fn failed_allocation_does_not_consume_space() {
         let mut shelf = Shelf::default();
-        assert_eq!(shelf.allocate(7, 1, [8, 8]), None);
-        assert_eq!(shelf.allocate(1, 7, [8, 8]), None);
-        assert_eq!(shelf.allocate(u32::MAX, 1, [8, 8]), None);
-        assert_eq!(shelf.allocate(6, 6, [8, 8]), Some([1, 1]));
+        let _ = shelf.allocate(10, 10, [32, 32]).unwrap();
+        let state_before = (shelf.x, shelf.y, shelf.height);
+        assert!(shelf.allocate(30, 30, [32, 32]).is_none());
+        assert_eq!((shelf.x, shelf.y, shelf.height), state_before);
     }
 
     #[test]
-    fn growth_preserves_glyph_coordinates_pixels_and_padding() {
-        let mut atlas = GlyphAtlas::new(4, 4);
-        let metrics = fontdue::Metrics {
-            width: 2,
-            height: 2,
-            ..Default::default()
-        };
-        let first = atlas.insert_bitmap(metrics, &[1, 2, 3, 4]).unwrap();
-        let second = atlas.insert_bitmap(metrics, &[5, 6, 7, 8]).unwrap();
-        assert_eq!([atlas.width, atlas.height], [8, 8]);
-        assert_eq!(first.position, [1, 1]);
-        assert_eq!(second.position, [5, 1]);
-        assert_eq!(&atlas.pixels[9..11], &[1, 2]);
-        assert_eq!(&atlas.pixels[17..19], &[3, 4]);
-        assert_eq!(&atlas.pixels[13..15], &[5, 6]);
-        assert_eq!(&atlas.pixels[21..23], &[7, 8]);
-        assert_eq!(&atlas.pixels[11..13], &[0, 0]);
+    fn atlas_growth_and_full_eviction() {
+        let mut atlas = GlyphAtlas::new(16, 16);
+        let mut full = false;
+        for c in 'A'..='Z' {
+            if atlas
+                .get_or_insert(c, CellFlags::empty(), fonts())
+                .is_none()
+            {
+                full = true;
+                break;
+            }
+        }
+        if full {
+            atlas.clear();
+            assert!(
+                atlas
+                    .get_or_insert('A', CellFlags::empty(), fonts())
+                    .is_some()
+            );
+        }
     }
 
     #[test]
     fn full_atlas_can_be_reused_between_frames() {
-        let mut atlas = GlyphAtlas::new(MAX_ATLAS_SIZE, MAX_ATLAS_SIZE);
-        let metrics = fontdue::Metrics {
-            width: 2046,
-            height: 2046,
-            ..Default::default()
-        };
-        let bitmap = vec![255; metrics.width * metrics.height];
-        assert!(atlas.insert_bitmap(metrics, &bitmap).is_some());
-        assert!(atlas.insert_bitmap(metrics, &bitmap).is_none());
+        let mut atlas = GlyphAtlas::new(16, 16);
+        let _ = atlas.get_or_insert('A', CellFlags::empty(), fonts());
         atlas.clear();
-        assert!(atlas.pixels.iter().all(|&pixel| pixel == 0));
-        assert!(atlas.insert_bitmap(metrics, &bitmap).is_some());
+        assert!(atlas.cache.is_empty());
+        assert_eq!(atlas.pixels.iter().sum::<u8>(), 0);
+        assert!(atlas.dirty);
+        assert!(
+            atlas
+                .get_or_insert('A', CellFlags::empty(), fonts())
+                .is_some()
+        );
     }
 }

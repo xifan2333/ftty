@@ -1,6 +1,8 @@
 //! ftty - Ultra-lightweight, Suckless Wayland terminal emulator with native Kitty graphics protocol
 
-#![deny(clippy::undocumented_unsafe_blocks)]
+// `unwrap`/`expect` are only acceptable inside the test suite; production paths must
+// propagate errors. Cargo.toml enables `clippy::unwrap_used`/`expect_used` crate-wide.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod color;
 pub mod config;
@@ -10,8 +12,12 @@ pub mod grid;
 pub mod ime;
 pub mod input;
 pub mod kitty;
+pub mod mouse;
 pub mod parser;
+// Audited FFI boundaries: EGL/OpenGL and the PTY ioctl wrappers.
+#[allow(unsafe_code)]
 pub mod pty;
+#[allow(unsafe_code)]
 pub mod render;
 pub mod selection;
 pub mod wayland;
@@ -25,8 +31,9 @@ pub use ime::{ImeState, Preedit, calculate_cursor_rect};
 pub use input::{KeyAction, KeyboardHandler, parse_key_combo};
 pub use kitty::{
     DeleteTarget, ImageData, ImagePlacement, KittyAction, KittyCommand, KittyEvent, KittyFormat,
-    KittyMedium, KittyParser,
+    KittyMedium, KittyParser, kitty_response,
 };
+pub use mouse::{MouseEncoding, MouseModifiers, MouseState, MouseTracking, encode_mouse_event};
 pub use parser::Terminal;
 pub use pty::Pty;
 pub use render::{ColorScheme, RenderOptions, Renderer};

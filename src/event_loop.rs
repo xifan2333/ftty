@@ -37,9 +37,11 @@ use wayland_protocols::xdg::shell::client::{
 use crate::color::Rgb;
 use crate::config::Config;
 use crate::font::{CellMetrics, FontManager, GlyphAtlas};
+use crate::grid::CellFlags;
 use crate::ime::ImeState;
 use crate::input::{KeyAction, KeyboardHandler};
-use crate::kitty::{ImagePlacement, KittyAction, KittyEvent, KittyParser};
+use crate::kitty::{ImagePlacement, KittyAction, KittyEvent, KittyParser, kitty_response};
+use crate::mouse::{MouseModifiers, encode_mouse_event};
 use crate::parser::Terminal;
 use crate::pty::Pty;
 use crate::render::{ColorScheme, RenderOptions, Renderer};
@@ -67,6 +69,12 @@ pub struct AppState {
     pub selection: Selection,
     pub mouse_pos: [f64; 2],
     pub mouse_pressed: bool,
+    /// Bitmask of X11 button indexes currently held down and reported to the application.
+    pub mouse_buttons_held: u8,
+    /// Set while a button press was forwarded to a mouse-tracking application.
+    pub mouse_reported: bool,
+    /// X11 button index most recently forwarded to the PTY, used for drag motion.
+    pub mouse_button: u8,
     pub last_click_time: u32,
     pub click_count: u8,
     pub last_click_cell: Option<(usize, usize)>,
@@ -108,11 +116,16 @@ impl AppState {
         config_path: Option<PathBuf>,
     ) -> Result<Self, io::Error> {
         let config = Config::load_from_path_or_default(config_path.as_deref())?;
-        let font_mgr = FontManager::load_with_family(config.font_family(), config.font_size())?;
-        let atlas = GlyphAtlas::new(128, 128);
+        let font_mgr =
+            FontManager::load_with_families(&config.font_families(), config.font_size())?;
+        let mut atlas = GlyphAtlas::new(1024, 1024);
+        for c in ' '..='~' {
+            let _ = atlas.get_or_insert(c, CellFlags::empty(), &font_mgr);
+        }
         let palette = config.build_palette();
         let default_fg = config.foreground();
         let default_bg = config.background();
+        terminal.set_default_colors(default_fg, default_bg);
         terminal.grid.cursor.shape = config.cursor_shape();
         terminal.grid.max_scrollback = config.scrollback_lines();
 
@@ -127,6 +140,24 @@ impl AppState {
             .saturating_mul(font_mgr.metrics.cell_height)
             .saturating_add(pad_y * 2)
             .clamp(100, i32::MAX as u32);
+
+        // Publish the pixel geometry before the first frame so image clients can size
+        // themselves without waiting for a window resize.
+        let cell_pixels = [
+            saturating_u16(font_mgr.metrics.cell_width),
+            saturating_u16(font_mgr.metrics.cell_height),
+        ];
+        let viewport_pixels = [
+            saturating_u16(wayland.width.saturating_sub(pad_x * 2)),
+            saturating_u16(wayland.height.saturating_sub(pad_y * 2)),
+        ];
+        terminal.set_geometry(cell_pixels, viewport_pixels);
+        pty.resize(
+            terminal.grid.cols as u16,
+            terminal.grid.rows as u16,
+            viewport_pixels[0],
+            viewport_pixels[1],
+        )?;
 
         Ok(Self {
             terminal,
@@ -151,6 +182,9 @@ impl AppState {
             ),
             mouse_pos: [0.0, 0.0],
             mouse_pressed: false,
+            mouse_buttons_held: 0,
+            mouse_reported: false,
+            mouse_button: 0,
             last_click_time: 0,
             click_count: 0,
             last_click_cell: None,
@@ -182,6 +216,43 @@ impl AppState {
         let abs_line =
             self.terminal.grid.scrollback.len() + screen_row - self.terminal.grid.viewport_offset;
         (abs_line, screen_row, col)
+    }
+
+    /// Encodes a pointer event for the application, or `None` when the event stays local.
+    ///
+    /// Mouse reports are suppressed while tracking is disabled and while Shift is held,
+    /// which is the conventional override that hands the pointer back to text selection.
+    fn mouse_report_bytes(&self, button: u8, pressed: bool, motion: bool) -> Option<Vec<u8>> {
+        if !self.terminal.mouse.is_reporting() {
+            return None;
+        }
+        let modifiers = self.keyboard.modifiers();
+        if modifiers.shift && pressed {
+            return None;
+        }
+        let (_, screen_row, col) = self.cell_at_pointer(self.mouse_pos[0], self.mouse_pos[1]);
+        encode_mouse_event(
+            self.terminal.mouse.encoding,
+            button,
+            col,
+            screen_row,
+            pressed,
+            motion,
+            MouseModifiers {
+                shift: modifiers.shift,
+                alt: modifiers.alt,
+                ctrl: modifiers.ctrl,
+            },
+        )
+    }
+
+    /// Forwards a pointer event to the PTY and reports whether the application consumed it.
+    fn report_mouse_event(&mut self, button: u8, pressed: bool, motion: bool) -> bool {
+        let Some(bytes) = self.mouse_report_bytes(button, pressed, motion) else {
+            return false;
+        };
+        self.write_pty_blocking(&bytes);
+        true
     }
 
     /// Copies the currently selected text to the Wayland clipboard and internal buffer.
@@ -310,11 +381,14 @@ impl AppState {
             self.terminal.grid.viewport_offset = self.terminal.grid.viewport_offset.min(max_sb);
         }
 
-        let font_changed = self.config.font_family() != new_config.font_family()
+        let font_changed = self.config.font_families() != new_config.font_families()
             || (self.config.font_size() - new_config.font_size()).abs() > f32::EPSILON;
 
         let maybe_new_font = if font_changed {
-            match FontManager::load_with_family(new_config.font_family(), new_config.font_size()) {
+            match FontManager::load_with_families(
+                &new_config.font_families(),
+                new_config.font_size(),
+            ) {
                 Ok(mgr) => Some(mgr),
                 Err(e) => {
                     eprintln!("ftty: failed to reload font face or size: {e}");
@@ -331,6 +405,8 @@ impl AppState {
         self.palette = new_config.build_palette();
         self.default_fg = new_config.foreground();
         self.default_bg = new_config.background();
+        self.terminal
+            .set_default_colors(self.default_fg, self.default_bg);
         self.terminal.grid.cursor.shape = new_config.cursor_shape();
         self.config = new_config;
 
@@ -406,7 +482,9 @@ impl AppState {
         if (self.font_mgr.font_size() - new_size).abs() < f32::EPSILON {
             return;
         }
-        if let Ok(new_font_mgr) = FontManager::load_with_family(self.font_mgr.family(), new_size) {
+        if let Ok(new_font_mgr) =
+            FontManager::load_with_families(self.font_mgr.families(), new_size)
+        {
             self.font_mgr = new_font_mgr;
             self.atlas.clear();
             let _ = self.resize_terminal();
@@ -415,13 +493,31 @@ impl AppState {
     }
 
     fn resize_terminal(&mut self) -> io::Result<()> {
+        let padding = [self.config.padding_x(), self.config.padding_y()];
         let (cols, rows) = terminal_size(
             [self.wayland.width, self.wayland.height],
             self.font_mgr.metrics,
-            [self.config.padding_x(), self.config.padding_y()],
+            padding,
         );
+        let viewport_pixels = [
+            saturating_u16(self.wayland.width.saturating_sub(u32::from(padding[0]) * 2)),
+            saturating_u16(
+                self.wayland
+                    .height
+                    .saturating_sub(u32::from(padding[1]) * 2),
+            ),
+        ];
+        self.terminal.set_geometry(
+            [
+                saturating_u16(self.font_mgr.metrics.cell_width),
+                saturating_u16(self.font_mgr.metrics.cell_height),
+            ],
+            viewport_pixels,
+        );
+        // The kernel only signals SIGWINCH on an actual change, so this is safe to repeat.
+        self.pty
+            .resize(cols, rows, viewport_pixels[0], viewport_pixels[1])?;
         if (self.terminal.grid.cols, self.terminal.grid.rows) != (cols as usize, rows as usize) {
-            self.pty.resize(cols, rows)?;
             self.terminal.grid.resize(cols as usize, rows as usize);
         }
         Ok(())
@@ -448,6 +544,136 @@ impl AppState {
         // A resize must be committed even if the compositor suspended the old frame callback.
         self.frame_callback = None;
         Ok(())
+    }
+
+    fn handle_kitty_event(&mut self, event: KittyEvent) {
+        match event {
+            KittyEvent::Transmit { command, image } => {
+                let image_id = image.id;
+                let placement_id = command.placement_id.unwrap_or(0);
+                let ack_id = command.placement_id.filter(|id| *id != 0);
+                let img_w = (image.width as f32).max(1.0);
+                let img_h = (image.height as f32).max(1.0);
+                self.terminal.grid.add_image(image);
+
+                let cw = self.font_mgr.metrics.cell_width as f32;
+                let ch = self.font_mgr.metrics.cell_height as f32;
+
+                let (cols, rows) = match (command.cols, command.rows) {
+                    (Some(c), Some(r)) => (c as usize, r as usize),
+                    (Some(c), None) => {
+                        let pixel_w = c as f32 * cw;
+                        let pixel_h = pixel_w * (img_h / img_w);
+                        let r = (pixel_h / ch).ceil().max(1.0) as usize;
+                        (c as usize, r)
+                    }
+                    (None, Some(r)) => {
+                        let pixel_h = r as f32 * ch;
+                        let pixel_w = pixel_h * (img_w / img_h);
+                        let c = (pixel_w / cw).ceil().max(1.0) as usize;
+                        (c, r as usize)
+                    }
+                    (None, None) => {
+                        let c = (img_w / cw).ceil().max(1.0) as usize;
+                        let r = (img_h / ch).ceil().max(1.0) as usize;
+                        (c, r)
+                    }
+                };
+
+                if command.is_virtual {
+                    self.terminal
+                        .grid
+                        .virtual_placements
+                        .insert(image_id, (cols, rows));
+                } else {
+                    let abs_line =
+                        self.terminal.grid.scrollback.len() + self.terminal.grid.cursor.row;
+                    self.terminal.grid.add_placement(ImagePlacement {
+                        image_id,
+                        placement_id,
+                        line: abs_line,
+                        col: self.terminal.grid.cursor.col,
+                        cols,
+                        rows,
+                        offset_x: command.offset_x,
+                        offset_y: command.offset_y,
+                        z_index: command.z_index,
+                    });
+
+                    if !command.do_not_move_cursor {
+                        self.terminal.grid.cursor.col = (self.terminal.grid.cursor.col + cols)
+                            .min(self.terminal.grid.cols.saturating_sub(1));
+                    }
+                }
+
+                let wants_ack = command.action == KittyAction::TransmitAndDisplayWithResponse
+                    || command.id_explicit;
+                if wants_ack && command.quiet == 0 {
+                    let resp = kitty_response(image_id, ack_id, "OK");
+                    self.write_pty_blocking(&resp);
+                }
+            }
+            KittyEvent::Place { command } => {
+                let Some(image_id) = command.image_id else {
+                    return;
+                };
+                let placement_id = command.placement_id.unwrap_or(0);
+                let ack_id = command.placement_id.filter(|id| *id != 0);
+                if !self.terminal.grid.images.contains_key(&image_id) {
+                    if command.quiet < 2 {
+                        let resp = kitty_response(image_id, ack_id, "ENOENT:image not found");
+                        self.write_pty_blocking(&resp);
+                    }
+                    return;
+                }
+                let cols = command.cols.unwrap_or(1) as usize;
+                let rows = command.rows.unwrap_or(1) as usize;
+                if command.is_virtual {
+                    self.terminal
+                        .grid
+                        .virtual_placements
+                        .insert(image_id, (cols, rows));
+                } else {
+                    let abs_line =
+                        self.terminal.grid.scrollback.len() + self.terminal.grid.cursor.row;
+                    self.terminal.grid.add_placement(ImagePlacement {
+                        image_id,
+                        placement_id,
+                        line: abs_line,
+                        col: self.terminal.grid.cursor.col,
+                        cols,
+                        rows,
+                        offset_x: command.offset_x,
+                        offset_y: command.offset_y,
+                        z_index: command.z_index,
+                    });
+                }
+                if command.quiet == 0 {
+                    let resp = kitty_response(image_id, ack_id, "OK");
+                    self.write_pty_blocking(&resp);
+                }
+            }
+            KittyEvent::Delete { target } => {
+                self.terminal.grid.delete_images(target);
+            }
+            KittyEvent::Response(resp) => {
+                self.write_pty_blocking(&resp);
+            }
+        }
+    }
+}
+
+fn saturating_u16(value: u32) -> u16 {
+    value.min(u32::from(u16::MAX)) as u16
+}
+
+/// Maps a Linux input button code to the X11 mouse button index used on the wire.
+fn x11_button_index(button: u32) -> Option<u8> {
+    match button {
+        0x110 => Some(0), // BTN_LEFT
+        0x111 => Some(1), // BTN_MIDDLE
+        0x112 => Some(2), // BTN_RIGHT
+        _ => None,
     }
 }
 
@@ -730,6 +956,21 @@ impl Dispatch<WlPointer, ()> for AppState {
                 ..
             } => {
                 state.mouse_pos = [surface_x, surface_y];
+                let held = state.mouse_buttons_held != 0 || state.mouse_reported;
+                if state.terminal.mouse.reports_motion(held) {
+                    let button = if held {
+                        if state.mouse_buttons_held != 0 {
+                            state.mouse_buttons_held.trailing_zeros() as u8
+                        } else {
+                            state.mouse_button
+                        }
+                    } else {
+                        3
+                    };
+                    if state.report_mouse_event(button, true, true) {
+                        return;
+                    }
+                }
                 if state.mouse_pressed {
                     let (line, _, col) = state.cell_at_pointer(surface_x, surface_y);
                     state.selection.end = SelectionPoint::new(line, col);
@@ -743,61 +984,80 @@ impl Dispatch<WlPointer, ()> for AppState {
                 serial,
             } => {
                 state.last_serial = serial;
-                if button == 0x110 {
-                    // BTN_LEFT
-                    let (line, screen_row, col) =
-                        state.cell_at_pointer(state.mouse_pos[0], state.mouse_pos[1]);
-                    let same_cell = state.last_click_cell == Some((line, col));
-                    if same_cell && time.saturating_sub(state.last_click_time) < 350 {
-                        state.click_count = (state.click_count % 3) + 1;
-                    } else {
-                        state.click_count = 1;
-                    }
-                    state.last_click_time = time;
-                    state.last_click_cell = Some((line, col));
-                    state.mouse_pressed = true;
-
-                    match state.click_count {
-                        1 => {
-                            state.selection = Selection::new(
-                                SelectionPoint::new(line, col),
-                                SelectionPoint::new(line, col),
-                                SelectionType::Simple,
-                            );
-                        }
-                        2 => {
-                            let row = state.terminal.grid.visible_line(screen_row);
-                            let (w_start, w_end) = find_word_boundaries(row, col);
-                            state.selection = Selection::new(
-                                SelectionPoint::new(line, w_start),
-                                SelectionPoint::new(line, w_end),
-                                SelectionType::Word,
-                            );
-                        }
-                        3 => {
-                            state.selection = Selection::new(
-                                SelectionPoint::new(line, 0),
-                                SelectionPoint::new(
-                                    line,
-                                    state.terminal.grid.cols.saturating_sub(1),
-                                ),
-                                SelectionType::Line,
-                            );
-                        }
-                        _ => {}
-                    }
-                    state.needs_redraw = true;
-                } else if button == 0x112 {
-                    // BTN_MIDDLE: paste
-                    state.paste_clipboard(Some(conn));
+                let Some(index) = x11_button_index(button) else {
+                    return;
+                };
+                // Applications that requested mouse tracking own the event; Shift
+                // always overrides tracking so text can still be selected.
+                if state.report_mouse_event(index, true, false) {
+                    state.mouse_buttons_held |= 1 << index;
+                    state.mouse_reported = true;
+                    state.mouse_button = index;
+                    return;
                 }
+                if index == 1 {
+                    // BTN_MIDDLE pastes the primary selection, as elsewhere on X11.
+                    state.paste_clipboard(Some(conn));
+                    return;
+                }
+                if index != 0 {
+                    return;
+                }
+                let (line, screen_row, col) =
+                    state.cell_at_pointer(state.mouse_pos[0], state.mouse_pos[1]);
+                let same_cell = state.last_click_cell == Some((line, col));
+                if same_cell && time.saturating_sub(state.last_click_time) < 350 {
+                    state.click_count = (state.click_count % 3) + 1;
+                } else {
+                    state.click_count = 1;
+                }
+                state.last_click_time = time;
+                state.last_click_cell = Some((line, col));
+                state.mouse_pressed = true;
+
+                match state.click_count {
+                    1 => {
+                        state.selection = Selection::new(
+                            SelectionPoint::new(line, col),
+                            SelectionPoint::new(line, col),
+                            SelectionType::Simple,
+                        );
+                    }
+                    2 => {
+                        let row = state.terminal.grid.visible_line(screen_row);
+                        let (w_start, w_end) = find_word_boundaries(row, col);
+                        state.selection = Selection::new(
+                            SelectionPoint::new(line, w_start),
+                            SelectionPoint::new(line, w_end),
+                            SelectionType::Word,
+                        );
+                    }
+                    3 => {
+                        state.selection = Selection::new(
+                            SelectionPoint::new(line, 0),
+                            SelectionPoint::new(line, state.terminal.grid.cols.saturating_sub(1)),
+                            SelectionType::Line,
+                        );
+                    }
+                    _ => {}
+                }
+                state.needs_redraw = true;
             }
             wl_pointer::Event::Button {
                 button,
                 state: WEnum::Value(ButtonState::Released),
                 ..
             } => {
-                if button == 0x110 {
+                let Some(index) = x11_button_index(button) else {
+                    return;
+                };
+                let was_held = (state.mouse_buttons_held & (1 << index)) != 0;
+                if was_held {
+                    state.mouse_buttons_held &= !(1 << index);
+                    state.mouse_reported = state.mouse_buttons_held != 0;
+                    state.report_mouse_event(index, false, false);
+                }
+                if index == 0 {
                     state.mouse_pressed = false;
                 }
             }
@@ -810,27 +1070,31 @@ impl Dispatch<WlPointer, ()> for AppState {
                 state.scroll_accumulator += (value / 15.0) * multiplier;
 
                 let lines = state.scroll_accumulator.trunc() as i32;
-                if lines != 0 {
-                    state.scroll_accumulator -= f64::from(lines);
-                    if state.terminal.grid.is_alt_screen() {
-                        let count = (lines.unsigned_abs() as usize).min(100);
-                        let seq: &[u8] = if lines < 0 { b"\x1b[A" } else { b"\x1b[B" };
-                        let batch = seq.repeat(count);
-                        let _ = state.pty.write_all(&batch);
-                    } else {
-                        if lines < 0 {
-                            state
-                                .terminal
-                                .grid
-                                .scroll_viewport_up(lines.unsigned_abs() as usize);
-                        } else {
-                            state
-                                .terminal
-                                .grid
-                                .scroll_viewport_down(lines.unsigned_abs() as usize);
+                if lines == 0 {
+                    return;
+                }
+                state.scroll_accumulator -= f64::from(lines);
+                let count = (lines.unsigned_abs() as usize).min(100);
+
+                if state.terminal.mouse.is_reporting() && !state.keyboard.modifiers().shift {
+                    // Wheel notches are reported as buttons 64 (up) and 65 (down).
+                    let button = if lines < 0 { 64 } else { 65 };
+                    for _ in 0..count {
+                        if !state.report_mouse_event(button, true, false) {
+                            break;
                         }
-                        state.needs_redraw = true;
                     }
+                } else if state.terminal.grid.is_alt_screen() {
+                    let seq: &[u8] = if lines < 0 { b"\x1b[A" } else { b"\x1b[B" };
+                    let batch = seq.repeat(count);
+                    let _ = state.pty.write_all(&batch);
+                } else {
+                    if lines < 0 {
+                        state.terminal.grid.scroll_viewport_up(count);
+                    } else {
+                        state.terminal.grid.scroll_viewport_down(count);
+                    }
+                    state.needs_redraw = true;
                 }
             }
             wl_pointer::Event::AxisStop { .. } => {
@@ -1064,122 +1328,58 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
     event_loop
         .handle()
         .insert_source(pty_source, |_event, _fd, state: &mut AppState| {
-            let mut buf = [0u8; 8192];
-            match state.pty.read(&mut buf) {
-                Ok(n) if n > 0 => {
-                    let (clean_text, events) = state.kitty_parser.filter_bytes(&buf[..n]);
-                    if !clean_text.is_empty() {
-                        state.terminal.advance_bytes(&clean_text);
-                        if state.config.auto_scroll() && !state.terminal.grid.is_alt_screen() {
-                            state.terminal.grid.scroll_viewport_bottom();
-                        }
-                    }
-
-                    for event in events {
-                        match event {
-                            KittyEvent::Transmit { command, image } => {
-                                let image_id = image.id;
-                                let placement_id = command.placement_id.unwrap_or(0);
-                                let img_w = (image.width as f32).max(1.0);
-                                let img_h = (image.height as f32).max(1.0);
-                                state.terminal.grid.add_image(image);
-
-                                let cw = state.font_mgr.metrics.cell_width as f32;
-                                let ch = state.font_mgr.metrics.cell_height as f32;
-
-                                let (cols, rows) = match (command.cols, command.rows) {
-                                    (Some(c), Some(r)) => (c as usize, r as usize),
-                                    (Some(c), None) => {
-                                        let pixel_w = c as f32 * cw;
-                                        let pixel_h = pixel_w * (img_h / img_w);
-                                        let r = (pixel_h / ch).ceil().max(1.0) as usize;
-                                        (c as usize, r)
-                                    }
-                                    (None, Some(r)) => {
-                                        let pixel_h = r as f32 * ch;
-                                        let pixel_w = pixel_h * (img_w / img_h);
-                                        let c = (pixel_w / cw).ceil().max(1.0) as usize;
-                                        (c, r as usize)
-                                    }
-                                    (None, None) => {
-                                        let c = (img_w / cw).ceil().max(1.0) as usize;
-                                        let r = (img_h / ch).ceil().max(1.0) as usize;
-                                        (c, r)
-                                    }
-                                };
-
-                                let abs_line = state.terminal.grid.scrollback.len()
-                                    + state.terminal.grid.cursor.row;
-                                state.terminal.grid.add_placement(ImagePlacement {
-                                    image_id,
-                                    placement_id,
-                                    line: abs_line,
-                                    col: state.terminal.grid.cursor.col,
-                                    cols,
-                                    rows,
-                                    offset_x: command.offset_x,
-                                    offset_y: command.offset_y,
-                                    z_index: command.z_index,
-                                });
-
-                                if !command.do_not_move_cursor {
-                                    state.terminal.grid.cursor.col =
-                                        (state.terminal.grid.cursor.col + cols)
-                                            .min(state.terminal.grid.cols.saturating_sub(1));
-                                }
-
-                                if command.action == KittyAction::TransmitAndDisplayWithResponse {
-                                    let resp = format!("\x1b_Gi={image_id};OK\x1b\\").into_bytes();
-                                    state.write_pty_blocking(&resp);
-                                }
-                            }
-                            KittyEvent::Place { command } => {
-                                if let Some(image_id) = command.image_id {
-                                    let placement_id = command.placement_id.unwrap_or(0);
-                                    let cols = command.cols.unwrap_or(1) as usize;
-                                    let rows = command.rows.unwrap_or(1) as usize;
-                                    let abs_line = state.terminal.grid.scrollback.len()
-                                        + state.terminal.grid.cursor.row;
-                                    state.terminal.grid.add_placement(ImagePlacement {
-                                        image_id,
-                                        placement_id,
-                                        line: abs_line,
-                                        col: state.terminal.grid.cursor.col,
-                                        cols,
-                                        rows,
-                                        offset_x: command.offset_x,
-                                        offset_y: command.offset_y,
-                                        z_index: command.z_index,
-                                    });
-                                }
-                            }
-                            KittyEvent::Delete { target } => {
-                                state.terminal.grid.delete_images(target);
-                            }
-                            KittyEvent::Response(resp) => {
-                                state.write_pty_blocking(&resp);
+            let mut buf = [0u8; 16384];
+            let mut total_read = 0;
+            loop {
+                match state.pty.read(&mut buf) {
+                    Ok(n) if n > 0 => {
+                        total_read += n;
+                        let (clean_text, events) = state.kitty_parser.filter_bytes(&buf[..n]);
+                        for event in &events {
+                            if let KittyEvent::Response(resp) = event {
+                                state.write_pty_blocking(resp);
                             }
                         }
-                    }
 
-                    state.needs_redraw = true;
-                    state.update_ime_cursor_area();
-                    Ok(calloop::PostAction::Continue)
-                }
-                Ok(_) => {
-                    // EOF on PTY master
-                    state.running = false;
-                    Ok(calloop::PostAction::Reregister)
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    Ok(calloop::PostAction::Continue)
-                }
-                Err(_) => {
-                    // Child process likely exited (EIO on Linux PTY)
-                    state.running = false;
-                    Ok(calloop::PostAction::Reregister)
+                        if !clean_text.is_empty() {
+                            state.terminal.advance_bytes(&clean_text);
+                            for response in state.terminal.take_responses() {
+                                state.write_pty_blocking(&response);
+                            }
+                            if state.config.auto_scroll() && !state.terminal.grid.is_alt_screen() {
+                                state.terminal.grid.scroll_viewport_bottom();
+                            }
+                        }
+
+                        for event in events {
+                            if !matches!(event, KittyEvent::Response(_)) {
+                                state.handle_kitty_event(event);
+                            }
+                        }
+
+                        if total_read >= 65536 {
+                            break;
+                        }
+                    }
+                    Ok(_) => {
+                        // EOF on PTY master
+                        state.running = false;
+                        return Ok(calloop::PostAction::Reregister);
+                    }
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(_) => {
+                        // Child process likely exited (EIO on Linux PTY)
+                        state.running = false;
+                        return Ok(calloop::PostAction::Reregister);
+                    }
                 }
             }
+
+            if total_read > 0 {
+                state.needs_redraw = true;
+                state.update_ime_cursor_area();
+            }
+            Ok(calloop::PostAction::Continue)
         })
         .map_err(io::Error::other)?;
 
@@ -1583,6 +1783,121 @@ mod tests {
     }
 
     #[test]
+    fn pointer_events_from_the_wire_drive_mouse_reports() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+        use wayland_client::Proxy;
+
+        use crate::mouse::{MouseEncoding, MouseTracking};
+
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let conn = Connection::from_socket(client).unwrap();
+        let mut queue = conn.new_event_queue::<AppState>();
+        let qh = queue.handle();
+        let registry = conn.display().get_registry(&qh, ());
+        let seat = registry.bind::<WlSeat, _, _>(1, 5, &qh, ());
+
+        // wl_seat.capabilities(pointer): the client binds wl_pointer in response.
+        let mut events = Vec::new();
+        for word in [seat.id().protocol_id(), 12 << 16, 1] {
+            events.extend_from_slice(&word.to_ne_bytes());
+        }
+        server.write_all(&events).unwrap();
+
+        let term = Terminal::new(80, 24, 100);
+        let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).unwrap();
+        let mut app = AppState::new(term, pty).unwrap();
+        app.terminal.mouse.tracking = MouseTracking::Drag;
+        app.terminal.mouse.encoding = MouseEncoding::Sgr;
+        conn.prepare_read().unwrap().read().unwrap();
+        queue.dispatch_pending(&mut app).unwrap();
+
+        let pointer = app.wayland.pointer.clone().expect("wl_pointer bound");
+        let pointer_id = pointer.id().protocol_id();
+        let cw = app.font_mgr.metrics.cell_width as f64;
+        let ch = app.font_mgr.metrics.cell_height as f64;
+        let x = ((cw * 2.5) * 256.0) as i32 as u32;
+        let y = ((ch * 1.5) * 256.0) as i32 as u32;
+
+        // wl_pointer.motion(time, x, y) followed by wl_pointer.button(serial, time, BTN_LEFT, pressed).
+        let mut events = Vec::new();
+        for word in [pointer_id, (20 << 16) | 2, 7, x, y] {
+            events.extend_from_slice(&word.to_ne_bytes());
+        }
+        for word in [pointer_id, (24 << 16) | 3, 9, 9, 0x110, 1] {
+            events.extend_from_slice(&word.to_ne_bytes());
+        }
+        server.write_all(&events).unwrap();
+        conn.prepare_read().unwrap().read().unwrap();
+        queue.dispatch_pending(&mut app).unwrap();
+
+        assert!(app.mouse_reported, "left press was not forwarded");
+        assert_eq!(app.mouse_button, 0);
+        assert!(
+            !app.mouse_pressed,
+            "local selection must stay idle while reporting"
+        );
+        assert_eq!(app.last_serial, 9);
+
+        // Turning tracking off hands the very same press back to local selection.
+        app.terminal.mouse.tracking = MouseTracking::Disabled;
+        app.mouse_reported = false;
+        let mut events = Vec::new();
+        for word in [pointer_id, (24 << 16) | 3, 10, 10, 0x110, 1] {
+            events.extend_from_slice(&word.to_ne_bytes());
+        }
+        server.write_all(&events).unwrap();
+        conn.prepare_read().unwrap().read().unwrap();
+        queue.dispatch_pending(&mut app).unwrap();
+        assert!(app.mouse_pressed);
+        assert!(!app.mouse_reported);
+        assert_eq!(app.selection.start, SelectionPoint::new(1, 2));
+    }
+
+    #[test]
+    fn x11_buttons_map_to_protocol_indexes() {
+        assert_eq!(x11_button_index(0x110), Some(0));
+        assert_eq!(x11_button_index(0x111), Some(1));
+        assert_eq!(x11_button_index(0x112), Some(2));
+        assert_eq!(x11_button_index(0x113), None);
+    }
+
+    #[test]
+    fn mouse_reports_are_forwarded_only_when_tracking_is_enabled() {
+        use crate::mouse::{MouseEncoding, MouseTracking};
+
+        let term = Terminal::new(80, 24, 100);
+        let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
+        let mut app = AppState::new(term, pty).expect("AppState new");
+        let cw = f64::from(app.font_mgr.metrics.cell_width);
+        let ch = f64::from(app.font_mgr.metrics.cell_height);
+        app.mouse_pos = [cw * 2.5, ch * 1.5];
+
+        // Tracking disabled: the pointer stays available for local text selection.
+        assert!(app.mouse_report_bytes(0, true, false).is_none());
+
+        app.terminal.mouse.tracking = MouseTracking::Drag;
+        app.terminal.mouse.encoding = MouseEncoding::Sgr;
+        assert_eq!(
+            app.mouse_report_bytes(0, true, false),
+            Some(b"\x1b[<0;3;2M".to_vec())
+        );
+        assert_eq!(
+            app.mouse_report_bytes(0, false, false),
+            Some(b"\x1b[<0;3;2m".to_vec())
+        );
+        assert_eq!(
+            app.mouse_report_bytes(64, true, false),
+            Some(b"\x1b[<64;3;2M".to_vec())
+        );
+
+        // Shift is the conventional escape hatch back to local selection.
+        app.keyboard.update_modifiers(1, 0, 0, 0);
+        assert!(app.keyboard.modifiers().shift);
+        assert!(app.mouse_report_bytes(0, true, false).is_none());
+    }
+
+    #[test]
     fn test_cell_at_pointer_calculation() {
         let term = Terminal::new(80, 24, 100);
         let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
@@ -1595,5 +1910,58 @@ mod tests {
         assert_eq!(col, 5);
         assert_eq!(screen_row, 3);
         assert_eq!(line, 3);
+    }
+
+    #[test]
+    fn test_font_chain_reload_and_zoom_preserves_fallbacks() {
+        let temp_dir = std::env::temp_dir().join(format!("ftty_font_chain_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let config_path = temp_dir.join("ftty.toml");
+
+        std::fs::write(
+            &config_path,
+            r##"
+            [font]
+            families = ["monospace", "sans-serif"]
+            size = 15.0
+            "##,
+        )
+        .unwrap();
+
+        let term = Terminal::new(80, 24, 100);
+        let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
+        let mut app = AppState::with_config(term, pty, Some(config_path.clone()))
+            .expect("AppState with_config");
+
+        assert_eq!(
+            app.font_mgr.families(),
+            &["monospace".to_string(), "sans-serif".to_string()]
+        );
+        assert_eq!(app.font_mgr.font_size(), 15.0);
+
+        // Zoom font in: families chain must be preserved
+        app.handle_key_action(KeyAction::FontIncrease, None, None);
+        assert_eq!(app.font_mgr.font_size(), 16.0);
+        assert_eq!(
+            app.font_mgr.families(),
+            &["monospace".to_string(), "sans-serif".to_string()]
+        );
+
+        // Reload with single family: families chain updates
+        std::fs::write(
+            &config_path,
+            r##"
+            [font]
+            family = "monospace"
+            size = 14.0
+            "##,
+        )
+        .unwrap();
+
+        app.reload_config();
+        assert_eq!(app.font_mgr.families(), &["monospace".to_string()]);
+        assert_eq!(app.font_mgr.font_size(), 14.0);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

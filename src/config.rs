@@ -35,10 +35,29 @@ impl Include {
     }
 }
 
+/// Font family configuration supporting a single family name or an ordered fallback chain.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum FontFamilies {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+impl FontFamilies {
+    #[must_use]
+    pub fn to_vec(&self) -> Vec<String> {
+        match self {
+            Self::Single(name) => vec![name.clone()],
+            Self::Multiple(names) => names.clone(),
+        }
+    }
+}
+
 /// Font configuration options.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Default)]
 pub struct FontConfig {
-    pub family: Option<String>,
+    #[serde(alias = "families")]
+    pub family: Option<FontFamilies>,
     pub size: Option<f32>,
 }
 
@@ -284,7 +303,26 @@ impl Config {
 
     #[must_use]
     pub fn font_family(&self) -> &str {
-        self.font.family.as_deref().unwrap_or(DEFAULT_FONT_FAMILY)
+        self.font
+            .family
+            .as_ref()
+            .map(|f| match f {
+                FontFamilies::Single(s) => s.as_str(),
+                FontFamilies::Multiple(v) => {
+                    v.first().map(String::as_str).unwrap_or(DEFAULT_FONT_FAMILY)
+                }
+            })
+            .unwrap_or(DEFAULT_FONT_FAMILY)
+    }
+
+    #[must_use]
+    pub fn font_families(&self) -> Vec<String> {
+        self.font
+            .family
+            .as_ref()
+            .map(FontFamilies::to_vec)
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| vec![DEFAULT_FONT_FAMILY.to_string()])
     }
 
     #[must_use]
@@ -572,6 +610,7 @@ mod tests {
 
         let config: Config = toml::from_str(toml_str).expect("parse toml");
         assert_eq!(config.font_family(), "JetBrains Mono");
+        assert_eq!(config.font_families(), vec!["JetBrains Mono"]);
         assert_eq!(config.font_size(), 16.5);
         assert_eq!(config.columns(), 100);
         assert_eq!(config.rows(), 30);
@@ -582,6 +621,22 @@ mod tests {
         let palette = config.build_palette();
         assert_eq!(palette[1], Rgb::new(255, 0, 0));
         assert_eq!(palette[9], Rgb::new(255, 85, 85));
+    }
+
+    #[test]
+    fn test_parse_font_chain() {
+        let toml_str = r#"
+        [font]
+        families = ["Fira Code", "Symbols Nerd Font", "Noto Sans CJK SC"]
+        size = 15.0
+        "#;
+        let config: Config = toml::from_str(toml_str).expect("parse toml with font chain");
+        assert_eq!(config.font_family(), "Fira Code");
+        assert_eq!(
+            config.font_families(),
+            vec!["Fira Code", "Symbols Nerd Font", "Noto Sans CJK SC"]
+        );
+        assert_eq!(config.font_size(), 15.0);
     }
 
     #[test]

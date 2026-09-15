@@ -9,7 +9,7 @@ use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::{Connection, Proxy};
 use wayland_egl::WlEglSurface;
 
-use crate::color::Rgb;
+use crate::color::{Color, Rgb};
 use crate::font::{CellMetrics, FontManager, GlyphAtlas};
 use crate::grid::{Cell, CellFlags, CursorShape, Grid};
 use crate::ime::Preedit;
@@ -204,9 +204,16 @@ precision mediump float;
 varying mediump vec2 v_tex_coords;
 varying lowp vec4 v_color;
 uniform sampler2D u_texture;
+// 0 = single-channel glyph coverage, 1 = RGBA kitty image placement.
+uniform int u_image_mode;
 void main() {
-    float alpha = v_tex_coords.x < 0.0 ? 1.0 : texture2D(u_texture, v_tex_coords).a;
-    gl_FragColor = vec4(v_color.rgb, v_color.a * alpha);
+    if (u_image_mode == 1) {
+        vec4 texel = texture2D(u_texture, v_tex_coords);
+        gl_FragColor = vec4(texel.rgb, texel.a * v_color.a);
+    } else {
+        float alpha = v_tex_coords.x < 0.0 ? 1.0 : texture2D(u_texture, v_tex_coords).a;
+        gl_FragColor = vec4(v_color.rgb, v_color.a * alpha);
+    }
 }
 "#;
 
@@ -271,6 +278,7 @@ pub struct Renderer {
     texture: Option<glow::Texture>,
     viewport: Option<glow::UniformLocation>,
     atlas_size: Option<glow::UniformLocation>,
+    image_mode: Option<glow::UniformLocation>,
     image_textures: HashMap<u32, (glow::Texture, u32, u32, u64)>,
     vertices: Vec<f32>,
     egl: EglContext,
@@ -300,19 +308,21 @@ impl Renderer {
             texture: None,
             viewport: None,
             atlas_size: None,
+            image_mode: None,
             image_textures: HashMap::new(),
             vertices: Vec::with_capacity(8192),
             egl,
         };
         // SAFETY: the owned EGL context is current for all initialization calls.
         unsafe {
-            renderer.program = Some(create_program(&renderer.gl)?);
+            let program = create_program(&renderer.gl)?;
+            renderer.program = Some(program);
             renderer.vbo = Some(renderer.gl.create_buffer().map_err(io::Error::other)?);
             renderer.texture = Some(renderer.gl.create_texture().map_err(io::Error::other)?);
             let gl = &renderer.gl;
-            let program = renderer.program.expect("initialized program");
             renderer.viewport = gl.get_uniform_location(program, "u_viewport");
             renderer.atlas_size = gl.get_uniform_location(program, "u_atlas_size");
+            renderer.image_mode = gl.get_uniform_location(program, "u_image_mode");
             gl.use_program(Some(program));
             gl.uniform_1_i32(gl.get_uniform_location(program, "u_texture").as_ref(), 0);
             gl.active_texture(glow::TEXTURE0);
@@ -407,6 +417,7 @@ impl Renderer {
                 atlas.dirty = false;
             }
             gl.use_program(self.program);
+            gl.uniform_1_i32(self.image_mode.as_ref(), 0);
             gl.uniform_2_f32(self.viewport.as_ref(), width as f32, height as f32);
             gl.uniform_2_f32(
                 self.atlas_size.as_ref(),
@@ -430,6 +441,7 @@ impl Renderer {
 
         // Pass 3: z >= 0 images (above text)
         self.render_image_placements(grid, false, fonts.metrics, options);
+        self.render_unicode_placeholders(grid, fonts.metrics, options);
         Ok(())
     }
 
@@ -514,7 +526,6 @@ impl Renderer {
         metrics: CellMetrics,
         options: RenderOptions<'_>,
     ) {
-        let gl = &self.gl;
         let cw = metrics.cell_width as f32;
         let ch = metrics.cell_height as f32;
         let pad_x = f32::from(options.padding[0]);
@@ -547,35 +558,208 @@ impl Renderer {
             let x1 = x0 + placement.cols as f32 * cw;
             let y1 = y0 + placement.rows as f32 * ch;
 
-            let mut img_vertices = Vec::with_capacity(48);
-            push_quad(
-                &mut img_vertices,
-                [x0, y0, x1, y1],
-                [[0.0, 0.0], [img_w as f32, img_h as f32]],
-                [1.0, 1.0, 1.0, 1.0],
+            self.render_single_image(tex, img_w as f32, img_h as f32, [x0, y0, x1, y1]);
+        }
+    }
+
+    fn render_single_image(
+        &mut self,
+        tex: glow::Texture,
+        img_w: f32,
+        img_h: f32,
+        [x0, y0, x1, y1]: [f32; 4],
+    ) {
+        let mut img_vertices = Vec::with_capacity(48);
+        push_quad(
+            &mut img_vertices,
+            [x0, y0, x1, y1],
+            [[0.0, 0.0], [img_w, img_h]],
+            [1.0, 1.0, 1.0, 1.0],
+        );
+        self.render_image_quads(tex, img_w, img_h, &img_vertices);
+    }
+
+    fn render_image_quads(&mut self, tex: glow::Texture, img_w: f32, img_h: f32, vertices: &[f32]) {
+        let gl = &self.gl;
+        // SAFETY: draw holds this renderer's current EGL context; tex and the VBO
+        // belong to it. vertices contains initialized f32 values with no padding,
+        // and remains live throughout the byte upload.
+        unsafe {
+            gl.use_program(self.program);
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            gl.uniform_1_i32(self.image_mode.as_ref(), 1);
+            gl.uniform_2_f32(self.atlas_size.as_ref(), img_w, img_h);
+
+            gl.bind_buffer(glow::ARRAY_BUFFER, self.vbo);
+            let bytes = std::slice::from_raw_parts(
+                vertices.as_ptr().cast::<u8>(),
+                std::mem::size_of_val(vertices),
             );
+            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::STREAM_DRAW);
 
-            // SAFETY: draw holds this renderer's current EGL context; tex and the VBO
-            // belong to it. img_vertices contains six initialized vertices of eight
-            // f32 values, with no padding, and remains live throughout the byte upload.
-            unsafe {
-                gl.active_texture(glow::TEXTURE0);
-                gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                gl.uniform_2_f32(self.atlas_size.as_ref(), img_w as f32, img_h as f32);
+            let stride = 8 * std::mem::size_of::<f32>() as i32;
+            for (index, count, offset) in [(0, 2, 0), (1, 2, 8), (2, 4, 16)] {
+                gl.enable_vertex_attrib_array(index);
+                gl.vertex_attrib_pointer_f32(index, count, glow::FLOAT, false, stride, offset);
+            }
+            gl.draw_arrays(glow::TRIANGLES, 0, (vertices.len() / 8) as i32);
+        }
+    }
 
-                gl.bind_buffer(glow::ARRAY_BUFFER, self.vbo);
-                let bytes = std::slice::from_raw_parts(
-                    img_vertices.as_ptr().cast::<u8>(),
-                    std::mem::size_of_val(img_vertices.as_slice()),
-                );
-                gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::STREAM_DRAW);
+    fn render_unicode_placeholders(
+        &mut self,
+        grid: &Grid,
+        metrics: CellMetrics,
+        options: RenderOptions<'_>,
+    ) {
+        let cw = metrics.cell_width as f32;
+        let ch = metrics.cell_height as f32;
+        let pad_x = f32::from(options.padding[0]);
+        let pad_y = f32::from(options.padding[1]);
 
-                let stride = 8 * std::mem::size_of::<f32>() as i32;
-                for (index, count, offset) in [(0, 2, 0), (1, 2, 8), (2, 4, 16)] {
-                    gl.enable_vertex_attrib_array(index);
-                    gl.vertex_attrib_pointer_f32(index, count, glow::FLOAT, false, stride, offset);
+        struct RectBox {
+            id: u32,
+            col_start: usize,
+            col_end: usize,
+            row_start: usize,
+            row_end: usize,
+        }
+
+        let mut completed_boxes: Vec<RectBox> = Vec::new();
+        let mut active_boxes: Vec<RectBox> = Vec::new();
+
+        for row in 0..grid.rows {
+            let line = grid.visible_line(row);
+            let mut row_segments: Vec<(u32, usize, usize)> = Vec::new();
+            let mut current_run: Option<(u32, usize, usize)> = None;
+
+            for (col, cell) in line.cells.iter().enumerate() {
+                if cell.c == KITTY_PLACEHOLDER {
+                    let id_low24 = placeholder_image_id(cell.fg) & 0x00FF_FFFF;
+                    if id_low24 != 0 {
+                        let real_id = if self.image_textures.contains_key(&id_low24) {
+                            Some(id_low24)
+                        } else {
+                            self.image_textures
+                                .keys()
+                                .find(|&&k| (k & 0x00FF_FFFF) == id_low24)
+                                .copied()
+                        };
+
+                        if let Some(matched_id) = real_id {
+                            match current_run {
+                                Some((cur_id, start, end))
+                                    if cur_id == matched_id && end + 1 == col =>
+                                {
+                                    current_run = Some((cur_id, start, col));
+                                }
+                                Some(prev) => {
+                                    row_segments.push(prev);
+                                    current_run = Some((matched_id, col, col));
+                                }
+                                None => {
+                                    current_run = Some((matched_id, col, col));
+                                }
+                            }
+                            continue;
+                        }
+                    }
                 }
-                gl.draw_arrays(glow::TRIANGLES, 0, 6);
+                if let Some(prev) = current_run.take() {
+                    row_segments.push(prev);
+                }
+            }
+            if let Some(prev) = current_run {
+                row_segments.push(prev);
+            }
+
+            // Merge matching row segments with active boxes from the previous row
+            let mut next_active: Vec<RectBox> = Vec::new();
+            for (id, col_start, col_end) in row_segments {
+                if let Some(pos) = active_boxes.iter().position(|b| {
+                    b.id == id
+                        && b.col_start == col_start
+                        && b.col_end == col_end
+                        && b.row_end + 1 == row
+                }) {
+                    let mut b = active_boxes.swap_remove(pos);
+                    b.row_end = row;
+                    next_active.push(b);
+                } else {
+                    next_active.push(RectBox {
+                        id,
+                        col_start,
+                        col_end,
+                        row_start: row,
+                        row_end: row,
+                    });
+                }
+            }
+            completed_boxes.append(&mut active_boxes);
+            active_boxes = next_active;
+        }
+        completed_boxes.extend(active_boxes);
+
+        for b in completed_boxes {
+            let Some(&(tex, img_w, img_h, _)) = self.image_textures.get(&b.id) else {
+                continue;
+            };
+
+            let box_w = b.col_end - b.col_start + 1;
+            let box_h = b.row_end - b.row_start + 1;
+            let (virt_cols, virt_rows) = grid
+                .virtual_placements
+                .get(&b.id)
+                .copied()
+                .unwrap_or((box_w, box_h));
+
+            if virt_cols == box_w && virt_rows == box_h {
+                let x0 = pad_x + b.col_start as f32 * cw;
+                let y0 = pad_y + b.row_start as f32 * ch;
+                let x1 = pad_x + (b.col_end + 1) as f32 * cw;
+                let y1 = pad_y + (b.row_end + 1) as f32 * ch;
+
+                self.render_single_image(tex, img_w as f32, img_h as f32, [x0, y0, x1, y1]);
+            } else {
+                let total_c = virt_cols.max(1) as f32;
+                let total_r = virt_rows.max(1) as f32;
+                let num_cells = box_w * box_h;
+                let mut img_vertices = Vec::with_capacity(num_cells * 48);
+
+                for row in b.row_start..=b.row_end {
+                    let line = grid.visible_line(row);
+                    for col in b.col_start..=b.col_end {
+                        let (img_row, img_col) = if let Some(coords) = &line.placeholders
+                            && let Some(&(ir, ic, _)) = coords.get(&col)
+                        {
+                            (ir as usize, ic as usize)
+                        } else {
+                            (row - b.row_start, col - b.col_start)
+                        };
+
+                        let x0 = pad_x + col as f32 * cw;
+                        let y0 = pad_y + row as f32 * ch;
+                        let x1 = x0 + cw;
+                        let y1 = y0 + ch;
+
+                        let u0 = (img_col as f32 / total_c) * img_w as f32;
+                        let u1 = ((img_col + 1) as f32 / total_c) * img_w as f32;
+                        let v0 = (img_row as f32 / total_r) * img_h as f32;
+                        let v1 = ((img_row + 1) as f32 / total_r) * img_h as f32;
+
+                        push_quad(
+                            &mut img_vertices,
+                            [x0, y0, x1, y1],
+                            [[u0, v0], [u1, v1]],
+                            [1.0, 1.0, 1.0, 1.0],
+                        );
+                    }
+                }
+
+                if !img_vertices.is_empty() {
+                    self.render_image_quads(tex, img_w as f32, img_h as f32, &img_vertices);
+                }
             }
         }
     }
@@ -585,12 +769,13 @@ impl Renderer {
     /// # Errors
     /// Returns an error if EGL cannot present the buffer.
     pub fn present(&self) -> io::Result<()> {
+        let surface = self
+            .egl
+            .surface
+            .ok_or_else(|| io::Error::other("EGL window surface is not initialized"))?;
         self.egl
             .egl
-            .swap_buffers(
-                self.egl.display,
-                self.egl.surface.expect("initialized EGL surface"),
-            )
+            .swap_buffers(self.egl.display, surface)
             .map_err(io::Error::other)
     }
 }
@@ -618,8 +803,19 @@ impl Drop for Renderer {
     }
 }
 
+const KITTY_PLACEHOLDER: char = '\u{10EEEE}';
+
+fn placeholder_image_id(color: Color) -> u32 {
+    match color {
+        Color::Rgb(r, g, b) => ((r as u32) << 16) | ((g as u32) << 8) | (b as u32),
+        Color::Indexed(idx) => idx as u32,
+        _ => 0,
+    }
+}
+
 fn visible_glyph(cell: &Cell) -> bool {
     cell.c != ' '
+        && cell.c != KITTY_PLACEHOLDER
         && !cell
             .flags
             .intersects(CellFlags::HIDDEN | CellFlags::WIDE_CHAR_SPACER)
@@ -894,7 +1090,9 @@ fn build_vertices(
                 [0.2, 0.25, 0.35, 0.95],
             );
 
-            // Draw preedit glyph
+            // Draw preedit glyph, clipped to the cells that fit on this row so a wide
+            // fallback glyph cannot bleed past the right edge of the terminal.
+            let span_right = px + span_w;
             if let Some(glyph) = atlas.get(c, CellFlags::UNDERLINE, fonts)
                 && glyph.width > 0
                 && glyph.height > 0
@@ -904,12 +1102,18 @@ fn build_vertices(
                 let [u, v] = glyph.position.map(|value| value as f32);
                 let w = glyph.width as f32;
                 let h = glyph.height as f32;
-                push_quad(
-                    vertices,
-                    [gx, gy, gx + w, gy + h],
-                    [[u, v], [u + w, v + h]],
-                    rgba(colors.foreground),
-                );
+                let left = gx.max(px);
+                let right = (gx + w).min(span_right);
+                if right > left {
+                    let u_left = u + (left - gx);
+                    let u_right = u + (right - gx);
+                    push_quad(
+                        vertices,
+                        [left, gy, right, gy + h],
+                        [[u_left, v], [u_right, v + h]],
+                        rgba(colors.foreground),
+                    );
+                }
             }
 
             // Draw preedit underline
@@ -984,6 +1188,19 @@ mod tests {
     }
 
     #[test]
+    fn unicode_placeholders_are_omitted_from_glyph_vertices() {
+        let mut grid = Grid::new(2, 1, 0);
+        grid.cursor.visible = false;
+        grid.lines[0].cells[0].c = KITTY_PLACEHOLDER;
+        grid.lines[0].cells[0].fg = Color::Rgb(0, 0, 42);
+        grid.lines[0].cells[1].c = 'A';
+
+        let (vertices, _) = frame(&grid);
+        // Only one text quad for 'A', not for KITTY_PLACEHOLDER
+        assert_eq!(vertices.len(), 48);
+    }
+
+    #[test]
     fn decorations_render_on_spaces() {
         let mut grid = Grid::new(1, 1, 0);
         grid.cursor.visible = false;
@@ -1009,6 +1226,45 @@ mod tests {
         assert_eq!(cursor_cell(&grid), Some((0, 1, 2)));
         grid.cursor.visible = false;
         assert_eq!(cursor_cell(&grid), None);
+    }
+
+    #[test]
+    fn cjk_cells_render_through_fallback_faces() {
+        let fonts = FontManager::load(14.0).expect("system monospace font");
+        if fonts.face_key('中', CellFlags::empty()).face == 0 {
+            return; // No CJK-capable face is installed on this machine.
+        }
+        let mut grid = Grid::new(4, 1, 0);
+        grid.cursor.visible = false;
+        grid.lines[0].cells[0].c = '中';
+        grid.lines[0].cells[0].flags = CellFlags::WIDE_CHAR;
+        grid.lines[0].cells[1].flags = CellFlags::WIDE_CHAR_SPACER;
+
+        let mut atlas = GlyphAtlas::new(64, 64);
+        prepare_atlas(&grid, &fonts, &mut atlas, None);
+        let mut vertices = Vec::new();
+        build_vertices(
+            &mut vertices,
+            &grid,
+            ColorScheme::new(&default_256_palette(), DEFAULT_FG, DEFAULT_BG),
+            fonts.metrics,
+            &fonts,
+            &atlas,
+            RenderOptions::default(),
+        );
+        assert_eq!(vertices.len(), 48, "one quad for the wide CJK glyph");
+        // A rasterized glyph samples the atlas instead of using the solid placeholder.
+        assert!(vertices[2] >= 0.0, "expected a rasterized CJK glyph quad");
+        assert!(atlas.pixels.iter().any(|&pixel| pixel != 0));
+    }
+
+    #[test]
+    fn image_fragment_shader_preserves_rgba_channels() {
+        // Regression guard: image placements must sample the uploaded RGBA texture rather
+        // than reusing the alpha-only glyph path, which renders every image as a white box.
+        assert!(FRAGMENT_SHADER.contains("u_image_mode"));
+        assert!(FRAGMENT_SHADER.contains("texel.rgb"));
+        assert!(FRAGMENT_SHADER.contains("texel.a"));
     }
 
     #[test]

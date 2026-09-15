@@ -62,6 +62,17 @@ impl Pty {
         child
             .env("TERM", "xterm-256color")
             .env("COLORTERM", "truecolor")
+            .env("TERM_PROGRAM", "ftty")
+            .env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"))
+            .env_remove("WEZTERM_EXECUTABLE")
+            .env_remove("WEZTERM_PANE")
+            .env_remove("WEZTERM_UNIX_SOCKET")
+            .env_remove("KITTY_WINDOW_ID")
+            .env_remove("KITTY_PID")
+            .env_remove("ALACRITTY_WINDOW_ID")
+            .env_remove("ALACRITTY_LOG")
+            .env_remove("KONSOLE_VERSION")
+            .env_remove("FOOT_TERMINAL")
             .stdin(Stdio::from(slave.try_clone()?))
             .stdout(Stdio::from(slave.try_clone()?))
             .stderr(Stdio::from(slave));
@@ -87,16 +98,23 @@ impl Pty {
         })
     }
 
-    /// Resizes the PTY terminal window size (`TIOCSWINSZ`).
+    /// Resizes the PTY terminal window (`TIOCSWINSZ`), including the pixel geometry
+    /// image clients read through `TIOCGWINSZ` to compute their cell size.
     ///
     /// # Errors
     /// Returns an [`io::Error`] if the ioctl system call fails.
-    pub fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
+    pub fn resize(
+        &self,
+        cols: u16,
+        rows: u16,
+        pixel_width: u16,
+        pixel_height: u16,
+    ) -> io::Result<()> {
         let ws = Winsize {
             ws_row: rows,
             ws_col: cols,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
+            ws_xpixel: pixel_width,
+            ws_ypixel: pixel_height,
         };
         // SAFETY: master owns a live PTY descriptor, and ws is an initialized Winsize
         // with the layout required by TIOCSWINSZ; the ioctl does not retain its pointer.
@@ -237,7 +255,7 @@ mod tests {
         assert!(pty.is_ok(), "Failed to spawn PTY: {:?}", pty.err());
         let pty = pty.unwrap();
         assert!(pty.as_raw_fd() >= 0);
-        assert!(pty.resize(120, 40).is_ok());
+        assert!(pty.resize(120, 40, 1200, 800).is_ok());
         assert!(pty.is_alive());
 
         let pty_with_args = Pty::spawn(Some(&["/bin/sh", "-c", "exit 0"]), 80, 24);
