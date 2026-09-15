@@ -569,7 +569,6 @@ impl Renderer {
         img_h: f32,
         [x0, y0, x1, y1]: [f32; 4],
     ) {
-        let gl = &self.gl;
         let mut img_vertices = Vec::with_capacity(48);
         push_quad(
             &mut img_vertices,
@@ -577,10 +576,14 @@ impl Renderer {
             [[0.0, 0.0], [img_w, img_h]],
             [1.0, 1.0, 1.0, 1.0],
         );
+        self.render_image_quads(tex, img_w, img_h, &img_vertices);
+    }
 
+    fn render_image_quads(&mut self, tex: glow::Texture, img_w: f32, img_h: f32, vertices: &[f32]) {
+        let gl = &self.gl;
         // SAFETY: draw holds this renderer's current EGL context; tex and the VBO
-        // belong to it. img_vertices contains six initialized vertices of eight
-        // f32 values, with no padding, and remains live throughout the byte upload.
+        // belong to it. vertices contains initialized f32 values with no padding,
+        // and remains live throughout the byte upload.
         unsafe {
             gl.use_program(self.program);
             gl.active_texture(glow::TEXTURE0);
@@ -590,8 +593,8 @@ impl Renderer {
 
             gl.bind_buffer(glow::ARRAY_BUFFER, self.vbo);
             let bytes = std::slice::from_raw_parts(
-                img_vertices.as_ptr().cast::<u8>(),
-                std::mem::size_of_val(img_vertices.as_slice()),
+                vertices.as_ptr().cast::<u8>(),
+                std::mem::size_of_val(vertices),
             );
             gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::STREAM_DRAW);
 
@@ -600,7 +603,7 @@ impl Renderer {
                 gl.enable_vertex_attrib_array(index);
                 gl.vertex_attrib_pointer_f32(index, count, glow::FLOAT, false, stride, offset);
             }
-            gl.draw_arrays(glow::TRIANGLES, 0, 6);
+            gl.draw_arrays(glow::TRIANGLES, 0, (vertices.len() / 8) as i32);
         }
     }
 
@@ -721,6 +724,8 @@ impl Renderer {
             } else {
                 let total_c = virt_cols.max(1) as f32;
                 let total_r = virt_rows.max(1) as f32;
+                let num_cells = box_w * box_h;
+                let mut img_vertices = Vec::with_capacity(num_cells * 48);
 
                 for row in b.row_start..=b.row_end {
                     for col in b.col_start..=b.col_end {
@@ -742,47 +747,17 @@ impl Renderer {
                         let v0 = (img_row as f32 / total_r) * img_h as f32;
                         let v1 = ((img_row + 1) as f32 / total_r) * img_h as f32;
 
-                        let gl = &self.gl;
-                        let mut img_vertices = Vec::with_capacity(48);
                         push_quad(
                             &mut img_vertices,
                             [x0, y0, x1, y1],
                             [[u0, v0], [u1, v1]],
                             [1.0, 1.0, 1.0, 1.0],
                         );
-
-                        // SAFETY: draw holds this renderer's current EGL context; tex and the VBO
-                        // belong to it. img_vertices contains six initialized vertices of eight
-                        // f32 values, with no padding, and remains live throughout the byte upload.
-                        unsafe {
-                            gl.use_program(self.program);
-                            gl.active_texture(glow::TEXTURE0);
-                            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                            gl.uniform_1_i32(self.image_mode.as_ref(), 1);
-                            gl.uniform_2_f32(self.atlas_size.as_ref(), img_w as f32, img_h as f32);
-
-                            gl.bind_buffer(glow::ARRAY_BUFFER, self.vbo);
-                            let bytes = std::slice::from_raw_parts(
-                                img_vertices.as_ptr().cast::<u8>(),
-                                std::mem::size_of_val(img_vertices.as_slice()),
-                            );
-                            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::STREAM_DRAW);
-
-                            let stride = 8 * std::mem::size_of::<f32>() as i32;
-                            for (index, count, offset) in [(0, 2, 0), (1, 2, 8), (2, 4, 16)] {
-                                gl.enable_vertex_attrib_array(index);
-                                gl.vertex_attrib_pointer_f32(
-                                    index,
-                                    count,
-                                    glow::FLOAT,
-                                    false,
-                                    stride,
-                                    offset,
-                                );
-                            }
-                            gl.draw_arrays(glow::TRIANGLES, 0, 6);
-                        }
                     }
+                }
+
+                if !img_vertices.is_empty() {
+                    self.render_image_quads(tex, img_w as f32, img_h as f32, &img_vertices);
                 }
             }
         }
