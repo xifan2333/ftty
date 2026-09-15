@@ -71,6 +71,7 @@ pub struct KittyCommand {
     pub more_chunks: bool,
     pub do_not_move_cursor: bool,
     pub quiet: u8,
+    pub is_virtual: bool,
 }
 
 /// Loaded RGBA image data ready for GPU texture upload.
@@ -371,6 +372,7 @@ pub fn parse_control_keys(s: &str) -> KittyCommand {
             "z" => cmd.z_index = val.parse().unwrap_or(0),
             "m" => cmd.more_chunks = val == "1",
             "C" => cmd.do_not_move_cursor = val == "1",
+            "U" => cmd.is_virtual = val == "1",
             "q" => cmd.quiet = val.parse().unwrap_or(0),
             _ => {}
         }
@@ -817,6 +819,15 @@ mod tests {
             kitty_response(3, Some(5), "ENOENT:image not found"),
             b"\x1b_Gi=3,p=5;ENOENT:image not found\x1b\\".to_vec()
         );
+    }
+
+    #[test]
+    fn test_kitty_probe_interleaving() {
+        let mut kitty_parser = KittyParser::new();
+        let query = b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c\x1b[16t\x1b]11;?\x07\x1b[5n";
+        let (clean, events) = kitty_parser.filter_bytes(query);
+        println!("clean: {:?}", std::str::from_utf8(&clean).unwrap());
+        println!("events: {:?}", events);
     }
 
     #[test]

@@ -62,6 +62,17 @@ impl Pty {
         child
             .env("TERM", "xterm-256color")
             .env("COLORTERM", "truecolor")
+            .env("TERM_PROGRAM", "ftty")
+            .env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"))
+            .env_remove("WEZTERM_EXECUTABLE")
+            .env_remove("WEZTERM_PANE")
+            .env_remove("WEZTERM_UNIX_SOCKET")
+            .env_remove("KITTY_WINDOW_ID")
+            .env_remove("KITTY_PID")
+            .env_remove("ALACRITTY_WINDOW_ID")
+            .env_remove("ALACRITTY_LOG")
+            .env_remove("KONSOLE_VERSION")
+            .env_remove("FOOT_TERMINAL")
             .stdin(Stdio::from(slave.try_clone()?))
             .stdout(Stdio::from(slave.try_clone()?))
             .stderr(Stdio::from(slave));

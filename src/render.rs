@@ -9,7 +9,7 @@ use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::{Connection, Proxy};
 use wayland_egl::WlEglSurface;
 
-use crate::color::Rgb;
+use crate::color::{Color, Rgb};
 use crate::font::{CellMetrics, FontManager, GlyphAtlas};
 use crate::grid::{Cell, CellFlags, CursorShape, Grid};
 use crate::ime::Preedit;
@@ -441,6 +441,7 @@ impl Renderer {
 
         // Pass 3: z >= 0 images (above text)
         self.render_image_placements(grid, false, fonts.metrics, options);
+        self.render_unicode_placeholders(grid, fonts.metrics, options);
         Ok(())
     }
 
@@ -525,7 +526,6 @@ impl Renderer {
         metrics: CellMetrics,
         options: RenderOptions<'_>,
     ) {
-        let gl = &self.gl;
         let cw = metrics.cell_width as f32;
         let ch = metrics.cell_height as f32;
         let pad_x = f32::from(options.padding[0]);
@@ -558,38 +558,106 @@ impl Renderer {
             let x1 = x0 + placement.cols as f32 * cw;
             let y1 = y0 + placement.rows as f32 * ch;
 
-            let mut img_vertices = Vec::with_capacity(48);
-            push_quad(
-                &mut img_vertices,
-                [x0, y0, x1, y1],
-                [[0.0, 0.0], [img_w as f32, img_h as f32]],
-                [1.0, 1.0, 1.0, 1.0],
+            self.render_single_image(tex, img_w as f32, img_h as f32, [x0, y0, x1, y1]);
+        }
+    }
+
+    fn render_single_image(
+        &mut self,
+        tex: glow::Texture,
+        img_w: f32,
+        img_h: f32,
+        [x0, y0, x1, y1]: [f32; 4],
+    ) {
+        let gl = &self.gl;
+        let mut img_vertices = Vec::with_capacity(48);
+        push_quad(
+            &mut img_vertices,
+            [x0, y0, x1, y1],
+            [[0.0, 0.0], [img_w, img_h]],
+            [1.0, 1.0, 1.0, 1.0],
+        );
+
+        // SAFETY: draw holds this renderer's current EGL context; tex and the VBO
+        // belong to it. img_vertices contains six initialized vertices of eight
+        // f32 values, with no padding, and remains live throughout the byte upload.
+        unsafe {
+            gl.use_program(self.program);
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            gl.uniform_1_i32(self.image_mode.as_ref(), 1);
+            gl.uniform_2_f32(self.atlas_size.as_ref(), img_w, img_h);
+
+            gl.bind_buffer(glow::ARRAY_BUFFER, self.vbo);
+            let bytes = std::slice::from_raw_parts(
+                img_vertices.as_ptr().cast::<u8>(),
+                std::mem::size_of_val(img_vertices.as_slice()),
             );
+            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::STREAM_DRAW);
 
-            // SAFETY: draw holds this renderer's current EGL context; tex and the VBO
-            // belong to it. img_vertices contains six initialized vertices of eight
-            // f32 values, with no padding, and remains live throughout the byte upload.
-            unsafe {
-                gl.use_program(self.program);
-                gl.active_texture(glow::TEXTURE0);
-                gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                gl.uniform_1_i32(self.image_mode.as_ref(), 1);
-                gl.uniform_2_f32(self.atlas_size.as_ref(), img_w as f32, img_h as f32);
-
-                gl.bind_buffer(glow::ARRAY_BUFFER, self.vbo);
-                let bytes = std::slice::from_raw_parts(
-                    img_vertices.as_ptr().cast::<u8>(),
-                    std::mem::size_of_val(img_vertices.as_slice()),
-                );
-                gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::STREAM_DRAW);
-
-                let stride = 8 * std::mem::size_of::<f32>() as i32;
-                for (index, count, offset) in [(0, 2, 0), (1, 2, 8), (2, 4, 16)] {
-                    gl.enable_vertex_attrib_array(index);
-                    gl.vertex_attrib_pointer_f32(index, count, glow::FLOAT, false, stride, offset);
-                }
-                gl.draw_arrays(glow::TRIANGLES, 0, 6);
+            let stride = 8 * std::mem::size_of::<f32>() as i32;
+            for (index, count, offset) in [(0, 2, 0), (1, 2, 8), (2, 4, 16)] {
+                gl.enable_vertex_attrib_array(index);
+                gl.vertex_attrib_pointer_f32(index, count, glow::FLOAT, false, stride, offset);
             }
+            gl.draw_arrays(glow::TRIANGLES, 0, 6);
+        }
+    }
+
+    fn render_unicode_placeholders(
+        &mut self,
+        grid: &Grid,
+        metrics: CellMetrics,
+        options: RenderOptions<'_>,
+    ) {
+        let cw = metrics.cell_width as f32;
+        let ch = metrics.cell_height as f32;
+        let pad_x = f32::from(options.padding[0]);
+        let pad_y = f32::from(options.padding[1]);
+
+        let mut boxes: HashMap<u32, (usize, usize, usize, usize)> = HashMap::new();
+
+        for row in 0..grid.rows {
+            let line = grid.visible_line(row);
+            for (col, cell) in line.cells.iter().enumerate() {
+                if cell.c == KITTY_PLACEHOLDER {
+                    let id_low24 = placeholder_image_id(cell.fg) & 0x00FF_FFFF;
+                    if id_low24 != 0 {
+                        let real_id = if self.image_textures.contains_key(&id_low24) {
+                            Some(id_low24)
+                        } else {
+                            self.image_textures
+                                .keys()
+                                .find(|&&k| (k & 0x00FF_FFFF) == id_low24)
+                                .copied()
+                        };
+
+                        if let Some(matched_id) = real_id {
+                            boxes
+                                .entry(matched_id)
+                                .and_modify(|b| {
+                                    b.0 = b.0.min(col);
+                                    b.1 = b.1.min(row);
+                                    b.2 = b.2.max(col);
+                                    b.3 = b.3.max(row);
+                                })
+                                .or_insert((col, row, col, row));
+                        }
+                    }
+                }
+            }
+        }
+
+        for (id, (min_col, min_row, max_col, max_row)) in boxes {
+            let Some(&(tex, img_w, img_h, _)) = self.image_textures.get(&id) else {
+                continue;
+            };
+            let x0 = pad_x + min_col as f32 * cw;
+            let y0 = pad_y + min_row as f32 * ch;
+            let x1 = pad_x + (max_col + 1) as f32 * cw;
+            let y1 = pad_y + (max_row + 1) as f32 * ch;
+
+            self.render_single_image(tex, img_w as f32, img_h as f32, [x0, y0, x1, y1]);
         }
     }
 
@@ -632,8 +700,19 @@ impl Drop for Renderer {
     }
 }
 
+const KITTY_PLACEHOLDER: char = '\u{10EEEE}';
+
+fn placeholder_image_id(color: Color) -> u32 {
+    match color {
+        Color::Rgb(r, g, b) => ((r as u32) << 16) | ((g as u32) << 8) | (b as u32),
+        Color::Indexed(idx) => idx as u32,
+        _ => 0,
+    }
+}
+
 fn visible_glyph(cell: &Cell) -> bool {
     cell.c != ' '
+        && cell.c != KITTY_PLACEHOLDER
         && !cell
             .flags
             .intersects(CellFlags::HIDDEN | CellFlags::WIDE_CHAR_SPACER)
@@ -1003,6 +1082,19 @@ mod tests {
             ),
             (DEFAULT_BG, DEFAULT_FG)
         );
+    }
+
+    #[test]
+    fn unicode_placeholders_are_omitted_from_glyph_vertices() {
+        let mut grid = Grid::new(2, 1, 0);
+        grid.cursor.visible = false;
+        grid.lines[0].cells[0].c = KITTY_PLACEHOLDER;
+        grid.lines[0].cells[0].fg = Color::Rgb(0, 0, 42);
+        grid.lines[0].cells[1].c = 'A';
+
+        let (vertices, _) = frame(&grid);
+        // Only one text quad for 'A', not for KITTY_PLACEHOLDER
+        assert_eq!(vertices.len(), 48);
     }
 
     #[test]

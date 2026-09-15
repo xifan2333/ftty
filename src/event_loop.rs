@@ -37,6 +37,7 @@ use wayland_protocols::xdg::shell::client::{
 use crate::color::Rgb;
 use crate::config::Config;
 use crate::font::{CellMetrics, FontManager, GlyphAtlas};
+use crate::grid::CellFlags;
 use crate::ime::ImeState;
 use crate::input::{KeyAction, KeyboardHandler};
 use crate::kitty::{ImagePlacement, KittyAction, KittyEvent, KittyParser, kitty_response};
@@ -113,8 +114,12 @@ impl AppState {
         config_path: Option<PathBuf>,
     ) -> Result<Self, io::Error> {
         let config = Config::load_from_path_or_default(config_path.as_deref())?;
-        let font_mgr = FontManager::load_with_family(config.font_family(), config.font_size())?;
-        let atlas = GlyphAtlas::new(128, 128);
+        let font_mgr =
+            FontManager::load_with_families(&config.font_families(), config.font_size())?;
+        let mut atlas = GlyphAtlas::new(1024, 1024);
+        for c in ' '..='~' {
+            let _ = atlas.get_or_insert(c, CellFlags::empty(), &font_mgr);
+        }
         let palette = config.build_palette();
         let default_fg = config.foreground();
         let default_bg = config.background();
@@ -372,11 +377,14 @@ impl AppState {
             self.terminal.grid.viewport_offset = self.terminal.grid.viewport_offset.min(max_sb);
         }
 
-        let font_changed = self.config.font_family() != new_config.font_family()
+        let font_changed = self.config.font_families() != new_config.font_families()
             || (self.config.font_size() - new_config.font_size()).abs() > f32::EPSILON;
 
         let maybe_new_font = if font_changed {
-            match FontManager::load_with_family(new_config.font_family(), new_config.font_size()) {
+            match FontManager::load_with_families(
+                &new_config.font_families(),
+                new_config.font_size(),
+            ) {
                 Ok(mgr) => Some(mgr),
                 Err(e) => {
                     eprintln!("ftty: failed to reload font face or size: {e}");
@@ -468,7 +476,9 @@ impl AppState {
         if (self.font_mgr.font_size() - new_size).abs() < f32::EPSILON {
             return;
         }
-        if let Ok(new_font_mgr) = FontManager::load_with_family(self.font_mgr.family(), new_size) {
+        if let Ok(new_font_mgr) =
+            FontManager::load_with_families(self.font_mgr.families(), new_size)
+        {
             self.font_mgr = new_font_mgr;
             self.atlas.clear();
             let _ = self.resize_terminal();
@@ -528,6 +538,112 @@ impl AppState {
         // A resize must be committed even if the compositor suspended the old frame callback.
         self.frame_callback = None;
         Ok(())
+    }
+
+    fn handle_kitty_event(&mut self, event: KittyEvent) {
+        match event {
+            KittyEvent::Transmit { command, image } => {
+                let image_id = image.id;
+                let placement_id = command.placement_id.unwrap_or(0);
+                let ack_id = command.placement_id.filter(|id| *id != 0);
+                let img_w = (image.width as f32).max(1.0);
+                let img_h = (image.height as f32).max(1.0);
+                self.terminal.grid.add_image(image);
+
+                let cw = self.font_mgr.metrics.cell_width as f32;
+                let ch = self.font_mgr.metrics.cell_height as f32;
+
+                let (cols, rows) = match (command.cols, command.rows) {
+                    (Some(c), Some(r)) => (c as usize, r as usize),
+                    (Some(c), None) => {
+                        let pixel_w = c as f32 * cw;
+                        let pixel_h = pixel_w * (img_h / img_w);
+                        let r = (pixel_h / ch).ceil().max(1.0) as usize;
+                        (c as usize, r)
+                    }
+                    (None, Some(r)) => {
+                        let pixel_h = r as f32 * ch;
+                        let pixel_w = pixel_h * (img_w / img_h);
+                        let c = (pixel_w / cw).ceil().max(1.0) as usize;
+                        (c, r as usize)
+                    }
+                    (None, None) => {
+                        let c = (img_w / cw).ceil().max(1.0) as usize;
+                        let r = (img_h / ch).ceil().max(1.0) as usize;
+                        (c, r)
+                    }
+                };
+
+                if !command.is_virtual {
+                    let abs_line =
+                        self.terminal.grid.scrollback.len() + self.terminal.grid.cursor.row;
+                    self.terminal.grid.add_placement(ImagePlacement {
+                        image_id,
+                        placement_id,
+                        line: abs_line,
+                        col: self.terminal.grid.cursor.col,
+                        cols,
+                        rows,
+                        offset_x: command.offset_x,
+                        offset_y: command.offset_y,
+                        z_index: command.z_index,
+                    });
+
+                    if !command.do_not_move_cursor {
+                        self.terminal.grid.cursor.col = (self.terminal.grid.cursor.col + cols)
+                            .min(self.terminal.grid.cols.saturating_sub(1));
+                    }
+                }
+
+                let wants_ack = command.action == KittyAction::TransmitAndDisplayWithResponse
+                    || command.id_explicit;
+                if wants_ack && command.quiet == 0 {
+                    let resp = kitty_response(image_id, ack_id, "OK");
+                    self.write_pty_blocking(&resp);
+                }
+            }
+            KittyEvent::Place { command } => {
+                let Some(image_id) = command.image_id else {
+                    return;
+                };
+                let placement_id = command.placement_id.unwrap_or(0);
+                let ack_id = command.placement_id.filter(|id| *id != 0);
+                if !self.terminal.grid.images.contains_key(&image_id) {
+                    if command.quiet < 2 {
+                        let resp = kitty_response(image_id, ack_id, "ENOENT:image not found");
+                        self.write_pty_blocking(&resp);
+                    }
+                    return;
+                }
+                if !command.is_virtual {
+                    let cols = command.cols.unwrap_or(1) as usize;
+                    let rows = command.rows.unwrap_or(1) as usize;
+                    let abs_line =
+                        self.terminal.grid.scrollback.len() + self.terminal.grid.cursor.row;
+                    self.terminal.grid.add_placement(ImagePlacement {
+                        image_id,
+                        placement_id,
+                        line: abs_line,
+                        col: self.terminal.grid.cursor.col,
+                        cols,
+                        rows,
+                        offset_x: command.offset_x,
+                        offset_y: command.offset_y,
+                        z_index: command.z_index,
+                    });
+                }
+                if command.quiet == 0 {
+                    let resp = kitty_response(image_id, ack_id, "OK");
+                    self.write_pty_blocking(&resp);
+                }
+            }
+            KittyEvent::Delete { target } => {
+                self.terminal.grid.delete_images(target);
+            }
+            KittyEvent::Response(resp) => {
+                self.write_pty_blocking(&resp);
+            }
+        }
     }
 }
 
@@ -1184,149 +1300,50 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
     event_loop
         .handle()
         .insert_source(pty_source, |_event, _fd, state: &mut AppState| {
-            let mut buf = [0u8; 8192];
-            match state.pty.read(&mut buf) {
-                Ok(n) if n > 0 => {
-                    let (clean_text, events) = state.kitty_parser.filter_bytes(&buf[..n]);
-                    if !clean_text.is_empty() {
-                        state.terminal.advance_bytes(&clean_text);
-                        for response in state.terminal.take_responses() {
-                            state.write_pty_blocking(&response);
+            let mut buf = [0u8; 16384];
+            let mut total_read = 0;
+            loop {
+                match state.pty.read(&mut buf) {
+                    Ok(n) if n > 0 => {
+                        total_read += n;
+                        let (clean_text, events) = state.kitty_parser.filter_bytes(&buf[..n]);
+                        for event in events {
+                            state.handle_kitty_event(event);
                         }
-                        if state.config.auto_scroll() && !state.terminal.grid.is_alt_screen() {
-                            state.terminal.grid.scroll_viewport_bottom();
+
+                        if !clean_text.is_empty() {
+                            state.terminal.advance_bytes(&clean_text);
+                            for response in state.terminal.take_responses() {
+                                state.write_pty_blocking(&response);
+                            }
+                            if state.config.auto_scroll() && !state.terminal.grid.is_alt_screen() {
+                                state.terminal.grid.scroll_viewport_bottom();
+                            }
                         }
-                    }
 
-                    for event in events {
-                        match event {
-                            KittyEvent::Transmit { command, image } => {
-                                let image_id = image.id;
-                                let placement_id = command.placement_id.unwrap_or(0);
-                                let ack_id = command.placement_id.filter(|id| *id != 0);
-                                let img_w = (image.width as f32).max(1.0);
-                                let img_h = (image.height as f32).max(1.0);
-                                state.terminal.grid.add_image(image);
-
-                                let cw = state.font_mgr.metrics.cell_width as f32;
-                                let ch = state.font_mgr.metrics.cell_height as f32;
-
-                                let (cols, rows) = match (command.cols, command.rows) {
-                                    (Some(c), Some(r)) => (c as usize, r as usize),
-                                    (Some(c), None) => {
-                                        let pixel_w = c as f32 * cw;
-                                        let pixel_h = pixel_w * (img_h / img_w);
-                                        let r = (pixel_h / ch).ceil().max(1.0) as usize;
-                                        (c as usize, r)
-                                    }
-                                    (None, Some(r)) => {
-                                        let pixel_h = r as f32 * ch;
-                                        let pixel_w = pixel_h * (img_w / img_h);
-                                        let c = (pixel_w / cw).ceil().max(1.0) as usize;
-                                        (c, r as usize)
-                                    }
-                                    (None, None) => {
-                                        let c = (img_w / cw).ceil().max(1.0) as usize;
-                                        let r = (img_h / ch).ceil().max(1.0) as usize;
-                                        (c, r)
-                                    }
-                                };
-
-                                let abs_line = state.terminal.grid.scrollback.len()
-                                    + state.terminal.grid.cursor.row;
-                                state.terminal.grid.add_placement(ImagePlacement {
-                                    image_id,
-                                    placement_id,
-                                    line: abs_line,
-                                    col: state.terminal.grid.cursor.col,
-                                    cols,
-                                    rows,
-                                    offset_x: command.offset_x,
-                                    offset_y: command.offset_y,
-                                    z_index: command.z_index,
-                                });
-
-                                if !command.do_not_move_cursor {
-                                    state.terminal.grid.cursor.col =
-                                        (state.terminal.grid.cursor.col + cols)
-                                            .min(state.terminal.grid.cols.saturating_sub(1));
-                                }
-
-                                // `a=T` always wants an acknowledgement; `a=t` only when
-                                // the client opted in with an explicit image id. `q=1`
-                                // suppresses OK responses and `q=2` suppresses everything.
-                                let wants_ack = command.action
-                                    == KittyAction::TransmitAndDisplayWithResponse
-                                    || command.id_explicit;
-                                if wants_ack && command.quiet == 0 {
-                                    let resp = kitty_response(image_id, ack_id, "OK");
-                                    state.write_pty_blocking(&resp);
-                                }
-                            }
-                            KittyEvent::Place { command } => {
-                                let Some(image_id) = command.image_id else {
-                                    continue;
-                                };
-                                let placement_id = command.placement_id.unwrap_or(0);
-                                let ack_id = command.placement_id.filter(|id| *id != 0);
-                                if !state.terminal.grid.images.contains_key(&image_id) {
-                                    if command.quiet < 2 {
-                                        let resp = kitty_response(
-                                            image_id,
-                                            ack_id,
-                                            "ENOENT:image not found",
-                                        );
-                                        state.write_pty_blocking(&resp);
-                                    }
-                                    continue;
-                                }
-                                let cols = command.cols.unwrap_or(1) as usize;
-                                let rows = command.rows.unwrap_or(1) as usize;
-                                let abs_line = state.terminal.grid.scrollback.len()
-                                    + state.terminal.grid.cursor.row;
-                                state.terminal.grid.add_placement(ImagePlacement {
-                                    image_id,
-                                    placement_id,
-                                    line: abs_line,
-                                    col: state.terminal.grid.cursor.col,
-                                    cols,
-                                    rows,
-                                    offset_x: command.offset_x,
-                                    offset_y: command.offset_y,
-                                    z_index: command.z_index,
-                                });
-                                if command.quiet == 0 {
-                                    let resp = kitty_response(image_id, ack_id, "OK");
-                                    state.write_pty_blocking(&resp);
-                                }
-                            }
-                            KittyEvent::Delete { target } => {
-                                state.terminal.grid.delete_images(target);
-                            }
-                            KittyEvent::Response(resp) => {
-                                state.write_pty_blocking(&resp);
-                            }
+                        if total_read >= 65536 {
+                            break;
                         }
                     }
-
-                    state.needs_redraw = true;
-                    state.update_ime_cursor_area();
-                    Ok(calloop::PostAction::Continue)
-                }
-                Ok(_) => {
-                    // EOF on PTY master
-                    state.running = false;
-                    Ok(calloop::PostAction::Reregister)
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    Ok(calloop::PostAction::Continue)
-                }
-                Err(_) => {
-                    // Child process likely exited (EIO on Linux PTY)
-                    state.running = false;
-                    Ok(calloop::PostAction::Reregister)
+                    Ok(_) => {
+                        // EOF on PTY master
+                        state.running = false;
+                        return Ok(calloop::PostAction::Reregister);
+                    }
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(_) => {
+                        // Child process likely exited (EIO on Linux PTY)
+                        state.running = false;
+                        return Ok(calloop::PostAction::Reregister);
+                    }
                 }
             }
+
+            if total_read > 0 {
+                state.needs_redraw = true;
+                state.update_ime_cursor_area();
+            }
+            Ok(calloop::PostAction::Continue)
         })
         .map_err(io::Error::other)?;
 
@@ -1857,5 +1874,58 @@ mod tests {
         assert_eq!(col, 5);
         assert_eq!(screen_row, 3);
         assert_eq!(line, 3);
+    }
+
+    #[test]
+    fn test_font_chain_reload_and_zoom_preserves_fallbacks() {
+        let temp_dir = std::env::temp_dir().join(format!("ftty_font_chain_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let config_path = temp_dir.join("ftty.toml");
+
+        std::fs::write(
+            &config_path,
+            r##"
+            [font]
+            families = ["monospace", "sans-serif"]
+            size = 15.0
+            "##,
+        )
+        .unwrap();
+
+        let term = Terminal::new(80, 24, 100);
+        let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
+        let mut app = AppState::with_config(term, pty, Some(config_path.clone()))
+            .expect("AppState with_config");
+
+        assert_eq!(
+            app.font_mgr.families(),
+            &["monospace".to_string(), "sans-serif".to_string()]
+        );
+        assert_eq!(app.font_mgr.font_size(), 15.0);
+
+        // Zoom font in: families chain must be preserved
+        app.handle_key_action(KeyAction::FontIncrease, None, None);
+        assert_eq!(app.font_mgr.font_size(), 16.0);
+        assert_eq!(
+            app.font_mgr.families(),
+            &["monospace".to_string(), "sans-serif".to_string()]
+        );
+
+        // Reload with single family: families chain updates
+        std::fs::write(
+            &config_path,
+            r##"
+            [font]
+            family = "monospace"
+            size = 14.0
+            "##,
+        )
+        .unwrap();
+
+        app.reload_config();
+        assert_eq!(app.font_mgr.families(), &["monospace".to_string()]);
+        assert_eq!(app.font_mgr.font_size(), 14.0);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
