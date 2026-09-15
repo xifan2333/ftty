@@ -90,6 +90,7 @@ pub struct AppState {
     configure_pending: bool,
     render_error: Option<io::Error>,
     sync_output_start: Option<std::time::Instant>,
+    last_sync_gen: u64,
 }
 
 fn best_text_mime(mimes: &[String]) -> Option<&str> {
@@ -202,6 +203,7 @@ impl AppState {
             configure_pending: false,
             render_error: None,
             sync_output_start: None,
+            last_sync_gen: 0,
         })
     }
 
@@ -293,7 +295,7 @@ impl AppState {
     /// Writes bytes to the non-blocking PTY master with a bounded readiness loop to prevent truncation.
     pub fn write_pty_blocking(&mut self, mut bytes: &[u8]) {
         let start = std::time::Instant::now();
-        while !bytes.is_empty() && start.elapsed() < std::time::Duration::from_millis(500) {
+        while !bytes.is_empty() && start.elapsed() < std::time::Duration::from_millis(3000) {
             match self.pty.write(bytes) {
                 Ok(0) => break,
                 Ok(written) => bytes = &bytes[written..],
@@ -902,7 +904,10 @@ impl Dispatch<WlKeyboard, ()> for AppState {
             } => {
                 state.keyboard.set_keymap_from_fd(fd, size as usize);
             }
-            wl_keyboard::Event::Enter { surface, .. } => {
+            wl_keyboard::Event::Enter {
+                serial, surface, ..
+            } => {
+                state.last_serial = serial;
                 if state.wayland.surface.as_ref() == Some(&surface) {
                     if state.terminal.focus_reporting {
                         let _ = state.pty.write_all(b"\x1b[I");
@@ -938,10 +943,12 @@ impl Dispatch<WlKeyboard, ()> for AppState {
                 }
             }
             wl_keyboard::Event::Key {
+                serial,
                 key,
                 state: WEnum::Value(key_state),
                 ..
             } => {
+                state.last_serial = serial;
                 let pressed = key_state == KeyState::Pressed;
                 if pressed
                     && let Some(action) =
@@ -960,12 +967,13 @@ impl Dispatch<WlKeyboard, ()> for AppState {
                 }
             }
             wl_keyboard::Event::Modifiers {
-                serial: _,
+                serial,
                 mods_depressed,
                 mods_latched,
                 mods_locked,
                 group,
             } => {
+                state.last_serial = serial;
                 state
                     .keyboard
                     .update_modifiers(mods_depressed, mods_latched, mods_locked, group);
@@ -1485,8 +1493,14 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
 
     // 4. Main Event Loop Tick
     while app_state.running {
+        let dispatch_timeout = if app_state.terminal.synchronized_output {
+            Some(std::time::Duration::from_millis(50))
+        } else {
+            None
+        };
+
         event_loop
-            .dispatch(None, &mut app_state)
+            .dispatch(dispatch_timeout, &mut app_state)
             .map_err(io::Error::other)?;
 
         if !app_state.running {
@@ -1501,6 +1515,11 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
                 app_state.running = false;
                 break;
             }
+        }
+
+        if app_state.terminal.sync_output_gen != app_state.last_sync_gen {
+            app_state.last_sync_gen = app_state.terminal.sync_output_gen;
+            app_state.sync_output_start = Some(std::time::Instant::now());
         }
 
         let mut sync_active = app_state.terminal.synchronized_output;
