@@ -10,6 +10,10 @@ use crate::color::{Color, Rgb};
 use crate::grid::{CellFlags, ClearMode, Grid};
 use crate::mouse::MouseState;
 
+const MAX_KEYBOARD_STACK_DEPTH: usize = 64;
+const SUPPORTED_KITTY_FLAGS: u8 = 1 | 2;
+const MAX_HYPERLINKS: usize = 1024;
+
 /// Semantic shell integration state reported through OSC 133.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShellIntegrationState {
@@ -52,8 +56,8 @@ pub struct Terminal {
     pub synchronized_output: bool,
     /// Internal clipboard content accessible for OSC 52 queries and updates.
     pub clipboard_content: Option<String>,
-    /// Pending clipboard content received via OSC 52 awaiting sync with Wayland data device.
-    pending_clipboard: Option<String>,
+    /// Pending clipboard updates received via OSC 52: Some(Some(text)) for set, Some(None) for clear.
+    pending_clipboard: Option<Option<String>>,
     /// Current working directory reported through OSC 7.
     pub current_dir: Option<PathBuf>,
     /// Shell integration state reported through OSC 133.
@@ -162,9 +166,11 @@ impl Terminal {
     pub fn get_or_intern_hyperlink(&mut self, url: String) -> u32 {
         if let Some(pos) = self.hyperlink_pool.iter().position(|u| u == &url) {
             pos as u32 + 1
-        } else {
+        } else if self.hyperlink_pool.len() < MAX_HYPERLINKS {
             self.hyperlink_pool.push(url);
             self.hyperlink_pool.len() as u32
+        } else {
+            0
         }
     }
 
@@ -180,7 +186,7 @@ impl Terminal {
     }
 
     /// Drains pending clipboard updates received through OSC 52.
-    pub fn take_pending_clipboard(&mut self) -> Option<String> {
+    pub fn take_pending_clipboard(&mut self) -> Option<Option<String>> {
         self.pending_clipboard.take()
     }
 
@@ -201,23 +207,27 @@ impl Terminal {
         self.parser = parser;
     }
 
-    fn handle_sgr(&mut self, params: &[u16]) {
-        if params.is_empty() {
+    fn handle_sgr(&mut self, params: &Params) {
+        let param_list: Vec<&[u16]> = params.iter().collect();
+        if param_list.is_empty() {
             self.reset_attributes();
             return;
         }
 
         let mut i = 0;
-        while i < params.len() {
-            match params[i] {
+        while i < param_list.len() {
+            let p = param_list[i];
+            let code = p.first().copied().unwrap_or(0);
+            match code {
                 0 => self.reset_attributes(),
                 1 => self.active_flags.insert(CellFlags::BOLD),
                 2 => self.active_flags.insert(CellFlags::DIM),
                 3 => self.active_flags.insert(CellFlags::ITALIC),
                 4 => {
                     self.active_flags.remove(CellFlags::ALL_UNDERLINES);
-                    if i + 1 < params.len() && params[i + 1] <= 5 {
-                        match params[i + 1] {
+                    if p.len() > 1 {
+                        // Subparameters: e.g. 4:3 (undercurl)
+                        match p[1] {
                             0 => {}
                             1 => self.active_flags.insert(CellFlags::UNDERLINE),
                             2 => self
@@ -232,10 +242,10 @@ impl Terminal {
                             5 => self
                                 .active_flags
                                 .insert(CellFlags::UNDERLINE | CellFlags::UNDERLINE_DASHED),
-                            _ => {}
+                            _ => self.active_flags.insert(CellFlags::UNDERLINE),
                         }
-                        i += 1;
                     } else {
+                        // Plain single underline
                         self.active_flags.insert(CellFlags::UNDERLINE);
                     }
                 }
@@ -248,55 +258,76 @@ impl Terminal {
                 27 => self.active_flags.remove(CellFlags::REVERSE),
                 28 => self.active_flags.remove(CellFlags::HIDDEN),
                 29 => self.active_flags.remove(CellFlags::STRIKETHROUGH),
-                30..=37 => self.active_fg = Color::Indexed((params[i] - 30) as u8),
+                30..=37 => self.active_fg = Color::Indexed((code - 30) as u8),
                 38 => {
-                    // Extended foreground
-                    if i + 2 < params.len() && params[i + 1] == 5 {
-                        self.active_fg = Color::Indexed(params[i + 2] as u8);
-                        i += 2;
-                    } else if i + 4 < params.len() && params[i + 1] == 2 {
-                        self.active_fg = Color::Rgb(
-                            params[i + 2] as u8,
-                            params[i + 3] as u8,
-                            params[i + 4] as u8,
-                        );
+                    // Extended foreground: colon subparams or semicolon-separated
+                    if p.len() >= 3 && p[1] == 5 {
+                        self.active_fg = Color::Indexed(p[2] as u8);
+                    } else if p.len() >= 5 && p[1] == 2 {
+                        let offset = if p.len() >= 6 { 3 } else { 2 };
+                        self.active_fg =
+                            Color::Rgb(p[offset] as u8, p[offset + 1] as u8, p[offset + 2] as u8);
+                    } else if i + 2 < param_list.len() && param_list[i + 1].first() == Some(&5) {
+                        if let Some(&idx) = param_list[i + 2].first() {
+                            self.active_fg = Color::Indexed(idx as u8);
+                            i += 2;
+                        }
+                    } else if i + 4 < param_list.len() && param_list[i + 1].first() == Some(&2) {
+                        let r = param_list[i + 2].first().copied().unwrap_or(0) as u8;
+                        let g = param_list[i + 3].first().copied().unwrap_or(0) as u8;
+                        let b = param_list[i + 4].first().copied().unwrap_or(0) as u8;
+                        self.active_fg = Color::Rgb(r, g, b);
                         i += 4;
                     }
                 }
                 39 => self.active_fg = Color::DefaultForeground,
-                40..=47 => self.active_bg = Color::Indexed((params[i] - 40) as u8),
+                40..=47 => self.active_bg = Color::Indexed((code - 40) as u8),
                 48 => {
-                    // Extended background
-                    if i + 2 < params.len() && params[i + 1] == 5 {
-                        self.active_bg = Color::Indexed(params[i + 2] as u8);
-                        i += 2;
-                    } else if i + 4 < params.len() && params[i + 1] == 2 {
-                        self.active_bg = Color::Rgb(
-                            params[i + 2] as u8,
-                            params[i + 3] as u8,
-                            params[i + 4] as u8,
-                        );
+                    // Extended background: colon subparams or semicolon-separated
+                    if p.len() >= 3 && p[1] == 5 {
+                        self.active_bg = Color::Indexed(p[2] as u8);
+                    } else if p.len() >= 5 && p[1] == 2 {
+                        let offset = if p.len() >= 6 { 3 } else { 2 };
+                        self.active_bg =
+                            Color::Rgb(p[offset] as u8, p[offset + 1] as u8, p[offset + 2] as u8);
+                    } else if i + 2 < param_list.len() && param_list[i + 1].first() == Some(&5) {
+                        if let Some(&idx) = param_list[i + 2].first() {
+                            self.active_bg = Color::Indexed(idx as u8);
+                            i += 2;
+                        }
+                    } else if i + 4 < param_list.len() && param_list[i + 1].first() == Some(&2) {
+                        let r = param_list[i + 2].first().copied().unwrap_or(0) as u8;
+                        let g = param_list[i + 3].first().copied().unwrap_or(0) as u8;
+                        let b = param_list[i + 4].first().copied().unwrap_or(0) as u8;
+                        self.active_bg = Color::Rgb(r, g, b);
                         i += 4;
                     }
                 }
                 49 => self.active_bg = Color::DefaultBackground,
                 58 => {
-                    // Extended underline color
-                    if i + 2 < params.len() && params[i + 1] == 5 {
-                        self.active_underline_color = Color::Indexed(params[i + 2] as u8);
-                        i += 2;
-                    } else if i + 4 < params.len() && params[i + 1] == 2 {
-                        self.active_underline_color = Color::Rgb(
-                            params[i + 2] as u8,
-                            params[i + 3] as u8,
-                            params[i + 4] as u8,
-                        );
+                    // Extended underline color: colon subparams or semicolon-separated
+                    if p.len() >= 3 && p[1] == 5 {
+                        self.active_underline_color = Color::Indexed(p[2] as u8);
+                    } else if p.len() >= 5 && p[1] == 2 {
+                        let offset = if p.len() >= 6 { 3 } else { 2 };
+                        self.active_underline_color =
+                            Color::Rgb(p[offset] as u8, p[offset + 1] as u8, p[offset + 2] as u8);
+                    } else if i + 2 < param_list.len() && param_list[i + 1].first() == Some(&5) {
+                        if let Some(&idx) = param_list[i + 2].first() {
+                            self.active_underline_color = Color::Indexed(idx as u8);
+                            i += 2;
+                        }
+                    } else if i + 4 < param_list.len() && param_list[i + 1].first() == Some(&2) {
+                        let r = param_list[i + 2].first().copied().unwrap_or(0) as u8;
+                        let g = param_list[i + 3].first().copied().unwrap_or(0) as u8;
+                        let b = param_list[i + 4].first().copied().unwrap_or(0) as u8;
+                        self.active_underline_color = Color::Rgb(r, g, b);
                         i += 4;
                     }
                 }
                 59 => self.active_underline_color = Color::DefaultForeground,
-                90..=97 => self.active_fg = Color::Indexed((params[i] - 90 + 8) as u8),
-                100..=107 => self.active_bg = Color::Indexed((params[i] - 100 + 8) as u8),
+                90..=97 => self.active_fg = Color::Indexed((code - 90 + 8) as u8),
+                100..=107 => self.active_bg = Color::Indexed((code - 100 + 8) as u8),
                 _ => {}
             }
             i += 1;
@@ -416,12 +447,12 @@ impl Perform for Terminal {
                     self.responses.push(resp.into_bytes());
                 } else if payload.is_empty() {
                     self.clipboard_content = None;
-                    self.pending_clipboard = Some(String::new());
+                    self.pending_clipboard = Some(None);
                 } else if let Ok(decoded) = BASE64_STANDARD.decode(payload)
                     && let Ok(text) = String::from_utf8(decoded)
                 {
                     self.clipboard_content = Some(text.clone());
-                    self.pending_clipboard = Some(text);
+                    self.pending_clipboard = Some(Some(text));
                 }
             } else if params[0] == b"7" && params.len() >= 2 {
                 // OSC 7 ; file://[hostname]/path
@@ -619,14 +650,19 @@ impl Perform for Terminal {
         if action == 'u' {
             if intermediates.contains(&b'>') && flat_params.len() <= 1 {
                 // CSI > flags u - Push Kitty keyboard flags
-                let flags = flat_params.first().copied().unwrap_or(0) as u8;
+                let flags =
+                    (flat_params.first().copied().unwrap_or(0) as u8) & SUPPORTED_KITTY_FLAGS;
+                if self.kitty_keyboard_stack.len() >= MAX_KEYBOARD_STACK_DEPTH {
+                    self.kitty_keyboard_stack.remove(0);
+                }
                 self.kitty_keyboard_stack.push(self.kitty_keyboard_flags);
                 self.kitty_keyboard_flags = flags;
                 self.pending_kitty_keyboard = Some((flags, 1));
                 return;
             } else if intermediates.contains(&b'=') || intermediates.contains(&b'>') {
                 // CSI = flags ; mode u  or  CSI > flags ; mode u
-                let flags = flat_params.first().copied().unwrap_or(0) as u8;
+                let flags =
+                    (flat_params.first().copied().unwrap_or(0) as u8) & SUPPORTED_KITTY_FLAGS;
                 let mode = flat_params.get(1).copied().unwrap_or(1) as u8;
                 match mode {
                     1 => self.kitty_keyboard_flags = flags,
@@ -642,6 +678,9 @@ impl Perform for Terminal {
                 for _ in 0..count {
                     if let Some(f) = self.kitty_keyboard_stack.pop() {
                         self.kitty_keyboard_flags = f;
+                    } else {
+                        // Empty stack resets to 0 according to Kitty keyboard protocol
+                        self.kitty_keyboard_flags = 0;
                     }
                 }
                 self.pending_kitty_keyboard = Some((self.kitty_keyboard_flags, 1));
@@ -767,7 +806,7 @@ impl Perform for Terminal {
                 }
             }
             // SGR - Select Graphic Rendition
-            'm' => self.handle_sgr(&flat_params),
+            'm' => self.handle_sgr(params),
             // DECSTBM - Set Scrolling Region
             'r' => {
                 let top = flat_params
@@ -835,6 +874,7 @@ impl Perform for Terminal {
                 self.report_window_size = false;
                 self.progress = None;
                 self.active_hyperlink = None;
+                self.hyperlink_pool.clear();
                 self.kitty_keyboard_flags = 0;
                 self.kitty_keyboard_stack.clear();
                 self.pending_kitty_keyboard = Some((0, 1));
@@ -1065,8 +1105,8 @@ mod tests {
         term.advance_bytes(b"\x1b]52;c;aGVsbG8gd29ybGQ=\x07");
         assert_eq!(term.clipboard_content.as_deref(), Some("hello world"));
         assert_eq!(
-            term.take_pending_clipboard().as_deref(),
-            Some("hello world")
+            term.take_pending_clipboard(),
+            Some(Some("hello world".to_string()))
         );
 
         // Query populated clipboard
@@ -1079,7 +1119,7 @@ mod tests {
         // Clear clipboard
         term.advance_bytes(b"\x1b]52;c;\x07");
         assert_eq!(term.clipboard_content, None);
-        assert_eq!(term.take_pending_clipboard().as_deref(), Some(""));
+        assert_eq!(term.take_pending_clipboard(), Some(None));
     }
 
     #[test]
@@ -1290,17 +1330,33 @@ mod tests {
         assert_eq!(term.kitty_keyboard_flags, 0);
         assert_eq!(term.take_pending_kitty_keyboard(), Some((0, 1)));
 
-        // Mode 2 (union) via CSI = 4 ; 2 u
-        term.advance_bytes(b"\x1b[=4;2u");
-        assert_eq!(term.kitty_keyboard_flags, 4);
+        // Mode 2 (union) via CSI = 2 ; 2 u
+        term.advance_bytes(b"\x1b[=2;2u");
+        assert_eq!(term.kitty_keyboard_flags, 2);
 
-        // Mode 3 (difference) via CSI = 4 ; 3 u
-        term.advance_bytes(b"\x1b[=4;3u");
+        // Mode 3 (difference) via CSI = 2 ; 3 u
+        term.advance_bytes(b"\x1b[=2;3u");
+        assert_eq!(term.kitty_keyboard_flags, 0);
+
+        // Popping empty stack resets to 0
+        term.advance_bytes(b"\x1b[=1;1u\x1b[<5u");
         assert_eq!(term.kitty_keyboard_flags, 0);
 
         // Full reset clears flags and stack
-        term.advance_bytes(b"\x1b[>5u\x1bc");
+        term.advance_bytes(b"\x1b[>3u\x1bc");
         assert_eq!(term.kitty_keyboard_flags, 0);
         assert_eq!(term.kitty_keyboard_stack.len(), 0);
+    }
+
+    #[test]
+    fn test_combined_underline_and_bold_does_not_corrupt() {
+        let mut term = Terminal::new(80, 24, 100);
+        // CSI 4;1m must set BOTH underline and bold (not treated as 4:1)
+        term.advance_bytes(b"\x1b[4;1mB\x1b[0m");
+        let cell = term.grid.lines[0].cells[0];
+        assert!(cell.flags.contains(CellFlags::UNDERLINE));
+        assert!(cell.flags.contains(CellFlags::BOLD));
+        assert!(!cell.flags.contains(CellFlags::UNDERLINE_DOUBLE));
+        assert!(!cell.flags.contains(CellFlags::UNDERLINE_CURLY));
     }
 }

@@ -89,6 +89,7 @@ pub struct AppState {
     /// burst of configures collapses into a single, final size.
     configure_pending: bool,
     render_error: Option<io::Error>,
+    sync_output_start: Option<std::time::Instant>,
 }
 
 fn best_text_mime(mimes: &[String]) -> Option<&str> {
@@ -200,6 +201,7 @@ impl AppState {
             pending_size: None,
             configure_pending: false,
             render_error: None,
+            sync_output_start: None,
         })
     }
 
@@ -362,15 +364,16 @@ impl AppState {
         }
 
         // Fallback to internal clipboard buffer if offer not available
-        if let Some(text) = &self.clipboard_text {
+        let fallback_text = self.clipboard_text.clone();
+        if let Some(text) = fallback_text {
             if bracketed {
                 let mut wrapped = Vec::with_capacity(text.len() + 12);
                 wrapped.extend_from_slice(b"\x1b[200~");
                 wrapped.extend_from_slice(text.as_bytes());
                 wrapped.extend_from_slice(b"\x1b[201~");
-                let _ = self.pty.write_all(&wrapped);
+                self.write_pty_blocking(&wrapped);
             } else {
-                let _ = self.pty.write_all(text.as_bytes());
+                self.write_pty_blocking(text.as_bytes());
             }
         }
     }
@@ -1402,14 +1405,19 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
                             for response in state.terminal.take_responses() {
                                 state.write_pty_blocking(&response);
                             }
-                            if let Some(text) = state.terminal.take_pending_clipboard() {
-                                state.set_clipboard_text(text, Some(&qh));
+                            if let Some(pending) = state.terminal.take_pending_clipboard() {
+                                match pending {
+                                    Some(text) => state.set_clipboard_text(text, Some(&qh)),
+                                    None => {
+                                        state.clipboard_text = None;
+                                        state.terminal.set_clipboard_content(None);
+                                        if let Some(device) = &state.wayland.data_device {
+                                            device.set_selection(None, state.last_serial);
+                                        }
+                                    }
+                                }
                             }
-                            if let Some((flags, mode)) =
-                                state.terminal.take_pending_kitty_keyboard()
-                            {
-                                state.keyboard.set_kitty_mode(flags, mode);
-                            }
+                            state.keyboard.kitty_flags = state.terminal.kitty_keyboard_flags;
                             if state.config.auto_scroll() && !state.terminal.grid.is_alt_screen() {
                                 state.terminal.grid.scroll_viewport_bottom();
                             }
@@ -1495,7 +1503,20 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
             }
         }
 
-        let sync_active = app_state.terminal.synchronized_output;
+        let mut sync_active = app_state.terminal.synchronized_output;
+        if sync_active {
+            let start = *app_state
+                .sync_output_start
+                .get_or_insert_with(std::time::Instant::now);
+            if start.elapsed() > std::time::Duration::from_millis(150) {
+                app_state.terminal.synchronized_output = false;
+                sync_active = false;
+                app_state.sync_output_start = None;
+            }
+        } else {
+            app_state.sync_output_start = None;
+        }
+
         if app_state.needs_redraw
             && !sync_active
             && app_state.frame_callback.is_none()
