@@ -41,9 +41,24 @@ pub struct MouseModifiers {
 pub struct MouseState {
     pub tracking: MouseTracking,
     pub encoding: MouseEncoding,
+    pub utf8_mode: bool,
+    pub sgr_mode: bool,
+    pub urxvt_mode: bool,
 }
 
 impl MouseState {
+    fn update_encoding(&mut self) {
+        self.encoding = if self.sgr_mode {
+            MouseEncoding::Sgr
+        } else if self.urxvt_mode {
+            MouseEncoding::Urxvt
+        } else if self.utf8_mode {
+            MouseEncoding::Utf8
+        } else {
+            MouseEncoding::X10
+        };
+    }
+
     /// Applies a DECSET (`enabled`) or DECRST private mode. Returns `true` when the
     /// mode is a mouse mode owned by this state.
     pub fn apply_private_mode(&mut self, mode: u16, enabled: bool) -> bool {
@@ -70,25 +85,16 @@ impl MouseState {
                 }
             }
             1005 => {
-                if enabled {
-                    self.encoding = MouseEncoding::Utf8;
-                } else if self.encoding == MouseEncoding::Utf8 {
-                    self.encoding = MouseEncoding::X10;
-                }
+                self.utf8_mode = enabled;
+                self.update_encoding();
             }
             1006 => {
-                if enabled {
-                    self.encoding = MouseEncoding::Sgr;
-                } else if self.encoding == MouseEncoding::Sgr {
-                    self.encoding = MouseEncoding::X10;
-                }
+                self.sgr_mode = enabled;
+                self.update_encoding();
             }
             1015 => {
-                if enabled {
-                    self.encoding = MouseEncoding::Urxvt;
-                } else if self.encoding == MouseEncoding::Urxvt {
-                    self.encoding = MouseEncoding::X10;
-                }
+                self.urxvt_mode = enabled;
+                self.update_encoding();
             }
             _ => return false,
         }

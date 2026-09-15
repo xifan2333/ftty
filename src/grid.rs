@@ -129,6 +129,7 @@ pub struct Grid {
     pub images: HashMap<u32, ImageData>,
     pub image_versions: HashMap<u32, u64>,
     pub placements: Vec<ImagePlacement>,
+    pub virtual_placements: HashMap<u32, (usize, usize)>,
 
     pub cursor: Cursor,
     pub saved_cursor: Cursor,
@@ -157,6 +158,7 @@ impl Grid {
             images: HashMap::new(),
             image_versions: HashMap::new(),
             placements: Vec::new(),
+            virtual_placements: HashMap::new(),
             cursor: Cursor::default(),
             saved_cursor: Cursor::default(),
             scroll_region_top: 0,
@@ -201,11 +203,13 @@ impl Grid {
                 self.images.clear();
                 self.image_versions.clear();
                 self.placements.clear();
+                self.virtual_placements.clear();
             }
             DeleteTarget::ById(id) => {
                 self.images.remove(&id);
                 self.image_versions.remove(&id);
                 self.placements.retain(|p| p.image_id != id);
+                self.virtual_placements.remove(&id);
             }
             DeleteTarget::ByPlacement(p_id) => {
                 self.placements.retain(|p| p.placement_id != p_id);

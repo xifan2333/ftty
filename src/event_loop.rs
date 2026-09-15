@@ -580,7 +580,12 @@ impl AppState {
                     }
                 };
 
-                if !command.is_virtual {
+                if command.is_virtual {
+                    self.terminal
+                        .grid
+                        .virtual_placements
+                        .insert(image_id, (cols, rows));
+                } else {
                     let abs_line =
                         self.terminal.grid.scrollback.len() + self.terminal.grid.cursor.row;
                     self.terminal.grid.add_placement(ImagePlacement {
@@ -621,9 +626,14 @@ impl AppState {
                     }
                     return;
                 }
-                if !command.is_virtual {
-                    let cols = command.cols.unwrap_or(1) as usize;
-                    let rows = command.rows.unwrap_or(1) as usize;
+                let cols = command.cols.unwrap_or(1) as usize;
+                let rows = command.rows.unwrap_or(1) as usize;
+                if command.is_virtual {
+                    self.terminal
+                        .grid
+                        .virtual_placements
+                        .insert(image_id, (cols, rows));
+                } else {
                     let abs_line =
                         self.terminal.grid.scrollback.len() + self.terminal.grid.cursor.row;
                     self.terminal.grid.add_placement(ImagePlacement {
@@ -1042,7 +1052,7 @@ impl Dispatch<WlPointer, ()> for AppState {
                     return;
                 };
                 let was_held = (state.mouse_buttons_held & (1 << index)) != 0;
-                if was_held || state.mouse_reported {
+                if was_held {
                     state.mouse_buttons_held &= !(1 << index);
                     state.mouse_reported = state.mouse_buttons_held != 0;
                     state.report_mouse_event(index, false, false);
