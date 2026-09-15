@@ -85,6 +85,9 @@ pub struct AppState {
     pub needs_redraw: bool,
     frame_callback: Option<WlCallback>,
     pending_size: Option<[u32; 2]>,
+    /// Set by an `xdg_surface.configure`; the resize is applied once the queue is drained so a
+    /// burst of configures collapses into a single, final size.
+    configure_pending: bool,
     render_error: Option<io::Error>,
 }
 
@@ -195,6 +198,7 @@ impl AppState {
             needs_redraw: true,
             frame_callback: None,
             pending_size: None,
+            configure_pending: false,
             render_error: None,
         })
     }
@@ -782,17 +786,15 @@ impl Dispatch<XdgSurface, ()> for AppState {
         proxy: &XdgSurface,
         event: xdg_surface::Event,
         _data: &(),
-        conn: &Connection,
+        _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
         if let xdg_surface::Event::Configure { serial } = event {
             proxy.ack_configure(serial);
             state.wayland.configured = true;
-
-            if let Err(error) = state.configure_renderer(conn) {
-                state.render_error = Some(error);
-                state.running = false;
-            }
+            // Defer the resize until the queue is drained: back-to-back configure pairs then
+            // collapse into one size change instead of scrolling content on a transient size.
+            state.configure_pending = true;
         }
     }
 }
@@ -1420,6 +1422,17 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
         if !app_state.running {
             break;
         }
+
+        // Apply the last configure of this dispatch, if any, before drawing the frame.
+        if app_state.configure_pending {
+            app_state.configure_pending = false;
+            if let Err(error) = app_state.configure_renderer(&conn) {
+                app_state.render_error = Some(error);
+                app_state.running = false;
+                break;
+            }
+        }
+
         if app_state.needs_redraw
             && app_state.frame_callback.is_none()
             && let Some(renderer) = &mut app_state.renderer
