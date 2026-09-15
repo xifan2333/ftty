@@ -702,12 +702,89 @@ impl Renderer {
             let Some(&(tex, img_w, img_h, _)) = self.image_textures.get(&b.id) else {
                 continue;
             };
-            let x0 = pad_x + b.col_start as f32 * cw;
-            let y0 = pad_y + b.row_start as f32 * ch;
-            let x1 = pad_x + (b.col_end + 1) as f32 * cw;
-            let y1 = pad_y + (b.row_end + 1) as f32 * ch;
 
-            self.render_single_image(tex, img_w as f32, img_h as f32, [x0, y0, x1, y1]);
+            let box_w = b.col_end - b.col_start + 1;
+            let box_h = b.row_end - b.row_start + 1;
+            let (virt_cols, virt_rows) = grid
+                .virtual_placements
+                .get(&b.id)
+                .copied()
+                .unwrap_or((box_w, box_h));
+
+            if virt_cols == box_w && virt_rows == box_h {
+                let x0 = pad_x + b.col_start as f32 * cw;
+                let y0 = pad_y + b.row_start as f32 * ch;
+                let x1 = pad_x + (b.col_end + 1) as f32 * cw;
+                let y1 = pad_y + (b.row_end + 1) as f32 * ch;
+
+                self.render_single_image(tex, img_w as f32, img_h as f32, [x0, y0, x1, y1]);
+            } else {
+                let total_c = virt_cols.max(1) as f32;
+                let total_r = virt_rows.max(1) as f32;
+
+                for row in b.row_start..=b.row_end {
+                    for col in b.col_start..=b.col_end {
+                        let (img_row, img_col) = if let Some(&(ir, ic, _, _)) =
+                            grid.placeholder_coords.get(&(row, col))
+                        {
+                            (ir as usize, ic as usize)
+                        } else {
+                            (row - b.row_start, col - b.col_start)
+                        };
+
+                        let x0 = pad_x + col as f32 * cw;
+                        let y0 = pad_y + row as f32 * ch;
+                        let x1 = x0 + cw;
+                        let y1 = y0 + ch;
+
+                        let u0 = (img_col as f32 / total_c) * img_w as f32;
+                        let u1 = ((img_col + 1) as f32 / total_c) * img_w as f32;
+                        let v0 = (img_row as f32 / total_r) * img_h as f32;
+                        let v1 = ((img_row + 1) as f32 / total_r) * img_h as f32;
+
+                        let gl = &self.gl;
+                        let mut img_vertices = Vec::with_capacity(48);
+                        push_quad(
+                            &mut img_vertices,
+                            [x0, y0, x1, y1],
+                            [[u0, v0], [u1, v1]],
+                            [1.0, 1.0, 1.0, 1.0],
+                        );
+
+                        // SAFETY: draw holds this renderer's current EGL context; tex and the VBO
+                        // belong to it. img_vertices contains six initialized vertices of eight
+                        // f32 values, with no padding, and remains live throughout the byte upload.
+                        unsafe {
+                            gl.use_program(self.program);
+                            gl.active_texture(glow::TEXTURE0);
+                            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                            gl.uniform_1_i32(self.image_mode.as_ref(), 1);
+                            gl.uniform_2_f32(self.atlas_size.as_ref(), img_w as f32, img_h as f32);
+
+                            gl.bind_buffer(glow::ARRAY_BUFFER, self.vbo);
+                            let bytes = std::slice::from_raw_parts(
+                                img_vertices.as_ptr().cast::<u8>(),
+                                std::mem::size_of_val(img_vertices.as_slice()),
+                            );
+                            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::STREAM_DRAW);
+
+                            let stride = 8 * std::mem::size_of::<f32>() as i32;
+                            for (index, count, offset) in [(0, 2, 0), (1, 2, 8), (2, 4, 16)] {
+                                gl.enable_vertex_attrib_array(index);
+                                gl.vertex_attrib_pointer_f32(
+                                    index,
+                                    count,
+                                    glow::FLOAT,
+                                    false,
+                                    stride,
+                                    offset,
+                                );
+                            }
+                            gl.draw_arrays(glow::TRIANGLES, 0, 6);
+                        }
+                    }
+                }
+            }
         }
     }
 
