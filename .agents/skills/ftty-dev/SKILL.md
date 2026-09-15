@@ -5,7 +5,7 @@ description: Complete development, architecture, terminal protocol, code health 
 
 # ftty: Unified Developer & Engineering Guide
 
-This skill is the master operational manual for developing, maintaining, and testing `ftty` (Fan TTY) — an ultra-lightweight, Suckless Wayland terminal emulator with native Kitty graphics protocol support, written in Rust.
+This skill is the master operational manual for developing, maintaining, and testing `ftty` (Fan TTY) — an ultra-lightweight, minimalist Wayland terminal emulator with native Kitty graphics protocol support, written in Rust.
 
 ---
 
@@ -31,7 +31,7 @@ Verify component scope before making changes:
 1. **Unix Philosophy in Terminal Emulation**:
    - **Do One Thing Well**: `ftty` is strictly a PTY terminal surface. No built-in tabs, no split panes, no multiplexing. Tiling belongs to the window manager (`xwm` / `xrwm`), session multiplexing belongs to `herdr` or `tmux`.
    - **Text as the Universal Interface**: Configuration is simple declarative TOML with recursive `include` support and hot-reloading (`SIGUSR1`).
-2. **Suckless Frugality**:
+2. **Minimalist & Bloat-Free**:
    - **No Heavy GUI Frameworks**: No GPUI, no GTK, no Qt. Direct native Wayland client (`wayland-client` / EGL / `glow`).
    - **Resource Constrained**: Stripped release binary < 3 MB, idle memory < 15 MB, cold launch < 3 ms.
    - **Cognitive Maintainability**: Keep code small and readable. Mechanism over policy.

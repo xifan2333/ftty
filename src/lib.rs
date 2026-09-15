@@ -1,4 +1,4 @@
-//! ftty - Ultra-lightweight, Suckless Wayland terminal emulator with native Kitty graphics protocol
+//! ftty - Ultra-lightweight, minimalist Wayland terminal emulator with native Kitty graphics protocol
 
 // `unwrap`/`expect` are only acceptable inside the test suite; production paths must
 // propagate errors. Cargo.toml enables `clippy::unwrap_used`/`expect_used` crate-wide.

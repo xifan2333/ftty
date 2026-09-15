@@ -1,6 +1,6 @@
 # Agent Instructions & Project Guidelines for ftty
 
-`ftty` is an ultra-lightweight, Suckless Wayland terminal emulator with native Kitty graphics protocol support, written in Rust.
+`ftty` is an ultra-lightweight, minimalist Wayland terminal emulator with native Kitty graphics protocol support, written in Rust.
 
 ---
 
@@ -9,7 +9,7 @@
 1. **Unix Philosophy in Terminal Emulation**:
    - **Do One Thing Well**: `ftty` is strictly a PTY terminal surface. No built-in tabs, no split panes, no multiplexing. Tiling belongs to the window manager (`xwm` / `xrwm`), session multiplexing belongs to `herdr` or `tmux`.
    - **Text as the Universal Interface**: Configuration is simple declarative TOML with `include` support.
-2. **Suckless Frugality**:
+2. **Minimalist & Bloat-Free**:
    - **No Heavy GUI Frameworks**: No GPUI, no GTK, no Qt. Direct native Wayland client (`wayland-client` / EGL).
    - **Resource Constrained**: Stripped binary < 3 MB, idle memory < 15 MB, cold launch < 3 ms.
    - **Cognitive Maintainability**: Keep code small and readable. Mechanism over policy.
