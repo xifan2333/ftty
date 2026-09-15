@@ -366,7 +366,7 @@ impl Perform for Terminal {
             'u' => self.grid.restore_cursor(),
             // Window manipulation: image clients query pixel geometry before placing images.
             't' => match first_param {
-                14 | 15 => self.responses.push(
+                14 => self.responses.push(
                     format!(
                         "\x1b[4;{};{}t",
                         self.viewport_pixels[1], self.viewport_pixels[0]

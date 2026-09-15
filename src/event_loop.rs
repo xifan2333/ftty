@@ -1325,8 +1325,10 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
                     Ok(n) if n > 0 => {
                         total_read += n;
                         let (clean_text, events) = state.kitty_parser.filter_bytes(&buf[..n]);
-                        for event in events {
-                            state.handle_kitty_event(event);
+                        for event in &events {
+                            if let KittyEvent::Response(resp) = event {
+                                state.write_pty_blocking(resp);
+                            }
                         }
 
                         if !clean_text.is_empty() {
@@ -1336,6 +1338,12 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
                             }
                             if state.config.auto_scroll() && !state.terminal.grid.is_alt_screen() {
                                 state.terminal.grid.scroll_viewport_bottom();
+                            }
+                        }
+
+                        for event in events {
+                            if !matches!(event, KittyEvent::Response(_)) {
+                                state.handle_kitty_event(event);
                             }
                         }
 

@@ -51,6 +51,7 @@ struct StyleChain {
 struct FallbackFace {
     path: PathBuf,
     index: u32,
+    style: u8,
     font: fontdue::Font,
 }
 
@@ -89,11 +90,13 @@ impl FallbackCache {
         preferred_family: &str,
         font_size: f32,
     ) -> Option<(u16, u16)> {
-        // Fast path: check if any already loaded fallback face covers `c`
+        // Fast path: check if any already loaded fallback face for this style covers `c`
         for (pos, face) in self.faces.iter().enumerate() {
-            let glyph = face.font.lookup_glyph_index(c);
-            if glyph != 0 {
-                return Some((pos as u16, glyph));
+            if face.style == style {
+                let glyph = face.font.lookup_glyph_index(c);
+                if glyph != 0 {
+                    return Some((pos as u16, glyph));
+                }
             }
         }
 
@@ -103,20 +106,24 @@ impl FallbackCache {
         let candidates = query_fontconfig_candidates(fc, preferred_family, bold, italic, c)?;
 
         for (path, index) in candidates {
-            let position = match self
-                .faces
-                .iter()
-                .position(|face| face.path == path && face.index == index)
-            {
-                Some(position) => position,
-                None => {
-                    let Ok(font) = load_font_file(&path, index, font_size) else {
-                        continue;
-                    };
-                    self.faces.push(FallbackFace { path, index, font });
-                    self.faces.len() - 1
-                }
-            };
+            let position =
+                match self.faces.iter().position(|face| {
+                    face.path == path && face.index == index && face.style == style
+                }) {
+                    Some(position) => position,
+                    None => {
+                        let Ok(font) = load_font_file(&path, index, font_size) else {
+                            continue;
+                        };
+                        self.faces.push(FallbackFace {
+                            path,
+                            index,
+                            style,
+                            font,
+                        });
+                        self.faces.len() - 1
+                    }
+                };
 
             let glyph = self.faces[position].font.lookup_glyph_index(c);
             if glyph != 0 {
