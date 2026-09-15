@@ -123,6 +123,7 @@ impl AppState {
         let palette = config.build_palette();
         let default_fg = config.foreground();
         let default_bg = config.background();
+        terminal.set_default_colors(default_fg, default_bg);
         terminal.grid.cursor.shape = config.cursor_shape();
         terminal.grid.max_scrollback = config.scrollback_lines();
 
@@ -401,6 +402,8 @@ impl AppState {
         self.palette = new_config.build_palette();
         self.default_fg = new_config.foreground();
         self.default_bg = new_config.background();
+        self.terminal
+            .set_default_colors(self.default_fg, self.default_bg);
         self.terminal.grid.cursor.shape = new_config.cursor_shape();
         self.config = new_config;
 
