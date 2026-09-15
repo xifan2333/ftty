@@ -161,6 +161,14 @@ impl Perform for Terminal {
             && let Ok(title) = std::str::from_utf8(params[1])
         {
             self.title = title.to_string();
+        } else if params.len() >= 2 {
+            if params[0] == b"10" && params[1] == b"?" {
+                self.responses
+                    .push(b"\x1b]10;rgb:dcdc/dcdc/dcdc\x1b\\".to_vec());
+            } else if params[0] == b"11" && params[1] == b"?" {
+                self.responses
+                    .push(b"\x1b]11;rgb:1818/1818/1818\x1b\\".to_vec());
+            }
         }
     }
 
@@ -292,6 +300,29 @@ impl Perform for Terminal {
             'd' => {
                 let row = param_or(1).saturating_sub(1);
                 self.grid.cursor.row = row.min(self.grid.rows.saturating_sub(1));
+            }
+            // DSR - Device Status Report
+            'n' => match first_param {
+                5 => self.responses.push(b"\x1b[0n".to_vec()),
+                6 => self.responses.push(
+                    format!(
+                        "\x1b[{};{}R",
+                        self.grid.cursor.row + 1,
+                        self.grid.cursor.col + 1
+                    )
+                    .into_bytes(),
+                ),
+                _ => {}
+            },
+            // DA - Device Attributes
+            'c' => {
+                if intermediates.contains(&b'>') {
+                    // Secondary Device Attributes (DA2)
+                    self.responses.push(b"\x1b[>0;10;1c".to_vec());
+                } else if first_param == 0 {
+                    // Primary Device Attributes (DA1) - VT220 response
+                    self.responses.push(b"\x1b[?62;c".to_vec());
+                }
             }
             // SGR - Select Graphic Rendition
             'm' => self.handle_sgr(&flat_params),
@@ -464,5 +495,26 @@ mod tests {
         let mut term = Terminal::new(80, 24, 100);
         term.advance_bytes(b"Testing\x1b[2J");
         assert_eq!(term.grid.lines[0].cells[0].c, ' ');
+    }
+
+    #[test]
+    fn test_device_status_and_attributes_queries() {
+        let mut term = Terminal::new(80, 24, 100);
+
+        // CSI 5 n -> Operating status (DSR)
+        term.advance_bytes(b"\x1b[5n");
+        assert_eq!(term.take_responses(), vec![b"\x1b[0n".to_vec()]);
+
+        // CSI 6 n -> Cursor position report (CPR)
+        term.advance_bytes(b"\x1b[10;20H\x1b[6n");
+        assert_eq!(term.take_responses(), vec![b"\x1b[10;20R".to_vec()]);
+
+        // Primary DA: CSI c
+        term.advance_bytes(b"\x1b[c");
+        assert_eq!(term.take_responses(), vec![b"\x1b[?62;c".to_vec()]);
+
+        // Secondary DA: CSI > c
+        term.advance_bytes(b"\x1b[>c");
+        assert_eq!(term.take_responses(), vec![b"\x1b[>0;10;1c".to_vec()]);
     }
 }

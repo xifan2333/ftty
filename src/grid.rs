@@ -378,27 +378,46 @@ impl Grid {
 
     /// Scrolls lines inside the active scroll region upward.
     pub fn scroll_up(&mut self, count: usize) {
-        let count = count.min(self.scroll_region_bottom - self.scroll_region_top + 1);
-        for _ in 0..count {
-            let removed = self.lines.remove(self.scroll_region_top);
-            if self.scroll_region_top == 0
-                && self.scroll_region_bottom == self.rows.saturating_sub(1)
-                && self.alt_lines.is_none()
-            {
-                self.push_scrollback(removed);
+        let region_len = self
+            .scroll_region_bottom
+            .saturating_sub(self.scroll_region_top)
+            + 1;
+        let count = count.min(region_len);
+        if count == 0 {
+            return;
+        }
+
+        if self.scroll_region_top == 0
+            && self.scroll_region_bottom == self.rows.saturating_sub(1)
+            && self.alt_lines.is_none()
+        {
+            for i in 0..count {
+                self.push_scrollback(self.lines[i].clone());
             }
-            self.lines
-                .insert(self.scroll_region_bottom, Row::new(self.cols));
+        }
+
+        self.lines[self.scroll_region_top..=self.scroll_region_bottom].rotate_left(count);
+        for row in
+            &mut self.lines[self.scroll_region_bottom + 1 - count..=self.scroll_region_bottom]
+        {
+            row.reset();
         }
     }
 
     /// Scrolls lines inside the active scroll region downward.
     pub fn scroll_down(&mut self, count: usize) {
-        let count = count.min(self.scroll_region_bottom - self.scroll_region_top + 1);
-        for _ in 0..count {
-            self.lines.remove(self.scroll_region_bottom);
-            self.lines
-                .insert(self.scroll_region_top, Row::new(self.cols));
+        let region_len = self
+            .scroll_region_bottom
+            .saturating_sub(self.scroll_region_top)
+            + 1;
+        let count = count.min(region_len);
+        if count == 0 {
+            return;
+        }
+
+        self.lines[self.scroll_region_top..=self.scroll_region_bottom].rotate_right(count);
+        for row in &mut self.lines[self.scroll_region_top..self.scroll_region_top + count] {
+            row.reset();
         }
     }
 
