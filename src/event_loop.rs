@@ -1037,6 +1037,23 @@ impl Dispatch<WlPointer, ()> for AppState {
                 }
                 let (line, screen_row, col) =
                     state.cell_at_pointer(state.mouse_pos[0], state.mouse_pos[1]);
+
+                if state.keyboard.modifiers().ctrl {
+                    let cell = state.terminal.grid.visible_line(screen_row).cells.get(col);
+                    if let Some(cell) = cell
+                        && let Some(id) = cell.hyperlink_id
+                        && let Some(url) = state.terminal.hyperlink_url(id)
+                    {
+                        let url_owned = url.to_string();
+                        std::thread::spawn(move || {
+                            let _ = std::process::Command::new("xdg-open")
+                                .arg(&url_owned)
+                                .spawn();
+                        });
+                        return;
+                    }
+                }
+
                 let same_cell = state.last_click_cell == Some((line, col));
                 if same_cell && time.saturating_sub(state.last_click_time) < 350 {
                     state.click_count = (state.click_count % 3) + 1;
