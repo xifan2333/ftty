@@ -40,6 +40,7 @@ wayland-egl = "0.32"
 wayland-protocols = { version = "0.32", features = [
   "client",
   "wayland-client",
+  "staging",
   "unstable",
 ] }
 xkbcommon = { version = "0.9", features = ["wayland"] }
