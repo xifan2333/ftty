@@ -444,6 +444,22 @@ fn shrink_rows(
     removed
 }
 
+/// Moves every placement anchored to a surviving row up by `amount`, dropping the ones whose row
+/// was removed. Used when a screen trims its top rows without saving them to scrollback.
+fn shift_placements(placements: &mut Vec<ImagePlacement>, amount: usize) {
+    if amount == 0 {
+        return;
+    }
+    placements.retain_mut(|p| {
+        if p.line < amount {
+            false
+        } else {
+            p.line -= amount;
+            true
+        }
+    });
+}
+
 /// 2D Screen grid with scrollback history and alternate screen support.
 #[derive(Debug, Clone)]
 pub struct Grid {
@@ -466,8 +482,12 @@ pub struct Grid {
     pub scroll_region_top: usize,
     pub scroll_region_bottom: usize,
 
+    // The hidden primary screen while the alternate screen is active. Each screen owns its saved
+    // cursor and placements so a resize on one cannot shift the other's coordinates.
     alt_lines: Option<Vec<Row>>,
     alt_cursor: Option<Cursor>,
+    alt_saved_cursor: Option<Cursor>,
+    alt_placements: Vec<ImagePlacement>,
 }
 
 impl Grid {
@@ -494,6 +514,8 @@ impl Grid {
             scroll_region_bottom: actual_rows.saturating_sub(1),
             alt_lines: None,
             alt_cursor: None,
+            alt_saved_cursor: None,
+            alt_placements: Vec::new(),
         }
     }
 
@@ -558,16 +580,19 @@ impl Grid {
                 self.images.clear();
                 self.image_versions.clear();
                 self.placements.clear();
+                self.alt_placements.clear();
                 self.virtual_placements.clear();
             }
             DeleteTarget::ById(id) => {
                 self.images.remove(&id);
                 self.image_versions.remove(&id);
                 self.placements.retain(|p| p.image_id != id);
+                self.alt_placements.retain(|p| p.image_id != id);
                 self.virtual_placements.remove(&id);
             }
             DeleteTarget::ByPlacement(p_id) => {
                 self.placements.retain(|p| p.placement_id != p_id);
+                self.alt_placements.retain(|p| p.placement_id != p_id);
             }
             DeleteTarget::AtCursor => {
                 let cursor_row = self.cursor.row;
@@ -584,7 +609,11 @@ impl Grid {
             let alt = (0..self.rows).map(|_| Row::new(self.cols)).collect();
             self.alt_lines = Some(std::mem::replace(&mut self.lines, alt));
             self.alt_cursor = Some(self.cursor);
+            self.alt_saved_cursor = Some(self.saved_cursor);
             self.cursor = Cursor::default();
+            self.saved_cursor = Cursor::default();
+            // Each screen owns its placements; the primary's are parked until it is restored.
+            self.alt_placements = std::mem::take(&mut self.placements);
             self.viewport_offset = 0;
         }
     }
@@ -596,6 +625,10 @@ impl Grid {
             if let Some(cursor) = self.alt_cursor.take() {
                 self.cursor = cursor;
             }
+            if let Some(saved) = self.alt_saved_cursor.take() {
+                self.saved_cursor = saved;
+            }
+            self.placements = std::mem::take(&mut self.alt_placements);
             self.viewport_offset = 0;
         }
     }
@@ -630,41 +663,43 @@ impl Grid {
         } else if new_rows < old_rows {
             let to_remove = old_rows - new_rows;
 
+            // The alternate screen keeps no history, so only the primary screen with scrollback
+            // enabled preserves the absolute line of its surviving rows.
+            let active_on_alt = self.alt_lines.is_some();
+            let active_retains = !active_on_alt && self.max_scrollback > 0;
+
             // Active screen: trim below the cursor first so its line is always retained.
             let removed_top = shrink_rows(&mut self.lines, to_remove, self.cursor.row, new_rows);
             let from_top = removed_top.len();
-            if self.alt_lines.is_none() {
+            if !active_on_alt {
                 for row in removed_top {
                     self.push_scrollback(row);
                 }
             }
             self.cursor.row = self.cursor.row.saturating_sub(from_top);
             self.saved_cursor.row = self.saved_cursor.row.saturating_sub(from_top);
+            if !active_retains {
+                shift_placements(&mut self.placements, from_top);
+            }
 
-            // Hidden primary screen while the alternate screen is active.
+            // Hidden primary screen while the alternate screen is active. Its rows are dropped
+            // rather than saved, so its own placements shift by its own removal count.
             if let Some(alt) = &mut self.alt_lines {
-                let primary_row = self.alt_cursor.unwrap_or_default().row;
-                let primary_removed = shrink_rows(alt, to_remove, primary_row, new_rows);
-                let primary_from_top = primary_removed.len();
+                let hidden_row = self.alt_cursor.unwrap_or_default().row;
+                let hidden_removed = shrink_rows(alt, to_remove, hidden_row, new_rows);
+                let hidden_from_top = hidden_removed.len();
                 if let Some(cursor) = &mut self.alt_cursor {
-                    cursor.row = cursor.row.saturating_sub(primary_from_top);
+                    cursor.row = cursor.row.saturating_sub(hidden_from_top);
                 }
+                if let Some(saved) = &mut self.alt_saved_cursor {
+                    saved.row = saved.row.saturating_sub(hidden_from_top);
+                }
+                shift_placements(&mut self.alt_placements, hidden_from_top);
             }
 
-            // Placements are anchored to absolute lines. Rows pushed to scrollback keep theirs,
-            // but a screen without scrollback shifts its content up.
-            if self.max_scrollback == 0 && from_top > 0 {
-                self.placements.retain_mut(|p| {
-                    if p.line < from_top {
-                        false
-                    } else {
-                        p.line -= from_top;
-                        true
-                    }
-                });
-            }
             let bottom_line = self.scrollback.len() + new_rows;
             self.placements.retain(|p| p.line < bottom_line);
+            self.alt_placements.retain(|p| p.line < bottom_line);
         }
 
         self.cols = new_cols;
@@ -1444,6 +1479,87 @@ mod tests {
             grid.placements.is_empty(),
             "a placement anchored below the new bottom row is evicted"
         );
+    }
+
+    #[test]
+    fn shrink_on_alternate_screen_shifts_placements() {
+        let mut grid = Grid::new(10, 4, 100);
+        grid.enter_alt_screen();
+        fill_rows(&mut grid, 4);
+        grid.cursor.row = 3;
+
+        // The alternate screen has no history, so its content shifts up on shrink.
+        grid.add_placement(ImagePlacement {
+            image_id: 1,
+            placement_id: 0,
+            line: grid.scrollback.len() + 3,
+            col: 0,
+            cols: 1,
+            rows: 1,
+            offset_x: 0,
+            offset_y: 0,
+            z_index: 0,
+        });
+
+        grid.resize(10, 2);
+
+        assert_eq!(
+            grid.placements.len(),
+            1,
+            "the placement must not be dropped"
+        );
+        assert_eq!(
+            grid.placements[0].line,
+            grid.scrollback.len() + 1,
+            "it follows its row up the alternate screen"
+        );
+    }
+
+    #[test]
+    fn saved_cursor_is_scoped_to_its_screen_across_resize() {
+        let mut grid = Grid::new(10, 6, 100);
+        grid.cursor.row = 1;
+        grid.cursor.col = 3;
+        grid.save_cursor();
+
+        // The alternate screen trims more top rows than the hidden primary would.
+        grid.enter_alt_screen();
+        grid.cursor.row = 5;
+        grid.resize(10, 2);
+        grid.exit_alt_screen();
+
+        assert_eq!(
+            grid.saved_cursor.row, 1,
+            "the primary keeps its own saved cursor"
+        );
+        assert_eq!(grid.saved_cursor.col, 3);
+    }
+
+    #[test]
+    fn primary_placements_are_parked_while_the_alternate_screen_is_active() {
+        let mut grid = Grid::new(10, 4, 100);
+        grid.add_placement(ImagePlacement {
+            image_id: 7,
+            placement_id: 0,
+            line: 2,
+            col: 0,
+            cols: 1,
+            rows: 1,
+            offset_x: 0,
+            offset_y: 0,
+            z_index: 0,
+        });
+        assert_eq!(grid.placements.len(), 1);
+
+        grid.enter_alt_screen();
+        assert!(
+            grid.placements.is_empty(),
+            "primary placements must not bleed onto the alternate screen"
+        );
+
+        grid.exit_alt_screen();
+        assert_eq!(grid.placements.len(), 1);
+        assert_eq!(grid.placements[0].line, 2);
     }
 
     #[test]
