@@ -34,6 +34,7 @@ pub struct Terminal {
     pub grid: Grid,
     pub active_fg: Color,
     pub active_bg: Color,
+    pub active_underline_color: Color,
     pub active_flags: CellFlags,
     pub mouse: MouseState,
     pub title: String,
@@ -75,6 +76,7 @@ impl Terminal {
             grid: Grid::new(cols, rows, max_scrollback),
             active_fg: Color::DefaultForeground,
             active_bg: Color::DefaultBackground,
+            active_underline_color: Color::DefaultForeground,
             active_flags: CellFlags::empty(),
             mouse: MouseState::default(),
             title: String::new(),
@@ -174,13 +176,37 @@ impl Terminal {
                 1 => self.active_flags.insert(CellFlags::BOLD),
                 2 => self.active_flags.insert(CellFlags::DIM),
                 3 => self.active_flags.insert(CellFlags::ITALIC),
-                4 => self.active_flags.insert(CellFlags::UNDERLINE),
+                4 => {
+                    self.active_flags.remove(CellFlags::ALL_UNDERLINES);
+                    if i + 1 < params.len() && params[i + 1] <= 5 {
+                        match params[i + 1] {
+                            0 => {}
+                            1 => self.active_flags.insert(CellFlags::UNDERLINE),
+                            2 => self
+                                .active_flags
+                                .insert(CellFlags::UNDERLINE | CellFlags::UNDERLINE_DOUBLE),
+                            3 => self
+                                .active_flags
+                                .insert(CellFlags::UNDERLINE | CellFlags::UNDERLINE_CURLY),
+                            4 => self
+                                .active_flags
+                                .insert(CellFlags::UNDERLINE | CellFlags::UNDERLINE_DOTTED),
+                            5 => self
+                                .active_flags
+                                .insert(CellFlags::UNDERLINE | CellFlags::UNDERLINE_DASHED),
+                            _ => {}
+                        }
+                        i += 1;
+                    } else {
+                        self.active_flags.insert(CellFlags::UNDERLINE);
+                    }
+                }
                 7 => self.active_flags.insert(CellFlags::REVERSE),
                 8 => self.active_flags.insert(CellFlags::HIDDEN),
                 9 => self.active_flags.insert(CellFlags::STRIKETHROUGH),
                 22 => self.active_flags.remove(CellFlags::BOLD | CellFlags::DIM),
                 23 => self.active_flags.remove(CellFlags::ITALIC),
-                24 => self.active_flags.remove(CellFlags::UNDERLINE),
+                24 => self.active_flags.remove(CellFlags::ALL_UNDERLINES),
                 27 => self.active_flags.remove(CellFlags::REVERSE),
                 28 => self.active_flags.remove(CellFlags::HIDDEN),
                 29 => self.active_flags.remove(CellFlags::STRIKETHROUGH),
@@ -216,6 +242,21 @@ impl Terminal {
                     }
                 }
                 49 => self.active_bg = Color::DefaultBackground,
+                58 => {
+                    // Extended underline color
+                    if i + 2 < params.len() && params[i + 1] == 5 {
+                        self.active_underline_color = Color::Indexed(params[i + 2] as u8);
+                        i += 2;
+                    } else if i + 4 < params.len() && params[i + 1] == 2 {
+                        self.active_underline_color = Color::Rgb(
+                            params[i + 2] as u8,
+                            params[i + 3] as u8,
+                            params[i + 4] as u8,
+                        );
+                        i += 4;
+                    }
+                }
+                59 => self.active_underline_color = Color::DefaultForeground,
                 90..=97 => self.active_fg = Color::Indexed((params[i] - 90 + 8) as u8),
                 100..=107 => self.active_bg = Color::Indexed((params[i] - 100 + 8) as u8),
                 _ => {}
@@ -227,6 +268,7 @@ impl Terminal {
     fn reset_attributes(&mut self) {
         self.active_fg = Color::DefaultForeground;
         self.active_bg = Color::DefaultBackground;
+        self.active_underline_color = Color::DefaultForeground;
         self.active_flags = CellFlags::empty();
     }
 }
@@ -264,8 +306,13 @@ fn percent_decode(s: &str) -> Option<String> {
 
 impl Perform for Terminal {
     fn print(&mut self, c: char) {
-        self.grid
-            .write_char(c, self.active_fg, self.active_bg, self.active_flags);
+        self.grid.write_char_styled(
+            c,
+            self.active_fg,
+            self.active_bg,
+            self.active_flags,
+            self.active_underline_color,
+        );
     }
 
     fn execute(&mut self, byte: u8) {
@@ -1066,5 +1113,34 @@ mod tests {
         // Full reset clears progress
         term.advance_bytes(b"\x1b]9;4;1;50\x07\x1bc");
         assert_eq!(term.progress, None);
+    }
+
+    #[test]
+    fn test_styled_underlines_and_underline_color() {
+        let mut term = Terminal::new(80, 24, 100);
+
+        // Undercurl (4:3) with RGB underline color (58;2;255;0;128)
+        term.advance_bytes(b"\x1b[4:3;58;2;255;0;128mU\x1b[0m");
+        let cell = term.grid.lines[0].cells[0];
+        assert_eq!(cell.c, 'U');
+        assert!(cell.flags.contains(CellFlags::UNDERLINE));
+        assert!(cell.flags.contains(CellFlags::UNDERLINE_CURLY));
+        assert_eq!(cell.underline_color, Color::Rgb(255, 0, 128));
+
+        // Double underline (4:2)
+        term.advance_bytes(b"\x1b[4:2mD\x1b[0m");
+        let cell_d = term.grid.lines[0].cells[1];
+        assert_eq!(cell_d.c, 'D');
+        assert!(cell_d.flags.contains(CellFlags::UNDERLINE_DOUBLE));
+
+        // Reset underline (24) and reset color (59)
+        term.advance_bytes(b"\x1b[4:4;58;5;12mX\x1b[24;59mY\x1b[0m");
+        let cell_x = term.grid.lines[0].cells[2];
+        assert!(cell_x.flags.contains(CellFlags::UNDERLINE_DOTTED));
+        assert_eq!(cell_x.underline_color, Color::Indexed(12));
+
+        let cell_y = term.grid.lines[0].cells[3];
+        assert!(!cell_y.flags.contains(CellFlags::UNDERLINE));
+        assert_eq!(cell_y.underline_color, Color::DefaultForeground);
     }
 }

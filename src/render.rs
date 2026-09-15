@@ -1039,8 +1039,84 @@ fn build_vertices(
                 cw
             };
             if cell.flags.contains(CellFlags::UNDERLINE) {
-                let top = y + (metrics.ascent as f32 + 1.0).min(ch - 1.0);
-                push_quad(vertices, [x, top, x + width, top + 1.0], SOLID_UV, color);
+                let ul_color = if cell.underline_color != Color::DefaultForeground {
+                    let resolved = cell.underline_color.to_rgb(
+                        colors.palette,
+                        colors.foreground,
+                        colors.background,
+                    );
+                    rgba(resolved)
+                } else {
+                    color
+                };
+                let base_top = y + (metrics.ascent as f32 + 1.0).min(ch - 1.0);
+
+                if cell.flags.contains(CellFlags::UNDERLINE_DOUBLE) {
+                    let top1 = y + (metrics.ascent as f32).min(ch - 3.0);
+                    let top2 = top1 + 2.0;
+                    push_quad(
+                        vertices,
+                        [x, top1, x + width, top1 + 1.0],
+                        SOLID_UV,
+                        ul_color,
+                    );
+                    push_quad(
+                        vertices,
+                        [x, top2, x + width, top2 + 1.0],
+                        SOLID_UV,
+                        ul_color,
+                    );
+                } else if cell.flags.contains(CellFlags::UNDERLINE_CURLY) {
+                    let steps = (width * 2.0).round().max(4.0) as usize;
+                    let step_w = width / steps as f32;
+                    let amplitude = 1.5_f32;
+                    let period = cw.max(4.0);
+                    for step in 0..steps {
+                        let seg_x = x + step as f32 * step_w;
+                        let wave = ((seg_x - x) / period * std::f32::consts::TAU).sin() * amplitude;
+                        let seg_y = (base_top + wave).clamp(y, y + ch - 1.0);
+                        push_quad(
+                            vertices,
+                            [seg_x, seg_y, seg_x + step_w, seg_y + 1.0],
+                            SOLID_UV,
+                            ul_color,
+                        );
+                    }
+                } else if cell.flags.contains(CellFlags::UNDERLINE_DOTTED) {
+                    let dot_size = 2.0_f32;
+                    let mut dot_x = x;
+                    while dot_x < x + width {
+                        let cur_w = dot_size.min(x + width - dot_x);
+                        push_quad(
+                            vertices,
+                            [dot_x, base_top, dot_x + cur_w, base_top + 1.0],
+                            SOLID_UV,
+                            ul_color,
+                        );
+                        dot_x += dot_size * 2.0;
+                    }
+                } else if cell.flags.contains(CellFlags::UNDERLINE_DASHED) {
+                    let dash_len = 4.0_f32;
+                    let gap = 3.0_f32;
+                    let mut dash_x = x;
+                    while dash_x < x + width {
+                        let cur_w = dash_len.min(x + width - dash_x);
+                        push_quad(
+                            vertices,
+                            [dash_x, base_top, dash_x + cur_w, base_top + 1.0],
+                            SOLID_UV,
+                            ul_color,
+                        );
+                        dash_x += dash_len + gap;
+                    }
+                } else {
+                    push_quad(
+                        vertices,
+                        [x, base_top, x + width, base_top + 1.0],
+                        SOLID_UV,
+                        ul_color,
+                    );
+                }
             }
             if cell.flags.contains(CellFlags::STRIKETHROUGH) {
                 let top = y + (metrics.ascent as f32 * 0.65).floor();
