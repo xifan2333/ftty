@@ -895,6 +895,9 @@ impl Dispatch<WlKeyboard, ()> for AppState {
             }
             wl_keyboard::Event::Enter { surface, .. } => {
                 if state.wayland.surface.as_ref() == Some(&surface) {
+                    if state.terminal.focus_reporting {
+                        let _ = state.pty.write_all(b"\x1b[I");
+                    }
                     state.ime.active = true;
                     if let Some(text_input) = &state.wayland.text_input {
                         text_input.enable();
@@ -914,6 +917,9 @@ impl Dispatch<WlKeyboard, ()> for AppState {
             }
             wl_keyboard::Event::Leave { surface, .. } => {
                 if state.wayland.surface.as_ref() == Some(&surface) {
+                    if state.terminal.focus_reporting {
+                        let _ = state.pty.write_all(b"\x1b[O");
+                    }
                     state.ime.clear();
                     if let Some(text_input) = &state.wayland.text_input {
                         text_input.disable();
