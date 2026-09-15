@@ -936,17 +936,24 @@ impl Dispatch<WlKeyboard, ()> for AppState {
             }
             wl_keyboard::Event::Key {
                 key,
-                state: WEnum::Value(KeyState::Pressed),
+                state: WEnum::Value(key_state),
                 ..
             } => {
-                if let Some(action) = state.keyboard.check_action(key, &state.config.keybindings) {
+                let pressed = key_state == KeyState::Pressed;
+                if pressed
+                    && let Some(action) =
+                        state.keyboard.check_action(key, &state.config.keybindings)
+                {
                     state.handle_key_action(action, Some(qh), Some(_conn));
-                } else if let Some(bytes) = state.keyboard.handle_key(key) {
-                    if state.config.auto_scroll() && !state.terminal.grid.is_alt_screen() {
+                } else if let Some(bytes) = state.keyboard.handle_key_event(key, pressed, false) {
+                    if pressed && state.config.auto_scroll() && !state.terminal.grid.is_alt_screen()
+                    {
                         state.terminal.grid.scroll_viewport_bottom();
                     }
                     let _ = state.pty.write_all(&bytes);
-                    state.update_ime_cursor_area();
+                    if pressed {
+                        state.update_ime_cursor_area();
+                    }
                 }
             }
             wl_keyboard::Event::Modifiers {
@@ -1397,6 +1404,11 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
                             }
                             if let Some(text) = state.terminal.take_pending_clipboard() {
                                 state.set_clipboard_text(text, Some(&qh));
+                            }
+                            if let Some((flags, mode)) =
+                                state.terminal.take_pending_kitty_keyboard()
+                            {
+                                state.keyboard.set_kitty_mode(flags, mode);
                             }
                             if state.config.auto_scroll() && !state.terminal.grid.is_alt_screen() {
                                 state.terminal.grid.scroll_viewport_bottom();
