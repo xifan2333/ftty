@@ -16,9 +16,8 @@ base64 = "0.23.1"
 bitflags = "2.8"
 calloop = { version = "0.14", features = ["signals"] }
 calloop-wayland-source = "0.4"
-font-kit = "0.14"
 fontconfig = "0.11.0"
-fontdue = "0.9"
+fontdue = { version = "0.9", features = ["parallel"] }
 glow = "0.18"
 khronos-egl = { version = "6.0", features = ["1_5", "dynamic"] }
 libc = "0.2"
