@@ -1457,7 +1457,9 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
             }
         }
 
+        let sync_active = app_state.terminal.synchronized_output;
         if app_state.needs_redraw
+            && !sync_active
             && app_state.frame_callback.is_none()
             && let Some(renderer) = &mut app_state.renderer
         {
