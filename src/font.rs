@@ -89,31 +89,42 @@ impl FallbackCache {
         preferred_family: &str,
         font_size: f32,
     ) -> Option<(u16, u16)> {
+        // Fast path: check if any already loaded fallback face covers `c`
+        for (pos, face) in self.faces.iter().enumerate() {
+            let glyph = face.font.lookup_glyph_index(c);
+            if glyph != 0 {
+                return Some((pos as u16, glyph));
+            }
+        }
+
         let fc = fontconfig()?;
         let bold = (style & 1) != 0;
         let italic = (style & 2) != 0;
-        let (path, index) = query_fontconfig_fallback(fc, preferred_family, bold, italic, c)?;
-        let position = match self
-            .faces
-            .iter()
-            .position(|face| face.path == path && face.index == index)
-        {
-            Some(position) => position,
-            None => {
-                let font = load_font_file(&path, index, font_size).ok()?;
-                self.faces.push(FallbackFace { path, index, font });
-                self.faces.len() - 1
-            }
-        };
+        let candidates = query_fontconfig_candidates(fc, preferred_family, bold, italic, c)?;
 
-        // Fontconfig answers with the closest font on the system, which is not guaranteed
-        // to cover the character, so coverage is verified before accepting it.
-        let glyph = self.faces[position].font.lookup_glyph_index(c);
-        if glyph != 0 {
-            Some((position as u16, glyph))
-        } else {
-            None
+        for (path, index) in candidates {
+            let position = match self
+                .faces
+                .iter()
+                .position(|face| face.path == path && face.index == index)
+            {
+                Some(position) => position,
+                None => {
+                    let Ok(font) = load_font_file(&path, index, font_size) else {
+                        continue;
+                    };
+                    self.faces.push(FallbackFace { path, index, font });
+                    self.faces.len() - 1
+                }
+            };
+
+            let glyph = self.faces[position].font.lookup_glyph_index(c);
+            if glyph != 0 {
+                return Some((position as u16, glyph));
+            }
         }
+
+        None
     }
 }
 
@@ -158,14 +169,14 @@ fn match_family(
     Some((PathBuf::from(filename), index))
 }
 
-/// Asks fontconfig which installed face covers `c`, taking style and monospace preferences into account.
-fn query_fontconfig_fallback(
+/// Asks fontconfig for ordered candidate faces covering `c`, taking style and monospace preferences into account.
+fn query_fontconfig_candidates(
     fc: &Fontconfig,
     preferred_family: &str,
     bold: bool,
     italic: bool,
     c: char,
-) -> Option<(PathBuf, u32)> {
+) -> Option<Vec<(PathBuf, u32)>> {
     let mut pattern = Pattern::new(fc).ok()?;
     let mut charset = CharSet::new(fc).ok()?;
     charset.add_char(c).ok()?;
@@ -193,10 +204,25 @@ fn query_fontconfig_fallback(
         pattern.add_string(fontconfig::FC_FAMILY, &c_mono).ok()?;
     }
 
+    if let Ok(font_set) = pattern.sort_fonts(fontconfig::UnicodeCoverage::Trim) {
+        let mut candidates = Vec::new();
+        for p in font_set.iter().take(8) {
+            if let Ok(filename) = p.filename()
+                && let Ok(face_index) = p.face_index()
+                && let Ok(index) = u32::try_from(face_index)
+            {
+                candidates.push((PathBuf::from(filename), index));
+            }
+        }
+        if !candidates.is_empty() {
+            return Some(candidates);
+        }
+    }
+
     let matched = pattern.font_match().ok()?;
     let path = PathBuf::from(matched.filename().ok()?);
     let index = u32::try_from(matched.face_index().ok()?).ok()?;
-    Some((path, index))
+    Some(vec![(path, index)])
 }
 
 fn load_font_bytes(
@@ -228,6 +254,7 @@ fn style_index(flags: CellFlags) -> usize {
 /// Loads configured font chain and on-demand fallback faces with cell metrics calculation.
 pub struct FontManager {
     regular: StyleChain,
+    regular_slots: Vec<Option<fontdue::Font>>,
     bold: OnceLock<StyleChain>,
     italic: OnceLock<StyleChain>,
     bold_italic: OnceLock<StyleChain>,
@@ -283,7 +310,7 @@ impl FontManager {
             .filter_map(|(i, name)| {
                 fc.and_then(|fc| match_family(fc, name, bold, italic))
                     .and_then(|(path, index)| load_font_file(&path, index, self.font_size).ok())
-                    .or_else(|| self.regular.fallbacks.get(i).cloned())
+                    .or_else(|| self.regular_slots.get(i).and_then(|opt| opt.clone()))
             })
             .collect();
 
@@ -339,14 +366,17 @@ impl FontManager {
             })
             .unwrap_or((font_size.ceil().max(1.0) as u32, font_size.ceil() as i32));
 
-        // 3. User fallback regular fonts are loaded; styled variants are lazy-loaded on first use.
-        let regular_fallbacks: Vec<fontdue::Font> = fallback_names
+        // 3. User fallback regular slots maintain 1:1 index alignment with fallback_names.
+        let regular_slots: Vec<Option<fontdue::Font>> = fallback_names
             .iter()
-            .filter_map(|name| {
+            .map(|name| {
                 let (path, index) = match_family(fc, name, false, false)?;
                 load_font_file(&path, index, font_size).ok()
             })
             .collect();
+
+        let regular_fallbacks: Vec<fontdue::Font> =
+            regular_slots.iter().flatten().cloned().collect();
 
         let regular = StyleChain {
             primary: primary_regular,
@@ -355,6 +385,7 @@ impl FontManager {
 
         Ok(Self {
             regular,
+            regular_slots,
             bold: OnceLock::new(),
             italic: OnceLock::new(),
             bold_italic: OnceLock::new(),
