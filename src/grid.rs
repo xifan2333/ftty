@@ -182,8 +182,9 @@ impl Grid {
 
         // Cap stored images to 256 by removing unplaced images
         if self.images.len() > 256 {
-            let active_ids: std::collections::HashSet<u32> =
+            let mut active_ids: std::collections::HashSet<u32> =
                 self.placements.iter().map(|p| p.image_id).collect();
+            active_ids.extend(self.virtual_placements.keys());
             self.images
                 .retain(|img_id, _| active_ids.contains(img_id) || *img_id == id);
             self.image_versions
@@ -856,5 +857,25 @@ mod tests {
         assert!(grid.scrollback.is_empty());
         // Must not panic on subsequent visible_line access
         assert_eq!(grid.visible_line(0).cells.len(), 10);
+    }
+
+    #[test]
+    fn virtual_placement_images_are_preserved_across_evictions() {
+        let mut grid = Grid::new(80, 24, 100);
+        grid.virtual_placements.insert(100, (10, 10));
+
+        for id in 1..=260 {
+            grid.add_image(ImageData {
+                id,
+                width: 1,
+                height: 1,
+                rgba: vec![0, 0, 0, 0],
+            });
+        }
+
+        assert!(
+            grid.images.contains_key(&100),
+            "virtual image 100 must be preserved across eviction"
+        );
     }
 }
