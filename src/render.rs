@@ -728,9 +728,10 @@ impl Renderer {
                 let mut img_vertices = Vec::with_capacity(num_cells * 48);
 
                 for row in b.row_start..=b.row_end {
+                    let line = grid.visible_line(row);
                     for col in b.col_start..=b.col_end {
-                        let (img_row, img_col) = if let Some(&(ir, ic, _, _)) =
-                            grid.placeholder_coords.get(&(row, col))
+                        let (img_row, img_col) = if let Some(coords) = &line.placeholders
+                            && let Some(&(ir, ic)) = coords.get(&col)
                         {
                             (ir as usize, ic as usize)
                         } else {

@@ -399,6 +399,7 @@ pub fn diacritic_to_index(c: char) -> Option<u16> {
 pub struct Row {
     pub cells: Vec<Cell>,
     pub wrapped: bool,
+    pub placeholders: Option<HashMap<usize, (u16, u16)>>,
 }
 
 impl Row {
@@ -407,11 +408,15 @@ impl Row {
         Self {
             cells: vec![Cell::default(); cols],
             wrapped: false,
+            placeholders: None,
         }
     }
 
     pub fn resize(&mut self, new_cols: usize) {
         self.cells.resize(new_cols, Cell::default());
+        if let Some(coords) = &mut self.placeholders {
+            coords.retain(|&col, _| col < new_cols);
+        }
     }
 
     pub fn reset(&mut self) {
@@ -419,6 +424,7 @@ impl Row {
             cell.reset();
         }
         self.wrapped = false;
+        self.placeholders = None;
     }
 }
 
@@ -437,7 +443,6 @@ pub struct Grid {
     pub image_versions: HashMap<u32, u64>,
     pub placements: Vec<ImagePlacement>,
     pub virtual_placements: HashMap<u32, (usize, usize)>,
-    pub placeholder_coords: HashMap<(usize, usize), (u16, u16, u8, u8)>,
 
     pub cursor: Cursor,
     pub saved_cursor: Cursor,
@@ -467,7 +472,6 @@ impl Grid {
             image_versions: HashMap::new(),
             placements: Vec::new(),
             virtual_placements: HashMap::new(),
-            placeholder_coords: HashMap::new(),
             cursor: Cursor::default(),
             saved_cursor: Cursor::default(),
             scroll_region_top: 0,
@@ -842,18 +846,11 @@ impl Grid {
             {
                 let target_col = self.cursor.col - 1;
                 let target_row = self.cursor.row;
-                if self.lines[target_row].cells[target_col].c == KITTY_PLACEHOLDER {
-                    let entry = self
-                        .placeholder_coords
-                        .entry((target_row, target_col))
-                        .or_insert((0, 0, 0, 0));
-                    match entry.3 {
-                        0 => entry.0 = idx,
-                        1 => entry.1 = idx,
-                        2 => entry.2 = idx as u8,
-                        _ => {}
-                    }
-                    entry.3 += 1;
+                if self.lines[target_row].cells[target_col].c == KITTY_PLACEHOLDER
+                    && let Some(coords) = &mut self.lines[target_row].placeholders
+                    && let Some(coord) = coords.get_mut(&target_col)
+                {
+                    coord.0 = idx;
                 }
             }
             return;
@@ -885,19 +882,21 @@ impl Grid {
         };
 
         if c == KITTY_PLACEHOLDER {
-            // Inherit row and increment column from the placeholder cell to the left if colors match
-            if col > 0
-                && let Some(&(left_row, left_col, left_high, _)) =
-                    self.placeholder_coords.get(&(row, col - 1))
+            let (img_row, img_col) = if col > 0
+                && let Some(coords) = &self.lines[row].placeholders
+                && let Some(&(left_row, left_col)) = coords.get(&(col - 1))
                 && self.lines[row].cells[col - 1].fg == fg
             {
-                self.placeholder_coords
-                    .insert((row, col), (left_row, left_col + 1, left_high, 0));
+                (left_row, left_col + 1)
             } else {
-                self.placeholder_coords.insert((row, col), (0, 0, 0, 0));
-            }
-        } else {
-            self.placeholder_coords.remove(&(row, col));
+                (0, 0)
+            };
+            self.lines[row]
+                .placeholders
+                .get_or_insert_with(HashMap::new)
+                .insert(col, (img_row, img_col));
+        } else if let Some(coords) = &mut self.lines[row].placeholders {
+            coords.remove(&col);
         }
 
         if width == 2 && col + 1 < self.cols {
