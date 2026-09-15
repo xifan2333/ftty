@@ -47,6 +47,7 @@ pub struct RenderOptions<'a> {
     pub padding: [u16; 2],
     pub preedit: Option<&'a Preedit>,
     pub selection: Option<&'a Selection>,
+    pub hovered_hyperlink: Option<u32>,
 }
 
 impl<'a> RenderOptions<'a> {
@@ -60,7 +61,14 @@ impl<'a> RenderOptions<'a> {
             padding,
             preedit,
             selection,
+            hovered_hyperlink: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_hovered_hyperlink(mut self, hovered_hyperlink: Option<u32>) -> Self {
+        self.hovered_hyperlink = hovered_hyperlink;
+        self
     }
 }
 
@@ -1038,7 +1046,11 @@ fn build_vertices(
             } else {
                 cw
             };
-            if cell.flags.contains(CellFlags::UNDERLINE) {
+            let has_explicit_underline = cell.flags.contains(CellFlags::UNDERLINE);
+            let has_hover_underline = options
+                .hovered_hyperlink
+                .is_some_and(|id| cell.hyperlink_id == Some(id));
+            if has_explicit_underline || has_hover_underline {
                 let ul_color = if cell.underline_color != Color::DefaultForeground {
                     let resolved = cell.underline_color.to_rgb(
                         colors.palette,
@@ -1479,5 +1491,63 @@ mod tests {
         for chunk in vertices.chunks(8) {
             assert!(chunk[0] <= expected_right + 0.01);
         }
+    }
+
+    #[test]
+    fn test_hovered_hyperlink_renders_underline() {
+        let fonts = FontManager::load(14.0).expect("system monospace font");
+        let mut grid = Grid::new(10, 2, 0);
+        grid.cursor.visible = false;
+        // Write character with hyperlink_id 1
+        grid.write_char_styled(
+            'a',
+            Color::DefaultForeground,
+            Color::DefaultBackground,
+            CellFlags::empty(),
+            Color::DefaultForeground,
+            Some(1),
+        );
+
+        let mut atlas = GlyphAtlas::new(64, 64);
+        prepare_atlas(&grid, &fonts, &mut atlas, None);
+
+        let mut vertices_no_hover = Vec::new();
+        build_vertices(
+            &mut vertices_no_hover,
+            &grid,
+            ColorScheme::new(&default_256_palette(), DEFAULT_FG, DEFAULT_BG),
+            fonts.metrics,
+            &fonts,
+            &atlas,
+            RenderOptions::new([0, 0], None, None),
+        );
+
+        let mut vertices_mismatched_hover = Vec::new();
+        build_vertices(
+            &mut vertices_mismatched_hover,
+            &grid,
+            ColorScheme::new(&default_256_palette(), DEFAULT_FG, DEFAULT_BG),
+            fonts.metrics,
+            &fonts,
+            &atlas,
+            RenderOptions::new([0, 0], None, None).with_hovered_hyperlink(Some(2)),
+        );
+
+        let mut vertices_matched_hover = Vec::new();
+        build_vertices(
+            &mut vertices_matched_hover,
+            &grid,
+            ColorScheme::new(&default_256_palette(), DEFAULT_FG, DEFAULT_BG),
+            fonts.metrics,
+            &fonts,
+            &atlas,
+            RenderOptions::new([0, 0], None, None).with_hovered_hyperlink(Some(1)),
+        );
+
+        // Without hover and with mismatched hover, only the character glyph quad is produced (48 f32 floats)
+        assert_eq!(vertices_no_hover.len(), 48);
+        assert_eq!(vertices_mismatched_hover.len(), 48);
+        // With matched hover, an extra solid underline quad is produced (+48 f32 floats = 96)
+        assert_eq!(vertices_matched_hover.len(), 96);
     }
 }

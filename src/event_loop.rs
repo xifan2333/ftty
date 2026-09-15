@@ -26,6 +26,12 @@ use wayland_client::protocol::{
     wl_surface::WlSurface,
 };
 use wayland_client::{Connection, Dispatch, QueueHandle, WEnum};
+use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::{
+    self, Shape, WpCursorShapeDeviceV1,
+};
+use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_manager_v1::{
+    self, WpCursorShapeManagerV1,
+};
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_manager_v3::ZwpTextInputManagerV3;
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::{self, ZwpTextInputV3};
 use wayland_protocols::xdg::shell::client::{
@@ -79,6 +85,9 @@ pub struct AppState {
     pub click_count: u8,
     pub last_click_cell: Option<(usize, usize)>,
     pub last_serial: u32,
+    pub pointer_serial: u32,
+    pub hovered_hyperlink: Option<u32>,
+    pub current_cursor_shape: Option<Shape>,
     pub clipboard_text: Option<String>,
     pub pending_offers: Vec<crate::wayland::OfferData>,
     pub running: bool,
@@ -194,6 +203,9 @@ impl AppState {
             click_count: 0,
             last_click_cell: None,
             last_serial: 0,
+            pointer_serial: 0,
+            hovered_hyperlink: None,
+            current_cursor_shape: None,
             clipboard_text: None,
             pending_offers: Vec::new(),
             running: true,
@@ -205,6 +217,42 @@ impl AppState {
             sync_output_start: None,
             last_sync_gen: 0,
         })
+    }
+
+    /// Updates the Wayland cursor shape based on whether a hyperlink is currently hovered.
+    pub fn update_cursor_shape(&mut self) {
+        let shape = if self.hovered_hyperlink.is_some() {
+            Shape::Pointer
+        } else {
+            Shape::Text
+        };
+        if self.current_cursor_shape == Some(shape) {
+            return;
+        }
+        if let Some(device) = &self.wayland.cursor_shape_device {
+            device.set_shape(self.pointer_serial, shape);
+            self.current_cursor_shape = Some(shape);
+        }
+    }
+
+    /// Updates the hovered hyperlink and cursor shape based on current pointer coordinates.
+    pub fn update_hover_state(&mut self) {
+        let hovered_id = if self.mouse_pressed {
+            None
+        } else {
+            let (_, screen_row, col) = self.cell_at_pointer(self.mouse_pos[0], self.mouse_pos[1]);
+            self.terminal
+                .grid
+                .visible_line(screen_row)
+                .cells
+                .get(col)
+                .and_then(|c| c.hyperlink_id)
+        };
+        if self.hovered_hyperlink != hovered_id {
+            self.hovered_hyperlink = hovered_id;
+            self.needs_redraw = true;
+            self.update_cursor_shape();
+        }
     }
 
     /// Returns the absolute `(line, screen_row, col)` grid coordinates under the surface-relative pointer position.
@@ -789,6 +837,11 @@ impl Dispatch<WlRegistry, ()> for AppState {
                     state.wayland.data_device_manager = Some(manager);
                     state.wayland.init_data_device(qh);
                 }
+                "wp_cursor_shape_manager_v1" => {
+                    let manager = registry.bind::<WpCursorShapeManagerV1, _, _>(name, 1, qh, ());
+                    state.wayland.cursor_shape_manager = Some(manager);
+                    state.wayland.init_cursor_shape(qh);
+                }
                 _ => {}
             }
         }
@@ -907,6 +960,7 @@ impl Dispatch<WlSeat, ()> for AppState {
             if caps.contains(Capability::Pointer) && state.wayland.pointer.is_none() {
                 let pointer = proxy.get_pointer(qh, ());
                 state.wayland.pointer = Some(pointer);
+                state.wayland.init_cursor_shape(qh);
             }
         }
     }
@@ -1019,11 +1073,24 @@ impl Dispatch<WlPointer, ()> for AppState {
     ) {
         match event {
             wl_pointer::Event::Enter {
+                serial,
                 surface_x,
                 surface_y,
                 ..
             } => {
+                state.pointer_serial = serial;
+                state.last_serial = serial;
                 state.mouse_pos = [surface_x, surface_y];
+                state.current_cursor_shape = None;
+                state.update_hover_state();
+                state.update_cursor_shape();
+            }
+            wl_pointer::Event::Leave { .. } => {
+                if state.hovered_hyperlink.is_some() {
+                    state.hovered_hyperlink = None;
+                    state.needs_redraw = true;
+                }
+                state.current_cursor_shape = None;
             }
             wl_pointer::Event::Motion {
                 surface_x,
@@ -1051,6 +1118,7 @@ impl Dispatch<WlPointer, ()> for AppState {
                     state.selection.end = SelectionPoint::new(line, col);
                     state.needs_redraw = true;
                 }
+                state.update_hover_state();
             }
             wl_pointer::Event::Button {
                 button,
@@ -1059,6 +1127,7 @@ impl Dispatch<WlPointer, ()> for AppState {
                 serial,
             } => {
                 state.last_serial = serial;
+                state.pointer_serial = serial;
                 let Some(index) = x11_button_index(button) else {
                     return;
                 };
@@ -1106,6 +1175,7 @@ impl Dispatch<WlPointer, ()> for AppState {
                 state.last_click_time = time;
                 state.last_click_cell = Some((line, col));
                 state.mouse_pressed = true;
+                state.update_hover_state();
 
                 match state.click_count {
                     1 => {
@@ -1151,6 +1221,7 @@ impl Dispatch<WlPointer, ()> for AppState {
                 }
                 if index == 0 {
                     state.mouse_pressed = false;
+                    state.update_hover_state();
                 }
             }
             wl_pointer::Event::Axis {
@@ -1187,6 +1258,7 @@ impl Dispatch<WlPointer, ()> for AppState {
                         state.terminal.grid.scroll_viewport_down(count);
                     }
                     state.needs_redraw = true;
+                    state.update_hover_state();
                 }
             }
             wl_pointer::Event::AxisStop { .. } => {
@@ -1194,6 +1266,30 @@ impl Dispatch<WlPointer, ()> for AppState {
             }
             _ => {}
         }
+    }
+}
+
+impl Dispatch<WpCursorShapeManagerV1, ()> for AppState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WpCursorShapeManagerV1,
+        _event: wp_cursor_shape_manager_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<WpCursorShapeDeviceV1, ()> for AppState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WpCursorShapeDeviceV1,
+        _event: wp_cursor_shape_device_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
     }
 }
 
@@ -1575,7 +1671,8 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
                 [app_state.config.padding_x(), app_state.config.padding_y()],
                 app_state.ime.preedit.as_ref(),
                 Some(&app_state.selection),
-            );
+            )
+            .with_hovered_hyperlink(app_state.hovered_hyperlink);
             renderer.render_grid(
                 &app_state.terminal.grid,
                 colors,
@@ -2105,5 +2202,42 @@ mod tests {
         assert_eq!(app.font_mgr.font_size(), 14.0);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_update_hover_state_and_pointer_shape() {
+        let term = Terminal::new(80, 24, 100);
+        let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
+        let mut app = AppState::new(term, pty).expect("AppState new");
+
+        // Cell at (row 0, col 5) has hyperlink ID 1
+        app.terminal.grid.lines[0].cells[5].hyperlink_id = Some(1);
+
+        let cw = f64::from(app.font_mgr.metrics.cell_width);
+        let ch = f64::from(app.font_mgr.metrics.cell_height);
+
+        // Pointer over cell (row 0, col 0) has no hyperlink
+        app.mouse_pos = [cw * 0.5, ch * 0.5];
+        app.update_hover_state();
+        assert_eq!(app.hovered_hyperlink, None);
+
+        // Move pointer over cell (row 0, col 5) with hyperlink
+        app.mouse_pos = [cw * 5.5, ch * 0.5];
+        app.needs_redraw = false;
+        app.update_hover_state();
+        assert_eq!(app.hovered_hyperlink, Some(1));
+        assert!(app.needs_redraw);
+
+        // If mouse is pressed (dragging selection), hover is suppressed
+        app.mouse_pressed = true;
+        app.needs_redraw = false;
+        app.update_hover_state();
+        assert_eq!(app.hovered_hyperlink, None);
+        assert!(app.needs_redraw);
+
+        // When mouse is released, hover is restored
+        app.mouse_pressed = false;
+        app.update_hover_state();
+        assert_eq!(app.hovered_hyperlink, Some(1));
     }
 }
