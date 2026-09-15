@@ -218,18 +218,24 @@ impl KeyboardHandler {
 
     /// Sets Kitty keyboard mode flags according to mode: 1 (replace), 2 (union), 3 (difference).
     pub fn set_kitty_mode(&mut self, flags: u8, mode: u8) {
+        let masked =
+            flags & (KittyKeyboardFlags::DISAMBIGUATE | KittyKeyboardFlags::REPORT_EVENT_TYPES);
         match mode {
-            1 => self.kitty_flags = flags,
-            2 => self.kitty_flags |= flags,
-            3 => self.kitty_flags &= !flags,
+            1 => self.kitty_flags = masked,
+            2 => self.kitty_flags |= masked,
+            3 => self.kitty_flags &= !masked,
             _ => {}
         }
     }
 
     /// Pushes current flags and sets new flags.
     pub fn push_kitty_flags(&mut self, flags: u8) {
+        if self.kitty_stack.len() >= 64 {
+            self.kitty_stack.remove(0);
+        }
         self.kitty_stack.push(self.kitty_flags);
-        self.kitty_flags = flags;
+        self.kitty_flags =
+            flags & (KittyKeyboardFlags::DISAMBIGUATE | KittyKeyboardFlags::REPORT_EVENT_TYPES);
     }
 
     /// Pops `count` frames from the kitty keyboard stack.
@@ -238,6 +244,8 @@ impl KeyboardHandler {
         for _ in 0..n {
             if let Some(f) = self.kitty_stack.pop() {
                 self.kitty_flags = f;
+            } else {
+                self.kitty_flags = 0;
             }
         }
     }
@@ -742,5 +750,9 @@ mod tests {
             handler.kitty_flags,
             KittyKeyboardFlags::DISAMBIGUATE | KittyKeyboardFlags::REPORT_EVENT_TYPES
         );
+
+        // Popping empty stack resets to 0
+        handler.pop_kitty_flags(5);
+        assert_eq!(handler.kitty_flags, 0);
     }
 }
