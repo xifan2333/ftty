@@ -59,11 +59,11 @@ undocumented_unsafe_blocks = "deny"
 1. **Unsafe Isolation**:
    - `unsafe` blocks are strictly forbidden in all modules except audited FFI boundaries (`src/render.rs` for OpenGL FFI, `src/pty.rs` for POSIX PTY FFI).
    - Every `unsafe` block must be accompanied by an audited safety justification comment (`// SAFETY: ...`).
-2. **No Unwraps / Panics**:
-   - `unwrap()` and `expect()` are denied by Clippy across the entire repository.
-   - All errors must be handled gracefully: propagate via `?`, fallback to safe defaults, or log and recover.
+2. **No Unwraps / Panics in Production**:
+   - `unwrap()` and `expect()` are denied by Clippy across production code (explicitly permitted only in `#[cfg(test)]` modules via `src/lib.rs`).
+   - All production errors must be handled gracefully: propagate via `?`, fallback to safe defaults, or log and recover.
 3. **Non-blocking I/O Guardrails**:
    - The PTY master file descriptor is strictly non-blocking (`O_NONBLOCK`).
-   - Never perform unbounded blocking writes on the event-loop thread. Use bounded poll readiness (`PollFd` with <= 100ms timeout) for control sequences, and spawn background threads for large clipboard payload transfers (> 4KB).
+   - Never perform unbounded blocking writes on the event-loop thread. Use bounded poll readiness (`PollFd` with <= 100ms timeout) for control sequences and small fallback pastes (<= 4KB). Wayland offers and large fallback pastes (> 4KB) must write from background threads.
 4. **Resource Bounds**:
    - Any cache or pool (hyperlink storage, Kitty keyboard stack, glyph atlas, image placements) **must** have a defined maximum capacity with deterministic eviction (FIFO or LRU) to prevent unbounded memory growth.

@@ -41,7 +41,8 @@ Verify component scope before making changes:
    - **Modern Keyboard & Protocol Standard**: Native Kitty Keyboard Protocol progressive enhancement (`CSI u`), Synchronized Output (Mode 2026), OSC 8 hyperlinks, OSC 52 clipboard, and styled undercurl.
 4. **Strict Rust Safety**:
    - `unsafe_code = "deny"` across the entire crate. The only exceptions are audited FFI boundaries (`src/render.rs` for OpenGL and `src/pty.rs` for POSIX PTY).
-   - Clippy denies `unwrap_used`, `expect_used`, and `undocumented_unsafe_blocks`.
+   - Clippy denies `unwrap_used` and `expect_used` in production code (explicitly allowed in `#[cfg(test)]` modules).
+   - Undocumented unsafe blocks are denied everywhere.
 
 ---
 

@@ -14,7 +14,7 @@ This guide details how coding agents must interact with automated review bots (Q
 
 ## 2. Review Bot Identification & Polling
 
-### 1. Qodo Code Review
+### 1. Qodo Code Review (`author: qodo-code-review`)
 Qodo is a deep semantic analysis bot that detects edge-case defects, resource bounds issues, and protocol inconsistencies.
 
 - **In-Progress State**:
@@ -33,6 +33,7 @@ Qodo is a deep semantic analysis bot that detects edge-case defects, resource bo
   <h3>Code Review by Qodo</h3>
   Bugs (N)   Rule violations (0)   Skill insights (0)
   ```
+  - **Verify Head Commit**: Check the trailing link or commit SHA at the bottom of the comment to ensure it evaluates the current head commit, not an older push.
   - **If `Bugs > 0`**:
     Inspect every bug card. Qodo provides:
     - **Description**: What went wrong.
@@ -41,15 +42,15 @@ Qodo is a deep semantic analysis bot that detects edge-case defects, resource bo
   - **If `Bugs (0)`**:
     All previous issues have been resolved (`✓ Resolved`). Ready for final approval.
 
-### 2. CodeRabbit
+### 2. CodeRabbit (`author: coderabbitai`)
 CodeRabbit provides high-level architectural summaries and structured agent prompts.
 
 - Check PR checks: `gh pr checks <pr_id>` (should display `pass`).
-- Check PR comments for `> Prompt for AI Agents` blocks.
+- Check PR comments for `> Prompt for AI Agents` blocks. Verify findings independently before applying.
 
-### 3. Greptile
+### 3. Greptile (`author: greptile-apps`)
 Greptile monitors cross-file consistency and repo-wide patterns.
-- Inspect alerts for potential regressions or pattern violations.
+- Ensure all alerts for the current commit (Confidence $\ge$ 4) are addressed before proceeding to merge. Note that CI checks (`check-and-test`) test only test/build suites, not bot approvals; bot approval must be verified separately via comments.
 
 ---
 
@@ -87,7 +88,9 @@ When a review bot reports issues:
 | 5. Wait for Bot Re-Review                                   |
 |    - Sleep 15-20s, poll gh pr view <id> --comments          |
 |    - Wait for "Qodo is busy working" to finish              |
+|    - Verify review applies to current head commit           |
 |    - Confirm Bugs count is 0 and items show [✓ Resolved]    |
+|    - Confirm CodeRabbit & Greptile have no blockers         |
 +------------------------------+------------------------------+
                                | (Bugs remaining?)
                                +--- Yes: Repeat Loop ---------+

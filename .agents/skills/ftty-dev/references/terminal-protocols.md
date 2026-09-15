@@ -20,8 +20,8 @@ This reference documents the terminal escape sequences and protocols supported b
 | **OSC 52 Clipboard** | IPC | `\x1b]52;Pc;Pd\x1b\` | `parser.rs`, `event_loop.rs` |
 | **OSC 7 Working Dir** | Semantic | `\x1b]7;file://hostname/path\x1b\` | `parser.rs` |
 | **OSC 133 Shell Int.** | Semantic | `\x1b]133;[A|B|C|D]\x1b\` | `parser.rs` |
-| **Mode 2031 Theme** | Visual | DECSET `2031` (`\x1b[?2031;1/2$y`) | `parser.rs` |
-| **Mode 2048 Geometry** | Window | DECSET `2048` (`\x1b[4;H;Wt`) | `parser.rs` |
+| **Mode 2031 Theme** | Visual | Mode `\x1b[?2031h/l` (Report: `\x1b[?2031;1/2$y`) | `parser.rs` |
+| **Mode 2048 Geometry** | Window | Mode `\x1b[?2048h/l` (Report: `\x1b[4;H;Wt`) | `parser.rs` |
 | **OSC 9;4 Progress** | Semantic | `\x1b]9;4;state;progress\x1b\` | `parser.rs` |
 
 ---
@@ -78,9 +78,9 @@ This reference documents the terminal escape sequences and protocols supported b
 - **Clearing Selection**:
   - An empty OSC 52 payload represents an explicit clear.
   - Must call `device.set_selection(None, last_serial)`, NOT advertise an empty text buffer.
-- **Non-blocking Write Fallback**:
-  - Short pastes (<= 4KB) write synchronously with a 100ms readiness timeout.
-  - Large pastes (> 4KB) must write from a background thread to prevent freezing the Wayland event loop.
+- **Non-blocking Write Architecture**:
+  - Wayland clipboard offers (`wl_data_offer`) always stream asynchronously across an OS pipe in a dedicated worker thread.
+  - The internal fallback clipboard buffer (`clipboard_text`) uses a hybrid strategy: short pastes (<= 4KB) write synchronously with a 100ms readiness timeout; large fallback pastes (> 4KB) are offloaded to a background thread to prevent freezing the Wayland event loop.
 
 ### 6. Hyperlinks (OSC 8)
 - **ID Resolution**:
