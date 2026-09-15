@@ -259,13 +259,9 @@ impl AppState {
         true
     }
 
-    /// Copies the currently selected text to the Wayland clipboard and internal buffer.
-    pub fn copy_selection(&mut self, qh: Option<&QueueHandle<Self>>) {
-        let text = self.selection.extract_text(&self.terminal.grid);
-        if text.is_empty() {
-            return;
-        }
-
+    /// Sets the clipboard content internally and offers it through the Wayland data device.
+    pub fn set_clipboard_text(&mut self, text: String, qh: Option<&QueueHandle<Self>>) {
+        self.terminal.set_clipboard_content(Some(text.clone()));
         self.clipboard_text = Some(text);
 
         if let (Some(qh), Some(manager), Some(device)) = (
@@ -280,6 +276,16 @@ impl AppState {
             device.set_selection(Some(&source), self.last_serial);
             self.wayland.data_source = Some(source);
         }
+    }
+
+    /// Copies the currently selected text to the Wayland clipboard and internal buffer.
+    pub fn copy_selection(&mut self, qh: Option<&QueueHandle<Self>>) {
+        let text = self.selection.extract_text(&self.terminal.grid);
+        if text.is_empty() {
+            return;
+        }
+
+        self.set_clipboard_text(text, qh);
     }
 
     /// Writes bytes to the non-blocking PTY master with a bounded readiness loop to prevent truncation.
@@ -1371,6 +1377,9 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
                             state.terminal.advance_bytes(&clean_text);
                             for response in state.terminal.take_responses() {
                                 state.write_pty_blocking(&response);
+                            }
+                            if let Some(text) = state.terminal.take_pending_clipboard() {
+                                state.set_clipboard_text(text, Some(&qh));
                             }
                             if state.config.auto_scroll() && !state.terminal.grid.is_alt_screen() {
                                 state.terminal.grid.scroll_viewport_bottom();
