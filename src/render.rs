@@ -731,7 +731,7 @@ impl Renderer {
                     let line = grid.visible_line(row);
                     for col in b.col_start..=b.col_end {
                         let (img_row, img_col) = if let Some(coords) = &line.placeholders
-                            && let Some(&(ir, ic)) = coords.get(&col)
+                            && let Some(&(ir, ic, _)) = coords.get(&col)
                         {
                             (ir as usize, ic as usize)
                         } else {

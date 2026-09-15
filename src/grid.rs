@@ -399,7 +399,7 @@ pub fn diacritic_to_index(c: char) -> Option<u16> {
 pub struct Row {
     pub cells: Vec<Cell>,
     pub wrapped: bool,
-    pub placeholders: Option<HashMap<usize, (u16, u16)>>,
+    pub placeholders: Option<HashMap<usize, (u16, u16, u8)>>,
 }
 
 impl Row {
@@ -850,7 +850,12 @@ impl Grid {
                     && let Some(coords) = &mut self.lines[target_row].placeholders
                     && let Some(coord) = coords.get_mut(&target_col)
                 {
-                    coord.0 = idx;
+                    match coord.2 {
+                        0 => coord.0 = idx,
+                        1 => coord.1 = idx,
+                        _ => {}
+                    }
+                    coord.2 = coord.2.saturating_add(1);
                 }
             }
             return;
@@ -884,7 +889,7 @@ impl Grid {
         if c == KITTY_PLACEHOLDER {
             let (img_row, img_col) = if col > 0
                 && let Some(coords) = &self.lines[row].placeholders
-                && let Some(&(left_row, left_col)) = coords.get(&(col - 1))
+                && let Some(&(left_row, left_col, _)) = coords.get(&(col - 1))
                 && self.lines[row].cells[col - 1].fg == fg
             {
                 (left_row, left_col + 1)
@@ -894,7 +899,7 @@ impl Grid {
             self.lines[row]
                 .placeholders
                 .get_or_insert_with(HashMap::new)
-                .insert(col, (img_row, img_col));
+                .insert(col, (img_row, img_col, 0));
         } else if let Some(coords) = &mut self.lines[row].placeholders {
             coords.remove(&col);
         }
