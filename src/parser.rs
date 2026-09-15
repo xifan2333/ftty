@@ -11,7 +11,7 @@ use crate::grid::{CellFlags, ClearMode, Grid};
 use crate::mouse::MouseState;
 
 const MAX_KEYBOARD_STACK_DEPTH: usize = 64;
-const SUPPORTED_KITTY_FLAGS: u8 = 1 | 2;
+const SUPPORTED_KITTY_FLAGS: u16 = (1 | 2) as u16;
 const MAX_HYPERLINKS: usize = 1024;
 
 /// Semantic shell integration state reported through OSC 133.
@@ -54,6 +54,8 @@ pub struct Terminal {
     pub focus_reporting: bool,
     /// Whether synchronized output (DECSET 2026) is currently enabled.
     pub synchronized_output: bool,
+    /// Generation counter incremented on each mode-2026 activation.
+    pub sync_output_gen: u64,
     /// Internal clipboard content accessible for OSC 52 queries and updates.
     pub clipboard_content: Option<String>,
     /// Pending clipboard updates received via OSC 52: Some(Some(text)) for set, Some(None) for clear.
@@ -98,6 +100,7 @@ impl Terminal {
             bracketed_paste: false,
             focus_reporting: false,
             synchronized_output: false,
+            sync_output_gen: 0,
             clipboard_content: None,
             pending_clipboard: None,
             current_dir: None,
@@ -619,7 +622,12 @@ impl Perform for Terminal {
                         }
                         1004 => self.focus_reporting = enabled,
                         2004 => self.bracketed_paste = enabled,
-                        2026 => self.synchronized_output = enabled,
+                        2026 => {
+                            if enabled && !self.synchronized_output {
+                                self.sync_output_gen = self.sync_output_gen.wrapping_add(1);
+                            }
+                            self.synchronized_output = enabled;
+                        }
                         2031 => {
                             self.report_color_scheme = enabled;
                             if enabled {
@@ -650,8 +658,8 @@ impl Perform for Terminal {
         if action == 'u' {
             if intermediates.contains(&b'>') && flat_params.len() <= 1 {
                 // CSI > flags u - Push Kitty keyboard flags
-                let flags =
-                    (flat_params.first().copied().unwrap_or(0) as u8) & SUPPORTED_KITTY_FLAGS;
+                let raw = flat_params.first().copied().unwrap_or(0);
+                let flags = (raw & SUPPORTED_KITTY_FLAGS) as u8;
                 if self.kitty_keyboard_stack.len() >= MAX_KEYBOARD_STACK_DEPTH {
                     self.kitty_keyboard_stack.remove(0);
                 }
@@ -661,8 +669,8 @@ impl Perform for Terminal {
                 return;
             } else if intermediates.contains(&b'=') || intermediates.contains(&b'>') {
                 // CSI = flags ; mode u  or  CSI > flags ; mode u
-                let flags =
-                    (flat_params.first().copied().unwrap_or(0) as u8) & SUPPORTED_KITTY_FLAGS;
+                let raw = flat_params.first().copied().unwrap_or(0);
+                let flags = (raw & SUPPORTED_KITTY_FLAGS) as u8;
                 let mode = flat_params.get(1).copied().unwrap_or(1) as u8;
                 match mode {
                     1 => self.kitty_keyboard_flags = flags,
@@ -874,6 +882,7 @@ impl Perform for Terminal {
                 self.report_window_size = false;
                 self.progress = None;
                 self.active_hyperlink = None;
+                self.grid.clear_all_hyperlinks();
                 self.hyperlink_pool.clear();
                 self.kitty_keyboard_flags = 0;
                 self.kitty_keyboard_stack.clear();
@@ -1303,9 +1312,18 @@ mod tests {
             assert_eq!(cell.hyperlink_id, None);
         }
 
-        // Full reset clears active hyperlink
+        // Full reset clears active hyperlink, pool and grid references
         term.advance_bytes(b"\x1b]8;;https://another.com\x07\x1bc");
         assert_eq!(term.active_hyperlink, None);
+        assert_eq!(term.grid.lines[0].cells[0].hyperlink_id, None);
+
+        // Test hyperlink clearing across alternate screen switch
+        let mut alt_term = Terminal::new(80, 24, 100);
+        alt_term.advance_bytes(b"\x1b]8;;https://foo.bar\x07Link\x1b]8;;\x07");
+        assert!(alt_term.grid.lines[0].cells[0].hyperlink_id.is_some());
+        // Enter alt screen, execute RIS, exit alt screen
+        alt_term.advance_bytes(b"\x1b[?1049h\x1bc\x1b[?1049l");
+        assert_eq!(alt_term.grid.lines[0].cells[0].hyperlink_id, None);
     }
 
     #[test]

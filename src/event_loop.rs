@@ -90,6 +90,7 @@ pub struct AppState {
     configure_pending: bool,
     render_error: Option<io::Error>,
     sync_output_start: Option<std::time::Instant>,
+    last_sync_gen: u64,
 }
 
 fn best_text_mime(mimes: &[String]) -> Option<&str> {
@@ -202,6 +203,7 @@ impl AppState {
             configure_pending: false,
             render_error: None,
             sync_output_start: None,
+            last_sync_gen: 0,
         })
     }
 
@@ -293,14 +295,14 @@ impl AppState {
     /// Writes bytes to the non-blocking PTY master with a bounded readiness loop to prevent truncation.
     pub fn write_pty_blocking(&mut self, mut bytes: &[u8]) {
         let start = std::time::Instant::now();
-        while !bytes.is_empty() && start.elapsed() < std::time::Duration::from_millis(500) {
+        while !bytes.is_empty() && start.elapsed() < std::time::Duration::from_millis(100) {
             match self.pty.write(bytes) {
                 Ok(0) => break,
                 Ok(written) => bytes = &bytes[written..],
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                     let mut fds = [PollFd::new(self.pty.as_fd(), PollFlags::POLLOUT)];
-                    if !poll(&mut fds, 100u16).is_ok_and(|ready| ready > 0) {
+                    if !poll(&mut fds, 20u16).is_ok_and(|ready| ready > 0) {
                         break;
                     }
                 }
@@ -366,14 +368,39 @@ impl AppState {
         // Fallback to internal clipboard buffer if offer not available
         let fallback_text = self.clipboard_text.clone();
         if let Some(text) = fallback_text {
-            if bracketed {
+            let payload = if bracketed {
                 let mut wrapped = Vec::with_capacity(text.len() + 12);
                 wrapped.extend_from_slice(b"\x1b[200~");
                 wrapped.extend_from_slice(text.as_bytes());
                 wrapped.extend_from_slice(b"\x1b[201~");
-                self.write_pty_blocking(&wrapped);
+                wrapped
             } else {
-                self.write_pty_blocking(text.as_bytes());
+                text.into_bytes()
+            };
+
+            if payload.len() <= 4096 {
+                self.write_pty_blocking(&payload);
+            } else if let Ok(pty_fd) = self.pty.try_clone_master() {
+                std::thread::spawn(move || {
+                    let mut to_write = &payload[..];
+                    let start = std::time::Instant::now();
+                    while !to_write.is_empty()
+                        && start.elapsed() < std::time::Duration::from_secs(5)
+                    {
+                        let mut fds = [PollFd::new(pty_fd.as_fd(), PollFlags::POLLOUT)];
+                        if !poll(&mut fds, 1000u16).is_ok_and(|ready| ready > 0) {
+                            break;
+                        }
+                        match nix::unistd::write(&pty_fd, to_write) {
+                            Ok(0) => break,
+                            Ok(written) => to_write = &to_write[written..],
+                            Err(Errno::EINTR | Errno::EAGAIN) => continue,
+                            Err(_) => break,
+                        }
+                    }
+                });
+            } else {
+                self.write_pty_blocking(&payload);
             }
         }
     }
@@ -902,7 +929,10 @@ impl Dispatch<WlKeyboard, ()> for AppState {
             } => {
                 state.keyboard.set_keymap_from_fd(fd, size as usize);
             }
-            wl_keyboard::Event::Enter { surface, .. } => {
+            wl_keyboard::Event::Enter {
+                serial, surface, ..
+            } => {
+                state.last_serial = serial;
                 if state.wayland.surface.as_ref() == Some(&surface) {
                     if state.terminal.focus_reporting {
                         let _ = state.pty.write_all(b"\x1b[I");
@@ -938,10 +968,12 @@ impl Dispatch<WlKeyboard, ()> for AppState {
                 }
             }
             wl_keyboard::Event::Key {
+                serial,
                 key,
                 state: WEnum::Value(key_state),
                 ..
             } => {
+                state.last_serial = serial;
                 let pressed = key_state == KeyState::Pressed;
                 if pressed
                     && let Some(action) =
@@ -960,12 +992,13 @@ impl Dispatch<WlKeyboard, ()> for AppState {
                 }
             }
             wl_keyboard::Event::Modifiers {
-                serial: _,
+                serial,
                 mods_depressed,
                 mods_latched,
                 mods_locked,
                 group,
             } => {
+                state.last_serial = serial;
                 state
                     .keyboard
                     .update_modifiers(mods_depressed, mods_latched, mods_locked, group);
@@ -1485,8 +1518,14 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
 
     // 4. Main Event Loop Tick
     while app_state.running {
+        let dispatch_timeout = if app_state.terminal.synchronized_output {
+            Some(std::time::Duration::from_millis(50))
+        } else {
+            None
+        };
+
         event_loop
-            .dispatch(None, &mut app_state)
+            .dispatch(dispatch_timeout, &mut app_state)
             .map_err(io::Error::other)?;
 
         if !app_state.running {
@@ -1501,6 +1540,11 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
                 app_state.running = false;
                 break;
             }
+        }
+
+        if app_state.terminal.sync_output_gen != app_state.last_sync_gen {
+            app_state.last_sync_gen = app_state.terminal.sync_output_gen;
+            app_state.sync_output_start = Some(std::time::Instant::now());
         }
 
         let mut sync_active = app_state.terminal.synchronized_output;
