@@ -926,7 +926,7 @@ impl Grid {
         }
     }
 
-    /// Clears hyperlink references from all visible lines and scrollback cells.
+    /// Clears hyperlink references from all visible lines, scrollback, and parked alternate lines.
     pub fn clear_all_hyperlinks(&mut self) {
         for line in &mut self.lines {
             for cell in &mut line.cells {
@@ -936,6 +936,13 @@ impl Grid {
         for line in &mut self.scrollback {
             for cell in &mut line.cells {
                 cell.hyperlink_id = None;
+            }
+        }
+        if let Some(alt) = &mut self.alt_lines {
+            for line in alt {
+                for cell in &mut line.cells {
+                    cell.hyperlink_id = None;
+                }
             }
         }
     }

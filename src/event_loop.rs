@@ -295,14 +295,14 @@ impl AppState {
     /// Writes bytes to the non-blocking PTY master with a bounded readiness loop to prevent truncation.
     pub fn write_pty_blocking(&mut self, mut bytes: &[u8]) {
         let start = std::time::Instant::now();
-        while !bytes.is_empty() && start.elapsed() < std::time::Duration::from_millis(3000) {
+        while !bytes.is_empty() && start.elapsed() < std::time::Duration::from_millis(100) {
             match self.pty.write(bytes) {
                 Ok(0) => break,
                 Ok(written) => bytes = &bytes[written..],
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                     let mut fds = [PollFd::new(self.pty.as_fd(), PollFlags::POLLOUT)];
-                    if !poll(&mut fds, 100u16).is_ok_and(|ready| ready > 0) {
+                    if !poll(&mut fds, 20u16).is_ok_and(|ready| ready > 0) {
                         break;
                     }
                 }
@@ -368,14 +368,39 @@ impl AppState {
         // Fallback to internal clipboard buffer if offer not available
         let fallback_text = self.clipboard_text.clone();
         if let Some(text) = fallback_text {
-            if bracketed {
+            let payload = if bracketed {
                 let mut wrapped = Vec::with_capacity(text.len() + 12);
                 wrapped.extend_from_slice(b"\x1b[200~");
                 wrapped.extend_from_slice(text.as_bytes());
                 wrapped.extend_from_slice(b"\x1b[201~");
-                self.write_pty_blocking(&wrapped);
+                wrapped
             } else {
-                self.write_pty_blocking(text.as_bytes());
+                text.into_bytes()
+            };
+
+            if payload.len() <= 4096 {
+                self.write_pty_blocking(&payload);
+            } else if let Ok(pty_fd) = self.pty.try_clone_master() {
+                std::thread::spawn(move || {
+                    let mut to_write = &payload[..];
+                    let start = std::time::Instant::now();
+                    while !to_write.is_empty()
+                        && start.elapsed() < std::time::Duration::from_secs(5)
+                    {
+                        let mut fds = [PollFd::new(pty_fd.as_fd(), PollFlags::POLLOUT)];
+                        if !poll(&mut fds, 1000u16).is_ok_and(|ready| ready > 0) {
+                            break;
+                        }
+                        match nix::unistd::write(&pty_fd, to_write) {
+                            Ok(0) => break,
+                            Ok(written) => to_write = &to_write[written..],
+                            Err(Errno::EINTR | Errno::EAGAIN) => continue,
+                            Err(_) => break,
+                        }
+                    }
+                });
+            } else {
+                self.write_pty_blocking(&payload);
             }
         }
     }

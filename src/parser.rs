@@ -1316,6 +1316,14 @@ mod tests {
         term.advance_bytes(b"\x1b]8;;https://another.com\x07\x1bc");
         assert_eq!(term.active_hyperlink, None);
         assert_eq!(term.grid.lines[0].cells[0].hyperlink_id, None);
+
+        // Test hyperlink clearing across alternate screen switch
+        let mut alt_term = Terminal::new(80, 24, 100);
+        alt_term.advance_bytes(b"\x1b]8;;https://foo.bar\x07Link\x1b]8;;\x07");
+        assert!(alt_term.grid.lines[0].cells[0].hyperlink_id.is_some());
+        // Enter alt screen, execute RIS, exit alt screen
+        alt_term.advance_bytes(b"\x1b[?1049h\x1bc\x1b[?1049l");
+        assert_eq!(alt_term.grid.lines[0].cells[0].hyperlink_id, None);
     }
 
     #[test]
