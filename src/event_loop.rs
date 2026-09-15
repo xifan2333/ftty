@@ -259,13 +259,9 @@ impl AppState {
         true
     }
 
-    /// Copies the currently selected text to the Wayland clipboard and internal buffer.
-    pub fn copy_selection(&mut self, qh: Option<&QueueHandle<Self>>) {
-        let text = self.selection.extract_text(&self.terminal.grid);
-        if text.is_empty() {
-            return;
-        }
-
+    /// Sets the clipboard content internally and offers it through the Wayland data device.
+    pub fn set_clipboard_text(&mut self, text: String, qh: Option<&QueueHandle<Self>>) {
+        self.terminal.set_clipboard_content(Some(text.clone()));
         self.clipboard_text = Some(text);
 
         if let (Some(qh), Some(manager), Some(device)) = (
@@ -280,6 +276,16 @@ impl AppState {
             device.set_selection(Some(&source), self.last_serial);
             self.wayland.data_source = Some(source);
         }
+    }
+
+    /// Copies the currently selected text to the Wayland clipboard and internal buffer.
+    pub fn copy_selection(&mut self, qh: Option<&QueueHandle<Self>>) {
+        let text = self.selection.extract_text(&self.terminal.grid);
+        if text.is_empty() {
+            return;
+        }
+
+        self.set_clipboard_text(text, qh);
     }
 
     /// Writes bytes to the non-blocking PTY master with a bounded readiness loop to prevent truncation.
@@ -303,6 +309,7 @@ impl AppState {
 
     /// Pastes text from the Wayland clipboard into the terminal PTY.
     pub fn paste_clipboard(&mut self, conn: Option<&Connection>) {
+        let bracketed = self.terminal.bracketed_paste;
         if let Some(offer_data) = &self.wayland.current_offer {
             if let Some(mime) = best_text_mime(&offer_data.mime_types)
                 && let Ok((read_fd, write_fd)) = nix::unistd::pipe2(OFlag::O_CLOEXEC)
@@ -320,8 +327,17 @@ impl AppState {
                         let mut reader = std::fs::File::from(read_fd).take(10 * 1024 * 1024);
                         let mut bytes = Vec::new();
                         if reader.read_to_end(&mut bytes).is_ok() && !bytes.is_empty() {
+                            let payload = if bracketed {
+                                let mut wrapped = Vec::with_capacity(bytes.len() + 12);
+                                wrapped.extend_from_slice(b"\x1b[200~");
+                                wrapped.extend_from_slice(&bytes);
+                                wrapped.extend_from_slice(b"\x1b[201~");
+                                wrapped
+                            } else {
+                                bytes
+                            };
                             // PTY master is nonblocking: write with poll readiness loop to avoid truncation
-                            let mut to_write = &bytes[..];
+                            let mut to_write = &payload[..];
                             let start = std::time::Instant::now();
                             while !to_write.is_empty()
                                 && start.elapsed() < std::time::Duration::from_secs(5)
@@ -347,7 +363,15 @@ impl AppState {
 
         // Fallback to internal clipboard buffer if offer not available
         if let Some(text) = &self.clipboard_text {
-            let _ = self.pty.write_all(text.as_bytes());
+            if bracketed {
+                let mut wrapped = Vec::with_capacity(text.len() + 12);
+                wrapped.extend_from_slice(b"\x1b[200~");
+                wrapped.extend_from_slice(text.as_bytes());
+                wrapped.extend_from_slice(b"\x1b[201~");
+                let _ = self.pty.write_all(&wrapped);
+            } else {
+                let _ = self.pty.write_all(text.as_bytes());
+            }
         }
     }
 
@@ -877,6 +901,9 @@ impl Dispatch<WlKeyboard, ()> for AppState {
             }
             wl_keyboard::Event::Enter { surface, .. } => {
                 if state.wayland.surface.as_ref() == Some(&surface) {
+                    if state.terminal.focus_reporting {
+                        let _ = state.pty.write_all(b"\x1b[I");
+                    }
                     state.ime.active = true;
                     if let Some(text_input) = &state.wayland.text_input {
                         text_input.enable();
@@ -896,6 +923,9 @@ impl Dispatch<WlKeyboard, ()> for AppState {
             }
             wl_keyboard::Event::Leave { surface, .. } => {
                 if state.wayland.surface.as_ref() == Some(&surface) {
+                    if state.terminal.focus_reporting {
+                        let _ = state.pty.write_all(b"\x1b[O");
+                    }
                     state.ime.clear();
                     if let Some(text_input) = &state.wayland.text_input {
                         text_input.disable();
@@ -906,17 +936,24 @@ impl Dispatch<WlKeyboard, ()> for AppState {
             }
             wl_keyboard::Event::Key {
                 key,
-                state: WEnum::Value(KeyState::Pressed),
+                state: WEnum::Value(key_state),
                 ..
             } => {
-                if let Some(action) = state.keyboard.check_action(key, &state.config.keybindings) {
+                let pressed = key_state == KeyState::Pressed;
+                if pressed
+                    && let Some(action) =
+                        state.keyboard.check_action(key, &state.config.keybindings)
+                {
                     state.handle_key_action(action, Some(qh), Some(_conn));
-                } else if let Some(bytes) = state.keyboard.handle_key(key) {
-                    if state.config.auto_scroll() && !state.terminal.grid.is_alt_screen() {
+                } else if let Some(bytes) = state.keyboard.handle_key_event(key, pressed, false) {
+                    if pressed && state.config.auto_scroll() && !state.terminal.grid.is_alt_screen()
+                    {
                         state.terminal.grid.scroll_viewport_bottom();
                     }
                     let _ = state.pty.write_all(&bytes);
-                    state.update_ime_cursor_area();
+                    if pressed {
+                        state.update_ime_cursor_area();
+                    }
                 }
             }
             wl_keyboard::Event::Modifiers {
@@ -1007,6 +1044,23 @@ impl Dispatch<WlPointer, ()> for AppState {
                 }
                 let (line, screen_row, col) =
                     state.cell_at_pointer(state.mouse_pos[0], state.mouse_pos[1]);
+
+                if state.keyboard.modifiers().ctrl {
+                    let cell = state.terminal.grid.visible_line(screen_row).cells.get(col);
+                    if let Some(cell) = cell
+                        && let Some(id) = cell.hyperlink_id
+                        && let Some(url) = state.terminal.hyperlink_url(id)
+                    {
+                        let url_owned = url.to_string();
+                        std::thread::spawn(move || {
+                            let _ = std::process::Command::new("xdg-open")
+                                .arg(&url_owned)
+                                .spawn();
+                        });
+                        return;
+                    }
+                }
+
                 let same_cell = state.last_click_cell == Some((line, col));
                 if same_cell && time.saturating_sub(state.last_click_time) < 350 {
                     state.click_count = (state.click_count % 3) + 1;
@@ -1348,6 +1402,14 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
                             for response in state.terminal.take_responses() {
                                 state.write_pty_blocking(&response);
                             }
+                            if let Some(text) = state.terminal.take_pending_clipboard() {
+                                state.set_clipboard_text(text, Some(&qh));
+                            }
+                            if let Some((flags, mode)) =
+                                state.terminal.take_pending_kitty_keyboard()
+                            {
+                                state.keyboard.set_kitty_mode(flags, mode);
+                            }
                             if state.config.auto_scroll() && !state.terminal.grid.is_alt_screen() {
                                 state.terminal.grid.scroll_viewport_bottom();
                             }
@@ -1433,7 +1495,9 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
             }
         }
 
+        let sync_active = app_state.terminal.synchronized_output;
         if app_state.needs_redraw
+            && !sync_active
             && app_state.frame_callback.is_none()
             && let Some(renderer) = &mut app_state.renderer
         {

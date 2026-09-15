@@ -130,11 +130,23 @@ fn sym_matches(pressed: xkb::Keysym, target: xkb::Keysym) -> bool {
     }
 }
 
+/// Flags controlling the Kitty keyboard protocol progressive enhancement.
+pub struct KittyKeyboardFlags;
+impl KittyKeyboardFlags {
+    pub const DISAMBIGUATE: u8 = 1;
+    pub const REPORT_EVENT_TYPES: u8 = 2;
+    pub const REPORT_ALTERNATE_KEYS: u8 = 4;
+    pub const REPORT_ALL_KEYS_AS_ESC: u8 = 8;
+    pub const REPORT_ASSOCIATED_TEXT: u8 = 16;
+}
+
 /// Handles key events and produces VT escape sequences or UTF-8 byte streams.
 pub struct KeyboardHandler {
     context: Context,
     keymap: Option<Keymap>,
     state: Option<State>,
+    pub kitty_flags: u8,
+    pub kitty_stack: Vec<u8>,
 }
 
 impl Default for KeyboardHandler {
@@ -159,6 +171,8 @@ impl KeyboardHandler {
             context,
             keymap,
             state,
+            kitty_flags: 0,
+            kitty_stack: Vec::new(),
         }
     }
 
@@ -200,6 +214,178 @@ impl KeyboardHandler {
         if let Some(state) = &mut self.state {
             state.update_mask(depressed, latched, locked, 0, 0, group);
         }
+    }
+
+    /// Sets Kitty keyboard mode flags according to mode: 1 (replace), 2 (union), 3 (difference).
+    pub fn set_kitty_mode(&mut self, flags: u8, mode: u8) {
+        match mode {
+            1 => self.kitty_flags = flags,
+            2 => self.kitty_flags |= flags,
+            3 => self.kitty_flags &= !flags,
+            _ => {}
+        }
+    }
+
+    /// Pushes current flags and sets new flags.
+    pub fn push_kitty_flags(&mut self, flags: u8) {
+        self.kitty_stack.push(self.kitty_flags);
+        self.kitty_flags = flags;
+    }
+
+    /// Pops `count` frames from the kitty keyboard stack.
+    pub fn pop_kitty_flags(&mut self, count: usize) {
+        let n = count.max(1);
+        for _ in 0..n {
+            if let Some(f) = self.kitty_stack.pop() {
+                self.kitty_flags = f;
+            }
+        }
+    }
+
+    /// Translates key press/release events with Kitty keyboard protocol progressive enhancement.
+    pub fn handle_key_event(
+        &mut self,
+        raw_keycode: u32,
+        pressed: bool,
+        is_repeat: bool,
+    ) -> Option<Vec<u8>> {
+        let state = self.state.as_ref()?;
+        let keycode = Keycode::new(raw_keycode + 8);
+        let keysym = state.key_get_one_sym(keycode);
+        let sym = keysym.raw();
+
+        let ctrl = state.mod_name_is_active("Control", xkb::STATE_MODS_EFFECTIVE);
+        let alt = state.mod_name_is_active("Mod1", xkb::STATE_MODS_EFFECTIVE);
+        let shift = state.mod_name_is_active("Shift", xkb::STATE_MODS_EFFECTIVE);
+        let logo = state.mod_name_is_active("Mod4", xkb::STATE_MODS_EFFECTIVE);
+
+        let event_type = if !pressed {
+            3 // Release
+        } else if is_repeat {
+            2 // Repeat
+        } else {
+            1 // Press
+        };
+
+        if !pressed && (self.kitty_flags & KittyKeyboardFlags::REPORT_EVENT_TYPES == 0) {
+            return None;
+        }
+
+        if self.kitty_flags > 0
+            && let Some(bytes) = self.encode_kitty_key(
+                sym,
+                keycode,
+                Modifiers {
+                    shift,
+                    alt,
+                    ctrl,
+                    logo,
+                },
+                event_type,
+            )
+        {
+            return Some(bytes);
+        }
+
+        if pressed {
+            self.handle_key(raw_keycode)
+        } else {
+            None
+        }
+    }
+
+    fn encode_kitty_key(
+        &self,
+        sym: u32,
+        keycode: Keycode,
+        mods: Modifiers,
+        event_type: u8,
+    ) -> Option<Vec<u8>> {
+        let codepoint = match sym {
+            keysyms::KEY_Return | keysyms::KEY_KP_Enter => 13,
+            keysyms::KEY_Tab | keysyms::KEY_ISO_Left_Tab => 9,
+            keysyms::KEY_BackSpace => 127,
+            keysyms::KEY_Escape => 27,
+            keysyms::KEY_Insert => 57358,
+            keysyms::KEY_Delete => 57359,
+            keysyms::KEY_Left => 57376,
+            keysyms::KEY_Right => 57377,
+            keysyms::KEY_Up => 57378,
+            keysyms::KEY_Down => 57379,
+            keysyms::KEY_Page_Up => 57380,
+            keysyms::KEY_Page_Down => 57381,
+            keysyms::KEY_Home => 57382,
+            keysyms::KEY_End => 57383,
+            keysyms::KEY_F1 => 57384,
+            keysyms::KEY_F2 => 57385,
+            keysyms::KEY_F3 => 57386,
+            keysyms::KEY_F4 => 57387,
+            keysyms::KEY_F5 => 57388,
+            keysyms::KEY_F6 => 57389,
+            keysyms::KEY_F7 => 57390,
+            keysyms::KEY_F8 => 57391,
+            keysyms::KEY_F9 => 57392,
+            keysyms::KEY_F10 => 57393,
+            keysyms::KEY_F11 => 57394,
+            keysyms::KEY_F12 => 57395,
+            _ => {
+                let state = self.state.as_ref()?;
+                let utf8 = state.key_get_utf8(keycode);
+                if let Some(ch) = utf8.chars().next() {
+                    ch as u32
+                } else if sym < 0x10000 {
+                    sym
+                } else {
+                    return None;
+                }
+            }
+        };
+
+        let has_modifiers = mods.ctrl || mods.alt || mods.shift || mods.logo;
+        let is_special_disambiguated = matches!(codepoint, 13 | 9 | 127 | 27 | 57358..=57395);
+
+        let report_types = self.kitty_flags & KittyKeyboardFlags::REPORT_EVENT_TYPES != 0;
+        let disambiguate = self.kitty_flags & KittyKeyboardFlags::DISAMBIGUATE != 0;
+        let all_keys = self.kitty_flags & KittyKeyboardFlags::REPORT_ALL_KEYS_AS_ESC != 0;
+
+        let should_encode = (report_types && event_type != 1)
+            || all_keys
+            || (disambiguate && (has_modifiers || is_special_disambiguated))
+            || (has_modifiers && (mods.ctrl || mods.alt || mods.logo));
+
+        if !should_encode {
+            return None;
+        }
+
+        let mut mod_val = 1;
+        if mods.shift {
+            mod_val += 1;
+        }
+        if mods.alt {
+            mod_val += 2;
+        }
+        if mods.ctrl {
+            mod_val += 4;
+        }
+        if mods.logo {
+            mod_val += 8;
+        }
+
+        let seq = if report_types {
+            if mod_val == 1 && event_type == 1 {
+                format!("\x1b[{codepoint}u")
+            } else if event_type == 1 {
+                format!("\x1b[{codepoint};{mod_val}u")
+            } else {
+                format!("\x1b[{codepoint};{mod_val}:{event_type}u")
+            }
+        } else if mod_val == 1 {
+            format!("\x1b[{codepoint}u")
+        } else {
+            format!("\x1b[{codepoint};{mod_val}u")
+        };
+
+        Some(seq.into_bytes())
     }
 
     /// Returns the currently effective modifier state.
@@ -516,5 +702,45 @@ mod tests {
 
         // With no modifiers active, PageUp (evdev 104) is NOT an action
         assert!(handler.check_action(104, &config).is_none());
+    }
+
+    #[test]
+    fn test_kitty_keyboard_encoding() {
+        let mut handler = KeyboardHandler::new();
+
+        // Default flags = 0: ordinary VT output
+        let enter = handler.handle_key_event(28, true, false);
+        assert_eq!(enter, Some(b"\r".to_vec()));
+
+        // Release event ignored when REPORT_EVENT_TYPES is off
+        let release = handler.handle_key_event(28, false, false);
+        assert_eq!(release, None);
+
+        // Enable DISAMBIGUATE (1)
+        handler.set_kitty_mode(KittyKeyboardFlags::DISAMBIGUATE, 1);
+        let disambiguated_enter = handler.handle_key_event(28, true, false);
+        assert_eq!(disambiguated_enter, Some(b"\x1b[13u".to_vec()));
+
+        // Enable REPORT_EVENT_TYPES (2) via union (mode 2)
+        handler.set_kitty_mode(KittyKeyboardFlags::REPORT_EVENT_TYPES, 2);
+        assert_eq!(
+            handler.kitty_flags,
+            KittyKeyboardFlags::DISAMBIGUATE | KittyKeyboardFlags::REPORT_EVENT_TYPES
+        );
+
+        let press_enter = handler.handle_key_event(28, true, false);
+        assert_eq!(press_enter, Some(b"\x1b[13u".to_vec()));
+
+        let release_enter = handler.handle_key_event(28, false, false);
+        assert_eq!(release_enter, Some(b"\x1b[13;1:3u".to_vec()));
+
+        // Push and Pop stack
+        handler.push_kitty_flags(0);
+        assert_eq!(handler.kitty_flags, 0);
+        handler.pop_kitty_flags(1);
+        assert_eq!(
+            handler.kitty_flags,
+            KittyKeyboardFlags::DISAMBIGUATE | KittyKeyboardFlags::REPORT_EVENT_TYPES
+        );
     }
 }

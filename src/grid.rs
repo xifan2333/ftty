@@ -19,7 +19,19 @@ bitflags::bitflags! {
         const STRIKETHROUGH = 1 << 6;
         const WIDE_CHAR = 1 << 7;
         const WIDE_CHAR_SPACER = 1 << 8;
+        const UNDERLINE_DOUBLE = 1 << 9;
+        const UNDERLINE_CURLY = 1 << 10;
+        const UNDERLINE_DOTTED = 1 << 11;
+        const UNDERLINE_DASHED = 1 << 12;
     }
+}
+
+impl CellFlags {
+    pub const ALL_UNDERLINES: CellFlags = Self::UNDERLINE
+        .union(Self::UNDERLINE_DOUBLE)
+        .union(Self::UNDERLINE_CURLY)
+        .union(Self::UNDERLINE_DOTTED)
+        .union(Self::UNDERLINE_DASHED);
 }
 
 /// A single character cell within the terminal grid.
@@ -28,7 +40,9 @@ pub struct Cell {
     pub c: char,
     pub fg: Color,
     pub bg: Color,
+    pub underline_color: Color,
     pub flags: CellFlags,
+    pub hyperlink_id: Option<u32>,
 }
 
 impl Default for Cell {
@@ -37,7 +51,9 @@ impl Default for Cell {
             c: ' ',
             fg: Color::DefaultForeground,
             bg: Color::DefaultBackground,
+            underline_color: Color::DefaultForeground,
             flags: CellFlags::empty(),
+            hyperlink_id: None,
         }
     }
 }
@@ -937,6 +953,19 @@ impl Grid {
 
     /// Writes a character with the given styling attributes at the current cursor position.
     pub fn write_char(&mut self, c: char, fg: Color, bg: Color, flags: CellFlags) {
+        self.write_char_styled(c, fg, bg, flags, Color::DefaultForeground, None);
+    }
+
+    /// Writes a character with extended styling attributes including underline color and hyperlink id.
+    pub fn write_char_styled(
+        &mut self,
+        c: char,
+        fg: Color,
+        bg: Color,
+        flags: CellFlags,
+        underline_color: Color,
+        hyperlink_id: Option<u32>,
+    ) {
         let width = c.width().unwrap_or(1);
         if width == 0 {
             // Combining character: decode Kitty Unicode placeholder diacritics
@@ -983,7 +1012,9 @@ impl Grid {
             c,
             fg,
             bg,
+            underline_color,
             flags: cell_flags,
+            hyperlink_id,
         };
 
         if c == KITTY_PLACEHOLDER {
@@ -1009,7 +1040,9 @@ impl Grid {
                 c: ' ',
                 fg,
                 bg,
+                underline_color,
                 flags: flags | CellFlags::WIDE_CHAR_SPACER,
+                hyperlink_id,
             };
         }
 
