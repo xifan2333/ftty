@@ -148,8 +148,20 @@ pub fn encode_mouse_event(
             let terminator = if pressed { 'M' } else { 'm' };
             Some(format!("\x1b[<{code};{x};{y}{terminator}").into_bytes())
         }
-        MouseEncoding::Urxvt => Some(format!("\x1b[{};{x};{y}M", code + 32).into_bytes()),
+        MouseEncoding::Urxvt => {
+            let code = if pressed || motion {
+                code
+            } else {
+                (code & !3) | 3
+            };
+            Some(format!("\x1b[{};{x};{y}M", code + 32).into_bytes())
+        }
         MouseEncoding::Utf8 => {
+            let code = if pressed || motion {
+                code
+            } else {
+                (code & !3) | 3
+            };
             let mut out = b"\x1b[M".to_vec();
             for value in [code + 32, x + 32, y + 32] {
                 push_utf8(&mut out, value);
@@ -158,7 +170,11 @@ pub fn encode_mouse_event(
         }
         MouseEncoding::X10 => {
             // The legacy encoding has no way to say which button was released.
-            let code = if pressed || motion { code } else { 3 };
+            let code = if pressed || motion {
+                code
+            } else {
+                (code & !3) | 3
+            };
             let values = [code + 32, x + 32, y + 32];
             if values.iter().any(|value| *value > u16::from(u8::MAX)) {
                 return None;
@@ -288,6 +304,27 @@ mod tests {
         assert_eq!(
             encode_mouse_event(MouseEncoding::Urxvt, 0, 4, 2, true, false, none),
             Some(b"\x1b[32;5;3M".to_vec())
+        );
+        // Urxvt and Utf8 normalize release button code to 3 while preserving modifiers.
+        assert_eq!(
+            encode_mouse_event(MouseEncoding::Urxvt, 1, 4, 2, false, false, none),
+            Some(b"\x1b[35;5;3M".to_vec())
+        );
+        let shift = MouseModifiers {
+            shift: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            encode_mouse_event(MouseEncoding::Urxvt, 1, 4, 2, false, false, shift),
+            Some(b"\x1b[39;5;3M".to_vec())
+        );
+        assert_eq!(
+            encode_mouse_event(MouseEncoding::Utf8, 1, 0, 0, false, false, none),
+            Some(b"\x1b[M#!!".to_vec())
+        );
+        assert_eq!(
+            encode_mouse_event(MouseEncoding::Utf8, 1, 0, 0, false, false, shift),
+            Some(b"\x1b[M'!!".to_vec())
         );
     }
 }
