@@ -533,29 +533,33 @@ impl Grid {
 
         // Cap stored images to 256 by removing unplaced images
         if self.images.len() > 256 {
-            let mut active_ids: std::collections::HashSet<u32> =
-                self.placements.iter().map(|p| p.image_id).collect();
-            // Retain only virtual image IDs that are referenced on the current screen
-            for row in &self.lines {
+            let mut active_ids: std::collections::HashSet<u32> = self
+                .placements
+                .iter()
+                .chain(self.alt_placements.iter())
+                .map(|p| p.image_id)
+                .collect();
+            // Virtual image IDs stay alive while a placeholder on either screen references them.
+            for row in self.lines.iter().chain(self.alt_lines.iter().flatten()) {
                 for cell in &row.cells {
-                    if cell.c == KITTY_PLACEHOLDER {
-                        let id_low24 = match cell.fg {
-                            Color::Rgb(r, g, b) => {
-                                ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
-                            }
-                            Color::Indexed(idx) => idx as u32,
-                            _ => 0,
-                        } & 0x00FF_FFFF;
-                        if id_low24 != 0 {
-                            active_ids.insert(id_low24);
-                            if let Some(&real_id) = self
-                                .virtual_placements
-                                .keys()
-                                .find(|&&k| (k & 0x00FF_FFFF) == id_low24)
-                            {
-                                active_ids.insert(real_id);
-                            }
-                        }
+                    if cell.c != KITTY_PLACEHOLDER {
+                        continue;
+                    }
+                    let id_low24 = match cell.fg {
+                        Color::Rgb(r, g, b) => ((r as u32) << 16) | ((g as u32) << 8) | (b as u32),
+                        Color::Indexed(idx) => idx as u32,
+                        _ => 0,
+                    } & 0x00FF_FFFF;
+                    if id_low24 == 0 {
+                        continue;
+                    }
+                    active_ids.insert(id_low24);
+                    if let Some(&real_id) = self
+                        .virtual_placements
+                        .keys()
+                        .find(|&&k| (k & 0x00FF_FFFF) == id_low24)
+                    {
+                        active_ids.insert(real_id);
                     }
                 }
             }
@@ -706,10 +710,20 @@ impl Grid {
         self.rows = new_rows;
         self.scroll_region_top = 0;
         self.scroll_region_bottom = new_rows.saturating_sub(1);
-        self.cursor.row = self.cursor.row.min(new_rows.saturating_sub(1));
-        self.cursor.col = self.cursor.col.min(new_cols.saturating_sub(1));
-        self.saved_cursor.row = self.saved_cursor.row.min(new_rows.saturating_sub(1));
-        self.saved_cursor.col = self.saved_cursor.col.min(new_cols.saturating_sub(1));
+        let max_row = new_rows.saturating_sub(1);
+        let max_col = new_cols.saturating_sub(1);
+        let clamp = |cursor: &mut Cursor| {
+            cursor.row = cursor.row.min(max_row);
+            cursor.col = cursor.col.min(max_col);
+        };
+        clamp(&mut self.cursor);
+        clamp(&mut self.saved_cursor);
+        if let Some(cursor) = self.alt_cursor.as_mut() {
+            clamp(cursor);
+        }
+        if let Some(cursor) = self.alt_saved_cursor.as_mut() {
+            clamp(cursor);
+        }
         self.viewport_offset = self.viewport_offset.min(self.scrollback.len());
     }
 
@@ -880,14 +894,18 @@ impl Grid {
                 let sb_len = self.scrollback.len();
                 self.scrollback.clear();
                 self.viewport_offset = 0;
-                self.placements.retain_mut(|p| {
-                    if p.line < sb_len {
-                        false
-                    } else {
-                        p.line -= sb_len;
-                        true
-                    }
-                });
+                // Both screens share the scrollback base, so the hidden primary's placements need
+                // the same rebase as the active screen's.
+                for placements in [&mut self.placements, &mut self.alt_placements] {
+                    placements.retain_mut(|p| {
+                        if p.line < sb_len {
+                            false
+                        } else {
+                            p.line -= sb_len;
+                            true
+                        }
+                    });
+                }
             }
         }
     }
@@ -1560,6 +1578,95 @@ mod tests {
         grid.exit_alt_screen();
         assert_eq!(grid.placements.len(), 1);
         assert_eq!(grid.placements[0].line, 2);
+    }
+
+    #[test]
+    fn hidden_primary_images_survive_cache_eviction() {
+        let mut grid = Grid::new(10, 4, 100);
+        let image = ImageData {
+            id: 42,
+            width: 1,
+            height: 1,
+            rgba: vec![0, 0, 0, 0],
+        };
+        grid.add_image(image);
+        grid.add_placement(ImagePlacement {
+            image_id: 42,
+            placement_id: 0,
+            line: 1,
+            col: 0,
+            cols: 1,
+            rows: 1,
+            offset_x: 0,
+            offset_y: 0,
+            z_index: 0,
+        });
+
+        // The primary's placement is parked while the alternate screen churns the cache.
+        grid.enter_alt_screen();
+        for id in 1000..1300 {
+            grid.add_image(ImageData {
+                id,
+                width: 1,
+                height: 1,
+                rgba: vec![0, 0, 0, 0],
+            });
+        }
+        grid.exit_alt_screen();
+
+        assert!(
+            grid.images.contains_key(&42),
+            "an image referenced by the hidden primary must not be evicted"
+        );
+        assert_eq!(grid.placements.len(), 1);
+    }
+
+    #[test]
+    fn clear_saved_history_rebases_hidden_primary_placements() {
+        let mut grid = Grid::new(10, 2, 10);
+        fill_rows(&mut grid, 4);
+        assert_eq!(grid.scrollback.len(), 2);
+
+        grid.add_placement(ImagePlacement {
+            image_id: 5,
+            placement_id: 0,
+            line: grid.scrollback.len() + 1,
+            col: 0,
+            cols: 1,
+            rows: 1,
+            offset_x: 0,
+            offset_y: 0,
+            z_index: 0,
+        });
+
+        grid.enter_alt_screen();
+        grid.clear_screen(ClearMode::Saved);
+        grid.exit_alt_screen();
+
+        assert_eq!(grid.scrollback.len(), 0);
+        assert_eq!(
+            grid.placements[0].line, 1,
+            "the parked placement follows the cleared history"
+        );
+    }
+
+    #[test]
+    fn hidden_saved_cursor_is_clamped_on_shrink() {
+        let mut grid = Grid::new(10, 6, 100);
+        grid.cursor.row = 1;
+        grid.saved_cursor.row = 5;
+        grid.enter_alt_screen();
+
+        // Shrinking drops the hidden primary's bottom rows, so row 5 no longer exists.
+        grid.resize(10, 2);
+        // Growing back must not resurrect the discarded coordinate.
+        grid.resize(10, 6);
+        grid.exit_alt_screen();
+
+        assert_eq!(
+            grid.saved_cursor.row, 1,
+            "a restored saved cursor must be clamped to the surviving screen"
+        );
     }
 
     #[test]
