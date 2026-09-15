@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
 language: "zh-CN"
-tone_instructions: "Use concise, high-signal, and rigorous engineering language adhering to Suckless and Unix philosophies."
+tone_instructions: "Use concise, high-signal, and rigorous engineering language adhering to minimalist and Unix philosophies."
 reviews:
   profile: "chill"
   auto_review:

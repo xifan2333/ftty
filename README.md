@@ -8,13 +8,13 @@
   <a href="https://www.gnu.org/licenses/gpl-3.0"><img src="https://img.shields.io/badge/License-GPL--3.0-blue?style=flat-square" alt="License" /></a>
 </p>
 
-`ftty` is an ultra-lightweight, Suckless Wayland terminal emulator built with Rust. It provides first-class support for the **Kitty Graphics Protocol** and **Fcitx5 Chinese IME** while remaining strictly obedient to Unix and Suckless philosophies.
+`ftty` is an ultra-lightweight, minimalist Wayland terminal emulator built with Rust. It provides first-class support for the **Kitty Graphics Protocol** and **Fcitx5 Chinese IME** while remaining strictly obedient to the Unix philosophy of doing one thing well.
 
 ---
 
 ## 1. Core Principles
 
-- **Suckless Frugality**:
+- **Minimalist & Bloat-Free**:
   - No tabs, no split panes, no multiplexing. Tiling belongs to the window manager (`xwm` / `xrwm`), session management belongs to `herdr` or `tmux`.
   - No bloated GUI frameworks (no GPUI, no GTK, no Qt). Direct Wayland client communication.
   - Sub-3MB stripped binary, sub-15MB idle memory, and sub-3ms cold boot latency.

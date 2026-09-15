@@ -1,4 +1,4 @@
-//! ftty - Ultra-lightweight, Suckless Wayland terminal emulator with native Kitty graphics protocol
+//! ftty - Ultra-lightweight, minimalist Wayland terminal emulator with native Kitty graphics protocol
 
 use std::path::PathBuf;
 
@@ -6,7 +6,7 @@ use ftty::{AppState, Config, Pty, Terminal, run_event_loop};
 
 fn print_help() {
     println!(
-        "ftty v{} — Ultra-lightweight Suckless Wayland terminal emulator\n\n\
+        "ftty v{} — Ultra-lightweight minimalist Wayland terminal emulator\n\n\
         Usage: ftty [options] [-e <command> [args...]]\n\n\
         Options:\n  \
           -c, --config <path>    Path to configuration file\n  \
@@ -92,7 +92,7 @@ fn main() {
 
     if !has_wayland {
         println!(
-            "ftty v{} - Suckless Wayland Terminal Emulator",
+            "ftty v{} - Minimalist Wayland Terminal Emulator",
             env!("CARGO_PKG_VERSION")
         );
         println!("No active Wayland compositor detected. Core initialized successfully.");
