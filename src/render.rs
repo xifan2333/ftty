@@ -615,10 +615,22 @@ impl Renderer {
         let pad_x = f32::from(options.padding[0]);
         let pad_y = f32::from(options.padding[1]);
 
-        let mut boxes: HashMap<u32, (usize, usize, usize, usize)> = HashMap::new();
+        struct RectBox {
+            id: u32,
+            col_start: usize,
+            col_end: usize,
+            row_start: usize,
+            row_end: usize,
+        }
+
+        let mut completed_boxes: Vec<RectBox> = Vec::new();
+        let mut active_boxes: Vec<RectBox> = Vec::new();
 
         for row in 0..grid.rows {
             let line = grid.visible_line(row);
+            let mut row_segments: Vec<(u32, usize, usize)> = Vec::new();
+            let mut current_run: Option<(u32, usize, usize)> = None;
+
             for (col, cell) in line.cells.iter().enumerate() {
                 if cell.c == KITTY_PLACEHOLDER {
                     let id_low24 = placeholder_image_id(cell.fg) & 0x00FF_FFFF;
@@ -633,29 +645,67 @@ impl Renderer {
                         };
 
                         if let Some(matched_id) = real_id {
-                            boxes
-                                .entry(matched_id)
-                                .and_modify(|b| {
-                                    b.0 = b.0.min(col);
-                                    b.1 = b.1.min(row);
-                                    b.2 = b.2.max(col);
-                                    b.3 = b.3.max(row);
-                                })
-                                .or_insert((col, row, col, row));
+                            match current_run {
+                                Some((cur_id, start, end))
+                                    if cur_id == matched_id && end + 1 == col =>
+                                {
+                                    current_run = Some((cur_id, start, col));
+                                }
+                                Some(prev) => {
+                                    row_segments.push(prev);
+                                    current_run = Some((matched_id, col, col));
+                                }
+                                None => {
+                                    current_run = Some((matched_id, col, col));
+                                }
+                            }
+                            continue;
                         }
                     }
                 }
+                if let Some(prev) = current_run.take() {
+                    row_segments.push(prev);
+                }
             }
-        }
+            if let Some(prev) = current_run {
+                row_segments.push(prev);
+            }
 
-        for (id, (min_col, min_row, max_col, max_row)) in boxes {
-            let Some(&(tex, img_w, img_h, _)) = self.image_textures.get(&id) else {
+            // Merge matching row segments with active boxes from the previous row
+            let mut next_active: Vec<RectBox> = Vec::new();
+            for (id, col_start, col_end) in row_segments {
+                if let Some(pos) = active_boxes.iter().position(|b| {
+                    b.id == id
+                        && b.col_start == col_start
+                        && b.col_end == col_end
+                        && b.row_end + 1 == row
+                }) {
+                    let mut b = active_boxes.swap_remove(pos);
+                    b.row_end = row;
+                    next_active.push(b);
+                } else {
+                    next_active.push(RectBox {
+                        id,
+                        col_start,
+                        col_end,
+                        row_start: row,
+                        row_end: row,
+                    });
+                }
+            }
+            completed_boxes.append(&mut active_boxes);
+            active_boxes = next_active;
+        }
+        completed_boxes.extend(active_boxes);
+
+        for b in completed_boxes {
+            let Some(&(tex, img_w, img_h, _)) = self.image_textures.get(&b.id) else {
                 continue;
             };
-            let x0 = pad_x + min_col as f32 * cw;
-            let y0 = pad_y + min_row as f32 * ch;
-            let x1 = pad_x + (max_col + 1) as f32 * cw;
-            let y1 = pad_y + (max_row + 1) as f32 * ch;
+            let x0 = pad_x + b.col_start as f32 * cw;
+            let y0 = pad_y + b.row_start as f32 * ch;
+            let x1 = pad_x + (b.col_end + 1) as f32 * cw;
+            let y1 = pad_y + (b.row_end + 1) as f32 * ch;
 
             self.render_single_image(tex, img_w as f32, img_h as f32, [x0, y0, x1, y1]);
         }
