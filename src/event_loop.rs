@@ -303,6 +303,7 @@ impl AppState {
 
     /// Pastes text from the Wayland clipboard into the terminal PTY.
     pub fn paste_clipboard(&mut self, conn: Option<&Connection>) {
+        let bracketed = self.terminal.bracketed_paste;
         if let Some(offer_data) = &self.wayland.current_offer {
             if let Some(mime) = best_text_mime(&offer_data.mime_types)
                 && let Ok((read_fd, write_fd)) = nix::unistd::pipe2(OFlag::O_CLOEXEC)
@@ -320,8 +321,17 @@ impl AppState {
                         let mut reader = std::fs::File::from(read_fd).take(10 * 1024 * 1024);
                         let mut bytes = Vec::new();
                         if reader.read_to_end(&mut bytes).is_ok() && !bytes.is_empty() {
+                            let payload = if bracketed {
+                                let mut wrapped = Vec::with_capacity(bytes.len() + 12);
+                                wrapped.extend_from_slice(b"\x1b[200~");
+                                wrapped.extend_from_slice(&bytes);
+                                wrapped.extend_from_slice(b"\x1b[201~");
+                                wrapped
+                            } else {
+                                bytes
+                            };
                             // PTY master is nonblocking: write with poll readiness loop to avoid truncation
-                            let mut to_write = &bytes[..];
+                            let mut to_write = &payload[..];
                             let start = std::time::Instant::now();
                             while !to_write.is_empty()
                                 && start.elapsed() < std::time::Duration::from_secs(5)
@@ -347,7 +357,15 @@ impl AppState {
 
         // Fallback to internal clipboard buffer if offer not available
         if let Some(text) = &self.clipboard_text {
-            let _ = self.pty.write_all(text.as_bytes());
+            if bracketed {
+                let mut wrapped = Vec::with_capacity(text.len() + 12);
+                wrapped.extend_from_slice(b"\x1b[200~");
+                wrapped.extend_from_slice(text.as_bytes());
+                wrapped.extend_from_slice(b"\x1b[201~");
+                let _ = self.pty.write_all(&wrapped);
+            } else {
+                let _ = self.pty.write_all(text.as_bytes());
+            }
         }
     }
 
