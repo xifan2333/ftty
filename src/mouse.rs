@@ -49,45 +49,45 @@ impl MouseState {
     pub fn apply_private_mode(&mut self, mode: u16, enabled: bool) -> bool {
         match mode {
             1000 => {
-                self.tracking = if enabled {
-                    MouseTracking::Click
-                } else {
-                    MouseTracking::Disabled
+                if enabled {
+                    self.tracking = MouseTracking::Click;
+                } else if self.tracking == MouseTracking::Click {
+                    self.tracking = MouseTracking::Disabled;
                 }
             }
             1002 => {
-                self.tracking = if enabled {
-                    MouseTracking::Drag
-                } else {
-                    MouseTracking::Disabled
+                if enabled {
+                    self.tracking = MouseTracking::Drag;
+                } else if self.tracking == MouseTracking::Drag {
+                    self.tracking = MouseTracking::Disabled;
                 }
             }
             1003 => {
-                self.tracking = if enabled {
-                    MouseTracking::Motion
-                } else {
-                    MouseTracking::Disabled
+                if enabled {
+                    self.tracking = MouseTracking::Motion;
+                } else if self.tracking == MouseTracking::Motion {
+                    self.tracking = MouseTracking::Disabled;
                 }
             }
             1005 => {
-                self.encoding = if enabled {
-                    MouseEncoding::Utf8
-                } else {
-                    MouseEncoding::X10
+                if enabled {
+                    self.encoding = MouseEncoding::Utf8;
+                } else if self.encoding == MouseEncoding::Utf8 {
+                    self.encoding = MouseEncoding::X10;
                 }
             }
             1006 => {
-                self.encoding = if enabled {
-                    MouseEncoding::Sgr
-                } else {
-                    MouseEncoding::X10
+                if enabled {
+                    self.encoding = MouseEncoding::Sgr;
+                } else if self.encoding == MouseEncoding::Sgr {
+                    self.encoding = MouseEncoding::X10;
                 }
             }
             1015 => {
-                self.encoding = if enabled {
-                    MouseEncoding::Urxvt
-                } else {
-                    MouseEncoding::X10
+                if enabled {
+                    self.encoding = MouseEncoding::Urxvt;
+                } else if self.encoding == MouseEncoding::Urxvt {
+                    self.encoding = MouseEncoding::X10;
                 }
             }
             _ => return false,
@@ -157,6 +157,9 @@ pub fn encode_mouse_event(
             Some(format!("\x1b[{};{x};{y}M", code + 32).into_bytes())
         }
         MouseEncoding::Utf8 => {
+            if col > 2015 || row > 2015 {
+                return None;
+            }
             let code = if pressed || motion {
                 code
             } else {
@@ -230,6 +233,40 @@ mod tests {
         // Cursor visibility and alternate screen modes are not mouse modes.
         assert!(!state.apply_private_mode(25, true));
         assert!(!state.apply_private_mode(1049, true));
+    }
+
+    #[test]
+    fn mode_resets_only_disable_matching_active_modes() {
+        let mut state = MouseState::default();
+        // Enable Drag (1002), then attempt to reset Click (1000)
+        state.apply_private_mode(1002, true);
+        assert_eq!(state.tracking, MouseTracking::Drag);
+        state.apply_private_mode(1000, false);
+        assert_eq!(
+            state.tracking,
+            MouseTracking::Drag,
+            "resetting 1000 must not disable 1002"
+        );
+
+        // Enable Sgr (1006), then attempt to reset Utf8 (1005)
+        state.apply_private_mode(1006, true);
+        assert_eq!(state.encoding, MouseEncoding::Sgr);
+        state.apply_private_mode(1005, false);
+        assert_eq!(
+            state.encoding,
+            MouseEncoding::Sgr,
+            "resetting 1005 must not revert 1006"
+        );
+    }
+
+    #[test]
+    fn utf8_rejects_coordinates_beyond_2015() {
+        let none = MouseModifiers::default();
+        assert!(
+            encode_mouse_event(MouseEncoding::Utf8, 0, 2015, 2015, true, false, none).is_some()
+        );
+        assert!(encode_mouse_event(MouseEncoding::Utf8, 0, 2016, 0, true, false, none).is_none());
+        assert!(encode_mouse_event(MouseEncoding::Utf8, 0, 0, 2016, true, false, none).is_none());
     }
 
     #[test]

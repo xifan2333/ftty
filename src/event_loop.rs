@@ -69,6 +69,8 @@ pub struct AppState {
     pub selection: Selection,
     pub mouse_pos: [f64; 2],
     pub mouse_pressed: bool,
+    /// Bitmask of X11 button indexes currently held down and reported to the application.
+    pub mouse_buttons_held: u8,
     /// Set while a button press was forwarded to a mouse-tracking application.
     pub mouse_reported: bool,
     /// X11 button index most recently forwarded to the PTY, used for drag motion.
@@ -180,6 +182,7 @@ impl AppState {
             ),
             mouse_pos: [0.0, 0.0],
             mouse_pressed: false,
+            mouse_buttons_held: 0,
             mouse_reported: false,
             mouse_button: 0,
             last_click_time: 0,
@@ -224,7 +227,7 @@ impl AppState {
             return None;
         }
         let modifiers = self.keyboard.modifiers();
-        if modifiers.shift {
+        if modifiers.shift && pressed {
             return None;
         }
         let (_, screen_row, col) = self.cell_at_pointer(self.mouse_pos[0], self.mouse_pos[1]);
@@ -236,7 +239,7 @@ impl AppState {
             pressed,
             motion,
             MouseModifiers {
-                shift: false,
+                shift: modifiers.shift,
                 alt: modifiers.alt,
                 ctrl: modifiers.ctrl,
             },
@@ -943,11 +946,20 @@ impl Dispatch<WlPointer, ()> for AppState {
                 ..
             } => {
                 state.mouse_pos = [surface_x, surface_y];
-                let held = state.mouse_reported;
-                if state.terminal.mouse.reports_motion(held)
-                    && state.report_mouse_event(state.mouse_button, held, true)
-                {
-                    return;
+                let held = state.mouse_buttons_held != 0 || state.mouse_reported;
+                if state.terminal.mouse.reports_motion(held) {
+                    let button = if held {
+                        if state.mouse_buttons_held != 0 {
+                            state.mouse_buttons_held.trailing_zeros() as u8
+                        } else {
+                            state.mouse_button
+                        }
+                    } else {
+                        3
+                    };
+                    if state.report_mouse_event(button, true, true) {
+                        return;
+                    }
                 }
                 if state.mouse_pressed {
                     let (line, _, col) = state.cell_at_pointer(surface_x, surface_y);
@@ -968,6 +980,7 @@ impl Dispatch<WlPointer, ()> for AppState {
                 // Applications that requested mouse tracking own the event; Shift
                 // always overrides tracking so text can still be selected.
                 if state.report_mouse_event(index, true, false) {
+                    state.mouse_buttons_held |= 1 << index;
                     state.mouse_reported = true;
                     state.mouse_button = index;
                     return;
@@ -1028,8 +1041,10 @@ impl Dispatch<WlPointer, ()> for AppState {
                 let Some(index) = x11_button_index(button) else {
                     return;
                 };
-                if state.mouse_reported {
-                    state.mouse_reported = false;
+                let was_held = (state.mouse_buttons_held & (1 << index)) != 0;
+                if was_held || state.mouse_reported {
+                    state.mouse_buttons_held &= !(1 << index);
+                    state.mouse_reported = state.mouse_buttons_held != 0;
                     state.report_mouse_event(index, false, false);
                 }
                 if index == 0 {
