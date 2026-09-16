@@ -410,13 +410,16 @@ pub fn diacritic_to_index(c: char) -> Option<u16> {
     DIACRITICS.iter().position(|&d| d == c).map(|p| p as u16)
 }
 
+const MAX_ROW_OVERFLOW: usize = 256;
+
 /// A horizontal row of cells in the terminal.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Row {
     pub cells: Vec<Cell>,
     pub wrapped: bool,
     pub placeholders: Option<HashMap<usize, (u16, u16, u8)>>,
     pub overflow: Vec<Cell>,
+    pub overflow_placeholders: Vec<(usize, (u16, u16, u8))>,
 }
 
 impl Row {
@@ -427,24 +430,65 @@ impl Row {
             wrapped: false,
             placeholders: None,
             overflow: Vec::new(),
+            overflow_placeholders: Vec::new(),
         }
     }
 
     pub fn resize(&mut self, new_cols: usize) {
         if new_cols < self.cells.len() {
+            let current_len = self.cells.len();
+            let excess_len = current_len - new_cols;
+
+            let mut newly_overflowed_ph = Vec::new();
+            if let Some(coords) = &mut self.placeholders {
+                coords.retain(|&col, &mut data| {
+                    if col >= new_cols {
+                        newly_overflowed_ph.push((col - new_cols, data));
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
+
+            for (offset, _) in &mut self.overflow_placeholders {
+                *offset = offset.saturating_add(excess_len);
+            }
+            newly_overflowed_ph.append(&mut self.overflow_placeholders);
+            self.overflow_placeholders = newly_overflowed_ph;
+
             let excess: Vec<Cell> = self.cells.drain(new_cols..).collect();
             let mut new_overflow = excess;
             new_overflow.append(&mut self.overflow);
             self.overflow = new_overflow;
-            if let Some(coords) = &mut self.placeholders {
-                coords.retain(|&col, _| col < new_cols);
+
+            if self.overflow.len() > MAX_ROW_OVERFLOW {
+                self.overflow.truncate(MAX_ROW_OVERFLOW);
+                self.overflow_placeholders
+                    .retain(|&(offset, _)| offset < MAX_ROW_OVERFLOW);
             }
         } else if new_cols > self.cells.len() {
-            let needed = new_cols - self.cells.len();
+            let current_len = self.cells.len();
+            let needed = new_cols - current_len;
             let from_overflow = needed.min(self.overflow.len());
+
             for cell in self.overflow.drain(0..from_overflow) {
                 self.cells.push(cell);
             }
+
+            let mut remaining_ph = Vec::new();
+            for (offset, data) in self.overflow_placeholders.drain(..) {
+                if offset < from_overflow {
+                    let col = current_len + offset;
+                    self.placeholders
+                        .get_or_insert_with(HashMap::new)
+                        .insert(col, data);
+                } else {
+                    remaining_ph.push((offset - from_overflow, data));
+                }
+            }
+            self.overflow_placeholders = remaining_ph;
+
             if self.cells.len() < new_cols {
                 self.cells.resize(new_cols, Cell::default());
             }
@@ -458,6 +502,7 @@ impl Row {
         self.wrapped = false;
         self.placeholders = None;
         self.overflow.clear();
+        self.overflow_placeholders.clear();
     }
 }
 
@@ -1840,5 +1885,28 @@ mod tests {
             .map(|c| c.c)
             .collect();
         assert_eq!(restored, "Hello World 12345");
+    }
+
+    #[test]
+    fn test_shrink_and_grow_restores_placeholder_coordinates_and_bounds_overflow() {
+        let mut row = Row::new(300);
+        row.placeholders = Some(HashMap::from([(50, (1, 2, 3))]));
+
+        // Shrink to 40 columns (excess = 260)
+        row.resize(40);
+        assert_eq!(row.cells.len(), 40);
+        // Placeholder at 50 is beyond 40, so it's stashed in overflow_placeholders at offset 10
+        assert!(row.placeholders.as_ref().unwrap().is_empty());
+        assert_eq!(row.overflow.len(), MAX_ROW_OVERFLOW); // Bounded to 256!
+        assert_eq!(row.overflow_placeholders, vec![(10, (1, 2, 3))]);
+
+        // Grow back to 60 columns: restores 20 overflow cells
+        row.resize(60);
+        assert_eq!(row.cells.len(), 60);
+        // Offset 10 is restored to column 40 + 10 = 50!
+        assert_eq!(
+            row.placeholders.as_ref().unwrap().get(&50),
+            Some(&(1, 2, 3))
+        );
     }
 }
