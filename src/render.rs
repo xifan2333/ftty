@@ -849,6 +849,9 @@ fn prepare_atlas(
         let _ = atlas.get_or_insert('?', CellFlags::empty(), fonts);
         if let Some(p) = preedit {
             for c in p.text.chars() {
+                if crate::box_drawing::is_procedural_glyph(c) {
+                    continue;
+                }
                 full |= atlas
                     .get_or_insert(c, CellFlags::UNDERLINE, fonts)
                     .is_none();
@@ -857,6 +860,9 @@ fn prepare_atlas(
         for row in 0..grid.rows {
             let line = grid.visible_line(row);
             for cell in line.cells.iter().filter(|cell| visible_glyph(cell)) {
+                if crate::box_drawing::is_procedural_glyph(cell.c) {
+                    continue;
+                }
                 full |= atlas.get_or_insert(cell.c, cell.flags, fonts).is_none();
             }
         }
@@ -1003,8 +1009,17 @@ fn build_vertices(
             if cell.flags.contains(CellFlags::DIM) {
                 color[3] = 0.6;
             }
+            let width = if cell.flags.contains(CellFlags::WIDE_CHAR) {
+                2.0 * cw
+            } else {
+                cw
+            };
             if visible_glyph(cell) {
-                if let Some(glyph) = atlas.get(cell.c, cell.flags, fonts) {
+                if crate::box_drawing::render_procedural_glyph(
+                    vertices, cell.c, x, y, width, ch, color,
+                ) {
+                    // Procedural box drawing and block elements glyph
+                } else if let Some(glyph) = atlas.get(cell.c, cell.flags, fonts) {
                     if glyph.width > 0 && glyph.height > 0 {
                         let gx = x + glyph.offset_x as f32;
                         let gy =
@@ -1050,11 +1065,6 @@ fn build_vertices(
                     }
                 }
             }
-            let width = if cell.flags.contains(CellFlags::WIDE_CHAR) {
-                2.0 * cw
-            } else {
-                cw
-            };
             let has_explicit_underline = cell.flags.contains(CellFlags::UNDERLINE);
             let has_hover_underline = cell.hyperlink_id.is_some()
                 && options.hovered_span.is_some_and(|span| {
@@ -1191,7 +1201,17 @@ fn build_vertices(
             // Draw preedit glyph, clipped to the cells that fit on this row so a wide
             // fallback glyph cannot bleed past the right edge of the terminal.
             let span_right = px + span_w;
-            if let Some(glyph) = atlas.get(c, CellFlags::UNDERLINE, fonts)
+            if crate::box_drawing::render_procedural_glyph(
+                vertices,
+                c,
+                px,
+                py,
+                span_w,
+                ch,
+                rgba(colors.foreground),
+            ) {
+                // Procedural box drawing / block elements glyph
+            } else if let Some(glyph) = atlas.get(c, CellFlags::UNDERLINE, fonts)
                 && glyph.width > 0
                 && glyph.height > 0
             {
@@ -1619,5 +1639,87 @@ mod tests {
         // 2 characters (48 floats each) + 1 underline quad for line 1 only (48 floats) = 144 floats.
         // If line 0 had also been underlined due to identical URL ID, it would be 192 floats.
         assert_eq!(vertices.len(), 144);
+    }
+
+    #[test]
+    fn test_procedural_box_and_block_glyphs_bypass_atlas_and_render_solid() {
+        let fonts = FontManager::load(14.0).expect("system monospace font");
+        let mut grid = Grid::new(4, 1, 0);
+        grid.cursor.visible = false;
+        // Cell 0: Full block '█' (U+2588)
+        grid.write_char(
+            '█',
+            Color::DefaultForeground,
+            Color::DefaultBackground,
+            CellFlags::empty(),
+        );
+        // Cell 1: Full block '█' (U+2588)
+        grid.write_char(
+            '█',
+            Color::DefaultForeground,
+            Color::DefaultBackground,
+            CellFlags::empty(),
+        );
+        // Cell 2: Box horizontal '─' (U+2500)
+        grid.write_char(
+            '─',
+            Color::DefaultForeground,
+            Color::DefaultBackground,
+            CellFlags::empty(),
+        );
+        // Cell 3: Box horizontal '─' (U+2500)
+        grid.write_char(
+            '─',
+            Color::DefaultForeground,
+            Color::DefaultBackground,
+            CellFlags::empty(),
+        );
+
+        let mut atlas = GlyphAtlas::new(64, 64);
+        prepare_atlas(&grid, &fonts, &mut atlas, None);
+
+        // Procedural glyphs must NOT be inserted into atlas
+        assert!(atlas.get('█', CellFlags::empty(), &fonts).is_none());
+        assert!(atlas.get('─', CellFlags::empty(), &fonts).is_none());
+
+        let mut vertices = Vec::new();
+        build_vertices(
+            &mut vertices,
+            &grid,
+            ColorScheme::new(&default_256_palette(), DEFAULT_FG, DEFAULT_BG),
+            fonts.metrics,
+            &fonts,
+            &atlas,
+            RenderOptions::default(),
+        );
+
+        let cw = fonts.metrics.cell_width as f32;
+        let ch = fonts.metrics.cell_height as f32;
+
+        // 4 glyph quads generated (each 48 floats)
+        assert_eq!(vertices.len(), 4 * 48);
+
+        // Verify cell 0 (█) covers full height from 0 to ch
+        assert_eq!(vertices[1], 0.0);
+        assert_eq!(vertices[33], ch);
+
+        // Verify all 4 procedural glyphs use SOLID_UV (-1.0)
+        for i in 0..4 {
+            let offset = i * 48;
+            assert_eq!(vertices[offset + 2], -1.0); // u
+            assert_eq!(vertices[offset + 3], -1.0); // v
+        }
+
+        // Verify cell 0 (█) and cell 1 (█) touch edge-to-edge with zero gap
+        let cell0_right = vertices[8]; // x1 of cell 0
+        let cell1_left = vertices[48]; // x0 of cell 1
+        assert_eq!(cell0_right, cell1_left);
+        assert_eq!(cell0_right, cw);
+
+        // Verify cell 2 (─) and cell 3 (─) touch edge-to-edge with zero gap
+        let cell2_right = vertices[2 * 48 + 8]; // x1 of cell 2
+        let cell3_left = vertices[3 * 48]; // x0 of cell 3
+        assert_eq!(cell2_right, cell3_left);
+        assert_eq!(cell2_right, 3.0 * cw);
     }
 }
