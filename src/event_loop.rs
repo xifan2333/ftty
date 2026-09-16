@@ -704,6 +704,32 @@ impl AppState {
         Ok(())
     }
 
+    fn process_terminal_output(&mut self, text: &[u8], qh: &QueueHandle<Self>) {
+        if text.is_empty() {
+            return;
+        }
+        self.terminal.advance_bytes(text);
+        for response in self.terminal.take_responses() {
+            self.write_pty_blocking(&response);
+        }
+        if let Some(pending) = self.terminal.take_pending_clipboard() {
+            match pending {
+                Some(text) => self.set_clipboard_text(text, Some(qh)),
+                None => {
+                    self.clipboard_text = None;
+                    self.terminal.set_clipboard_content(None);
+                    if let Some(device) = &self.wayland.data_device {
+                        device.set_selection(None, self.last_serial);
+                    }
+                }
+            }
+        }
+        self.keyboard.kitty_flags = self.terminal.kitty_keyboard_flags;
+        if self.config.auto_scroll() && !self.terminal.grid.is_alt_screen() {
+            self.terminal.grid.scroll_viewport_bottom();
+        }
+    }
+
     fn handle_kitty_event(&mut self, event: KittyEvent) {
         match event {
             KittyEvent::Transmit { command, image } => {
@@ -1626,41 +1652,27 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
                 match state.pty.read(&mut buf) {
                     Ok(n) if n > 0 => {
                         total_read += n;
-                        let (clean_text, events) = state.kitty_parser.filter_bytes(&buf[..n]);
-                        for event in &events {
-                            if let KittyEvent::Response(resp) = event {
-                                state.write_pty_blocking(resp);
-                            }
-                        }
-
-                        if !clean_text.is_empty() {
-                            state.terminal.advance_bytes(&clean_text);
-                            for response in state.terminal.take_responses() {
-                                state.write_pty_blocking(&response);
-                            }
-                            if let Some(pending) = state.terminal.take_pending_clipboard() {
-                                match pending {
-                                    Some(text) => state.set_clipboard_text(text, Some(&qh)),
-                                    None => {
-                                        state.clipboard_text = None;
-                                        state.terminal.set_clipboard_content(None);
-                                        if let Some(device) = &state.wayland.data_device {
-                                            device.set_selection(None, state.last_serial);
-                                        }
-                                    }
+                        let incoming = &buf[..n];
+                        if state.kitty_parser.is_fast_path(incoming) {
+                            state.process_terminal_output(incoming, &qh);
+                        } else {
+                            let (clean_text, events) = state.kitty_parser.filter_bytes(incoming);
+                            for event in &events {
+                                if let KittyEvent::Response(resp) = event {
+                                    state.write_pty_blocking(resp);
                                 }
                             }
-                            state.keyboard.kitty_flags = state.terminal.kitty_keyboard_flags;
-                            if state.config.auto_scroll() && !state.terminal.grid.is_alt_screen() {
-                                state.terminal.grid.scroll_viewport_bottom();
+                            state.process_terminal_output(&clean_text, &qh);
+                            for event in events {
+                                if !matches!(event, KittyEvent::Response(_)) {
+                                    state.handle_kitty_event(event);
+                                }
                             }
                         }
 
-                        for event in events {
-                            if !matches!(event, KittyEvent::Response(_)) {
-                                state.handle_kitty_event(event);
-                            }
-                        }
+                        // Rule 3332946: Synchronize Kitty keyboard flags directly on every PTY read iteration,
+                        // ensuring state alignment even if the chunk contained only filtered graphics events.
+                        state.keyboard.kitty_flags = state.terminal.kitty_keyboard_flags;
 
                         if total_read >= 65536 {
                             break;

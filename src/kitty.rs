@@ -117,6 +117,18 @@ const MAX_APC_PAYLOAD: usize = 32 * 1024 * 1024;
 // A shared-memory APC contains only a name, so its backing object needs a separate cap.
 const MAX_SHM_PAYLOAD: u64 = 32 * 1024 * 1024;
 
+#[inline]
+fn may_contain_kitty_apc(bytes: &[u8]) -> bool {
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b && (i + 1 >= bytes.len() || bytes[i + 1] == b'_') {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
 /// State machine intercepting Kitty APC graphics sequences (`\x1b_G...;payload\x1b\`) from the byte stream.
 #[derive(Default)]
 pub struct KittyParser {
@@ -126,6 +138,8 @@ pub struct KittyParser {
     chunked_command: Option<KittyCommand>,
     chunked_payload: Vec<u8>,
     next_image_id: u32,
+    clean_scratch: Vec<u8>,
+    events_scratch: Vec<KittyEvent>,
 }
 
 impl KittyParser {
@@ -137,10 +151,38 @@ impl KittyParser {
         }
     }
 
+    /// Returns `true` if the incoming byte slice is guaranteed to contain no Kitty APC sequences
+    /// and the parser is not currently in the middle of parsing an APC stream.
+    ///
+    /// When this returns `true`, callers can pass the raw byte slice directly to the VT parser,
+    /// completely bypassing all allocation, filtering, and copying overhead (0-alloc fast path).
+    #[inline]
+    #[must_use]
+    pub fn is_fast_path(&self, incoming: &[u8]) -> bool {
+        !self.in_apc && self.pending_stream.is_empty() && !may_contain_kitty_apc(incoming)
+    }
+
     /// Filters an incoming byte stream, stripping Kitty APC sequences and emitting parsed graphics events.
     ///
     /// Non-graphics bytes are returned in the first vector to be processed by the standard VT parser.
+    /// Events are transferred without cloning nested image buffers, and internal event storage
+    /// is left empty to avoid retaining image payloads in parser memory.
     pub fn filter_bytes(&mut self, incoming: &[u8]) -> (Vec<u8>, Vec<KittyEvent>) {
+        if self.is_fast_path(incoming) {
+            return (incoming.to_vec(), Vec::new());
+        }
+
+        self.filter_internal(incoming);
+        let text = self.clean_scratch.clone();
+        self.clean_scratch.clear();
+        let events = std::mem::take(&mut self.events_scratch);
+        (text, events)
+    }
+
+    fn filter_internal(&mut self, incoming: &[u8]) {
+        self.clean_scratch.clear();
+        self.events_scratch.clear();
+
         let mut bytes_buf;
         let bytes: &[u8] = if self.pending_stream.is_empty() {
             incoming
@@ -150,8 +192,6 @@ impl KittyParser {
             &bytes_buf
         };
 
-        let mut text_output = Vec::with_capacity(bytes.len());
-        let mut events = Vec::new();
         let mut i = 0;
 
         while i < bytes.len() {
@@ -170,7 +210,7 @@ impl KittyParser {
                 if byte == 0x07 {
                     self.in_apc = false;
                     if let Some(event) = self.finish_apc() {
-                        events.push(event);
+                        self.events_scratch.push(event);
                     }
                     self.apc_buffer.clear();
                     i += 1;
@@ -179,7 +219,7 @@ impl KittyParser {
                         if bytes[i + 1] == b'\\' {
                             self.in_apc = false;
                             if let Some(event) = self.finish_apc() {
-                                events.push(event);
+                                self.events_scratch.push(event);
                             }
                             self.apc_buffer.clear();
                             i += 2;
@@ -202,7 +242,7 @@ impl KittyParser {
                         self.apc_buffer.clear();
                         i += 3;
                     } else {
-                        text_output.push(bytes[i]);
+                        self.clean_scratch.push(bytes[i]);
                         i += 1;
                     }
                 } else if i + 1 < bytes.len() {
@@ -210,7 +250,7 @@ impl KittyParser {
                         self.pending_stream.extend_from_slice(&bytes[i..]);
                         break;
                     } else {
-                        text_output.push(bytes[i]);
+                        self.clean_scratch.push(bytes[i]);
                         i += 1;
                     }
                 } else {
@@ -218,12 +258,10 @@ impl KittyParser {
                     break;
                 }
             } else {
-                text_output.push(bytes[i]);
+                self.clean_scratch.push(bytes[i]);
                 i += 1;
             }
         }
-
-        (text_output, events)
     }
 
     fn finish_apc(&mut self) -> Option<KittyEvent> {
@@ -846,5 +884,97 @@ mod tests {
             }
             other => panic!("Expected Transmit, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_filter_fast_path_direct_borrow() {
+        let mut parser = KittyParser::new();
+
+        // 1. Plain text is fast-path eligible
+        let plain = b"Hello world, normal text from cat or grep\n";
+        assert!(parser.is_fast_path(plain));
+        let (clean, events) = parser.filter_bytes(plain);
+        assert_eq!(clean, plain);
+        assert!(events.is_empty());
+
+        // 2. ANSI color and cursor escapes are also fast-path eligible
+        let ansi = b"\x1b[31mRed text\x1b[0m and \x1b[10;20Hcursor\x1b]8;;https://x.com\x1b\\";
+        assert!(parser.is_fast_path(ansi));
+        let (clean, events) = parser.filter_bytes(ansi);
+        assert_eq!(clean, ansi);
+        assert!(events.is_empty());
+
+        // 3. Kitty graphics sequence requires slow-path filtering
+        let kitty_payload = b"before\x1b_Gi=42,a=q;\x1b\\after";
+        assert!(!parser.is_fast_path(kitty_payload));
+        let (text, events) = parser.filter_bytes(kitty_payload);
+        assert_eq!(text, b"beforeafter");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            KittyEvent::Response(b"\x1b_Gi=42;OK\x1b\\".to_vec())
+        );
+        // Events must be transferred out; parser must not retain image/event data
+        assert!(parser.events_scratch.is_empty());
+    }
+
+    #[test]
+    fn test_scratch_buffer_reused_without_reallocation() {
+        let mut parser = KittyParser::new();
+        let payload = b"start\x1b_Gi=10,a=q;\x1b\\end";
+
+        // First call populates scratch buffer
+        let _ = parser.filter_bytes(payload);
+        let cap_text = parser.clean_scratch.capacity();
+        assert!(cap_text > 0);
+        // Events are drained so events_scratch does not keep image memory
+        assert!(parser.events_scratch.is_empty());
+
+        // Subsequent calls reuse existing capacity
+        for _ in 0..100 {
+            let _ = parser.filter_bytes(payload);
+            assert_eq!(parser.clean_scratch.capacity(), cap_text);
+            assert!(parser.events_scratch.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_split_escape_crosses_chunk_into_processed() {
+        let mut parser = KittyParser::new();
+        // Chunk 1 ends with escape (not fast path)
+        let chunk1 = b"text\x1b";
+        assert!(!parser.is_fast_path(chunk1));
+        let (text, events) = parser.filter_bytes(chunk1);
+        assert_eq!(text, b"text");
+        assert!(events.is_empty());
+
+        // Chunk 2 completes the Kitty sequence
+        let chunk2 = b"_Gi=99,a=q;\x1b\\more";
+        assert!(!parser.is_fast_path(chunk2));
+        let (text, events) = parser.filter_bytes(chunk2);
+        assert_eq!(text, b"more");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            KittyEvent::Response(b"\x1b_Gi=99;OK\x1b\\".to_vec())
+        );
+        assert!(parser.events_scratch.is_empty());
+    }
+
+    #[test]
+    fn test_is_fast_path() {
+        let mut parser = KittyParser::new();
+        // Plain text is fast path
+        assert!(parser.is_fast_path(b"Hello world\n"));
+        // ANSI escape codes (colors, cursor, hyperlinks) are fast path
+        assert!(parser.is_fast_path(b"\x1b[31mRed\x1b[0m \x1b[10;20H \x1b]8;;https://x.com\x1b\\"));
+        // Kitty sequence is NOT fast path
+        assert!(!parser.is_fast_path(b"\x1b_Gi=1,a=q;\x1b\\"));
+        // Chunk ending in 0x1b is NOT fast path (could split across read boundaries)
+        assert!(!parser.is_fast_path(b"hello\x1b"));
+
+        // While in APC, even plain text is NOT fast path
+        parser.in_apc = true;
+        assert!(!parser.is_fast_path(b"more data"));
     }
 }
