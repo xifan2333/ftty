@@ -410,12 +410,16 @@ pub fn diacritic_to_index(c: char) -> Option<u16> {
     DIACRITICS.iter().position(|&d| d == c).map(|p| p as u16)
 }
 
+const MAX_ROW_OVERFLOW: usize = 256;
+
 /// A horizontal row of cells in the terminal.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Row {
     pub cells: Vec<Cell>,
     pub wrapped: bool,
     pub placeholders: Option<HashMap<usize, (u16, u16, u8)>>,
+    pub overflow: Vec<Cell>,
+    pub overflow_placeholders: Vec<(usize, (u16, u16, u8))>,
 }
 
 impl Row {
@@ -425,13 +429,69 @@ impl Row {
             cells: vec![Cell::default(); cols],
             wrapped: false,
             placeholders: None,
+            overflow: Vec::new(),
+            overflow_placeholders: Vec::new(),
         }
     }
 
     pub fn resize(&mut self, new_cols: usize) {
-        self.cells.resize(new_cols, Cell::default());
-        if let Some(coords) = &mut self.placeholders {
-            coords.retain(|&col, _| col < new_cols);
+        if new_cols < self.cells.len() {
+            let current_len = self.cells.len();
+            let excess_len = current_len - new_cols;
+
+            let mut newly_overflowed_ph = Vec::new();
+            if let Some(coords) = &mut self.placeholders {
+                coords.retain(|&col, &mut data| {
+                    if col >= new_cols {
+                        newly_overflowed_ph.push((col - new_cols, data));
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
+
+            for (offset, _) in &mut self.overflow_placeholders {
+                *offset = offset.saturating_add(excess_len);
+            }
+            newly_overflowed_ph.append(&mut self.overflow_placeholders);
+            self.overflow_placeholders = newly_overflowed_ph;
+
+            let excess: Vec<Cell> = self.cells.drain(new_cols..).collect();
+            let mut new_overflow = excess;
+            new_overflow.append(&mut self.overflow);
+            self.overflow = new_overflow;
+
+            if self.overflow.len() > MAX_ROW_OVERFLOW {
+                self.overflow.truncate(MAX_ROW_OVERFLOW);
+                self.overflow_placeholders
+                    .retain(|&(offset, _)| offset < MAX_ROW_OVERFLOW);
+            }
+        } else if new_cols > self.cells.len() {
+            let current_len = self.cells.len();
+            let needed = new_cols - current_len;
+            let from_overflow = needed.min(self.overflow.len());
+
+            for cell in self.overflow.drain(0..from_overflow) {
+                self.cells.push(cell);
+            }
+
+            let mut remaining_ph = Vec::new();
+            for (offset, data) in self.overflow_placeholders.drain(..) {
+                if offset < from_overflow {
+                    let col = current_len + offset;
+                    self.placeholders
+                        .get_or_insert_with(HashMap::new)
+                        .insert(col, data);
+                } else {
+                    remaining_ph.push((offset - from_overflow, data));
+                }
+            }
+            self.overflow_placeholders = remaining_ph;
+
+            if self.cells.len() < new_cols {
+                self.cells.resize(new_cols, Cell::default());
+            }
         }
     }
 
@@ -441,6 +501,8 @@ impl Row {
         }
         self.wrapped = false;
         self.placeholders = None;
+        self.overflow.clear();
+        self.overflow_placeholders.clear();
     }
 }
 
@@ -665,6 +727,9 @@ impl Grid {
         for row in &mut self.lines {
             row.resize(new_cols);
         }
+        for row in &mut self.scrollback {
+            row.resize(new_cols);
+        }
         if let Some(alt) = &mut self.alt_lines {
             for row in alt.iter_mut() {
                 row.resize(new_cols);
@@ -672,7 +737,34 @@ impl Grid {
         }
 
         if new_rows > old_rows {
-            for _ in old_rows..new_rows {
+            let needed = new_rows - old_rows;
+            let active_on_alt = self.alt_lines.is_some();
+            let pull_from_scrollback = if !active_on_alt {
+                needed.min(self.scrollback.len())
+            } else {
+                0
+            };
+
+            for _ in 0..pull_from_scrollback {
+                if let Some(mut row) = self.scrollback.pop_back() {
+                    row.resize(new_cols);
+                    self.lines.insert(0, row);
+                }
+            }
+            self.cursor.row = self
+                .cursor
+                .row
+                .saturating_add(pull_from_scrollback)
+                .min(new_rows - 1);
+            self.saved_cursor.row = self
+                .saved_cursor
+                .row
+                .saturating_add(pull_from_scrollback)
+                .min(new_rows - 1);
+            self.viewport_offset = self.viewport_offset.min(self.scrollback.len());
+
+            let remaining_blanks = needed - pull_from_scrollback;
+            for _ in 0..remaining_blanks {
                 self.lines.push(Row::new(new_cols));
             }
             if let Some(alt) = &mut self.alt_lines {
@@ -1739,5 +1831,82 @@ mod tests {
         assert_eq!(grid.visible_line(1).cells[1].c, '1');
         assert_eq!(grid.lines[1].cells.len(), 12);
         assert!(grid.scrollback.is_empty());
+    }
+
+    #[test]
+    fn test_shrink_and_grow_restores_scrollback_text() {
+        let mut grid = Grid::new(10, 4, 100);
+        fill_rows(&mut grid, 4);
+        grid.cursor.row = 3;
+        grid.cursor.col = 1;
+
+        // Shrink from 4 to 2 rows: top 2 rows move to scrollback
+        grid.resize(10, 2);
+        assert_eq!(grid.rows, 2);
+        assert_eq!(grid.cursor.row, 1);
+        assert_eq!(grid.scrollback.len(), 2);
+
+        // Grow back from 2 to 4 rows: top 2 rows must be pulled back from scrollback!
+        grid.resize(10, 4);
+        assert_eq!(grid.rows, 4);
+        assert_eq!(grid.cursor.row, 3);
+        assert_eq!(grid.scrollback.len(), 0);
+        assert_eq!(grid.visible_line(0).cells[1].c, '0');
+        assert_eq!(grid.visible_line(1).cells[1].c, '1');
+        assert_eq!(grid.visible_line(2).cells[1].c, '2');
+        assert_eq!(grid.visible_line(3).cells[1].c, '3');
+    }
+
+    #[test]
+    fn test_horizontal_shrink_and_grow_preserves_overflow_cells() {
+        let mut grid = Grid::new(20, 2, 100);
+        let text = "Hello World 12345";
+        for c in text.chars() {
+            grid.write_char(
+                c,
+                crate::color::Color::DefaultForeground,
+                crate::color::Color::DefaultBackground,
+                CellFlags::empty(),
+            );
+        }
+        assert_eq!(grid.visible_line(0).cells[16].c, '5');
+
+        // Shrink horizontally to 5 columns
+        grid.resize(5, 2);
+        assert_eq!(grid.cols, 5);
+        assert_eq!(grid.visible_line(0).cells[0].c, 'H');
+        assert_eq!(grid.visible_line(0).cells[4].c, 'o');
+
+        // Grow horizontally back to 20 columns: overflow cells restored!
+        grid.resize(20, 2);
+        assert_eq!(grid.cols, 20);
+        let restored: String = grid.visible_line(0).cells[..17]
+            .iter()
+            .map(|c| c.c)
+            .collect();
+        assert_eq!(restored, "Hello World 12345");
+    }
+
+    #[test]
+    fn test_shrink_and_grow_restores_placeholder_coordinates_and_bounds_overflow() {
+        let mut row = Row::new(300);
+        row.placeholders = Some(HashMap::from([(50, (1, 2, 3))]));
+
+        // Shrink to 40 columns (excess = 260)
+        row.resize(40);
+        assert_eq!(row.cells.len(), 40);
+        // Placeholder at 50 is beyond 40, so it's stashed in overflow_placeholders at offset 10
+        assert!(row.placeholders.as_ref().unwrap().is_empty());
+        assert_eq!(row.overflow.len(), MAX_ROW_OVERFLOW); // Bounded to 256!
+        assert_eq!(row.overflow_placeholders, vec![(10, (1, 2, 3))]);
+
+        // Grow back to 60 columns: restores 20 overflow cells
+        row.resize(60);
+        assert_eq!(row.cells.len(), 60);
+        // Offset 10 is restored to column 40 + 10 = 50!
+        assert_eq!(
+            row.placeholders.as_ref().unwrap().get(&50),
+            Some(&(1, 2, 3))
+        );
     }
 }

@@ -155,6 +155,7 @@ impl AppState {
             .saturating_mul(font_mgr.metrics.cell_height)
             .saturating_add(pad_y * 2)
             .clamp(100, i32::MAX as u32);
+        wayland.stashed_floating_size = Some([wayland.width, wayland.height]);
 
         // Publish the pixel geometry before the first frame so image clients can size
         // themselves without waiting for a window resize.
@@ -693,6 +694,9 @@ impl AppState {
             self.renderer = Some(Renderer::new(surface, connection, size)?);
         }
         [self.wayland.width, self.wayland.height] = size;
+        if let Some(xdg_surface) = &self.wayland.xdg_surface {
+            xdg_surface.set_window_geometry(0, 0, size[0] as i32, size[1] as i32);
+        }
         self.resize_terminal()?;
         self.needs_redraw = true;
         // A resize must be committed even if the compositor suspended the old frame callback.
@@ -967,17 +971,53 @@ impl Dispatch<XdgToplevel, ()> for AppState {
             xdg_toplevel::Event::Configure {
                 width,
                 height,
-                states: _,
+                states,
             } => {
-                let mut size = [state.wayland.width, state.wayland.height];
-                // Zero lets the client choose that dimension independently.
-                if width > 0 {
-                    size[0] = width as u32;
+                let mut is_tiled = false;
+                let mut is_maximized = false;
+                let mut is_fullscreen = false;
+
+                for chunk in states.as_chunks::<4>().0 {
+                    let val = u32::from_ne_bytes(*chunk);
+                    match xdg_toplevel::State::try_from(val) {
+                        Ok(xdg_toplevel::State::Maximized) => is_maximized = true,
+                        Ok(xdg_toplevel::State::Fullscreen) => is_fullscreen = true,
+                        Ok(
+                            xdg_toplevel::State::TiledLeft
+                            | xdg_toplevel::State::TiledRight
+                            | xdg_toplevel::State::TiledTop
+                            | xdg_toplevel::State::TiledBottom,
+                        ) => is_tiled = true,
+                        _ => {}
+                    }
                 }
-                if height > 0 {
-                    size[1] = height as u32;
+
+                let is_floating = !is_tiled && !is_maximized && !is_fullscreen;
+
+                if is_floating && width > 0 && height > 0 {
+                    state.wayland.stashed_floating_size = Some([width as u32, height as u32]);
                 }
-                state.pending_size = Some(size);
+
+                let default_w = (state.config.columns() as u32)
+                    .saturating_mul(state.font_mgr.metrics.cell_width)
+                    .saturating_add(u32::from(state.config.padding_x()) * 2);
+                let default_h = (state.config.rows() as u32)
+                    .saturating_mul(state.font_mgr.metrics.cell_height)
+                    .saturating_add(u32::from(state.config.padding_y()) * 2);
+
+                let stashed = state
+                    .wayland
+                    .stashed_floating_size
+                    .unwrap_or([default_w, default_h]);
+
+                let target_w = if width > 0 { width as u32 } else { stashed[0] };
+                let target_h = if height > 0 {
+                    height as u32
+                } else {
+                    stashed[1]
+                };
+
+                state.pending_size = Some([target_w, target_h]);
             }
             xdg_toplevel::Event::Close => {
                 state.wayland.close_requested = true;
@@ -1750,6 +1790,14 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
                 options,
             )?;
             if let Some(surface) = &app_state.wayland.surface {
+                if let Some(xdg_surface) = &app_state.wayland.xdg_surface {
+                    xdg_surface.set_window_geometry(
+                        0,
+                        0,
+                        app_state.wayland.width as i32,
+                        app_state.wayland.height as i32,
+                    );
+                }
                 app_state.frame_callback = Some(surface.frame(&qh, ()));
             }
             renderer.present()?;
@@ -2369,5 +2417,19 @@ mod tests {
                 end_col: 6,
             })
         );
+    }
+
+    #[test]
+    fn test_stashed_floating_size_initialization() {
+        let term = Terminal::new(80, 24, 100);
+        let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).unwrap();
+        let app = AppState::new(term, pty).unwrap();
+
+        assert!(app.wayland.stashed_floating_size.is_some());
+        let [w, h] = app.wayland.stashed_floating_size.unwrap();
+        assert_eq!(w, app.wayland.width);
+        assert_eq!(h, app.wayland.height);
+        assert!(w >= 720);
+        assert!(h >= 400);
     }
 }

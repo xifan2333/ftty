@@ -49,6 +49,7 @@ pub struct WaylandState {
     pub height: u32,
     pub configured: bool,
     pub close_requested: bool,
+    pub stashed_floating_size: Option<[u32; 2]>,
 }
 
 impl WaylandState {
@@ -86,7 +87,7 @@ impl WaylandState {
 
         toplevel.set_title("ftty".to_string());
         toplevel.set_app_id("ftty".to_string());
-        toplevel.set_min_size(100, 100);
+        toplevel.set_min_size(160, 90);
 
         surface.commit();
 
