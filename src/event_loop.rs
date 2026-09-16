@@ -1010,7 +1010,10 @@ impl Dispatch<WlSeat, ()> for AppState {
                 if let Some(pointer) = state.wayland.pointer.take() {
                     pointer.release();
                 }
-                state.hovered_span = None;
+                if state.hovered_span.is_some() {
+                    state.hovered_span = None;
+                    state.needs_redraw = true;
+                }
                 state.current_cursor_shape = None;
                 state.pointer_in_surface = false;
             }
