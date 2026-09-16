@@ -29,6 +29,60 @@ pub(crate) fn push_solid_quad(
     }
 }
 
+/// Pushes an arbitrary solid convex quadrilateral (two triangles) with `SOLID_UV`.
+#[inline]
+pub(crate) fn push_solid_poly_quad(
+    vertices: &mut Vec<f32>,
+    p0: [f32; 2],
+    p1: [f32; 2],
+    p2: [f32; 2],
+    p3: [f32; 2],
+    color: [f32; 4],
+) {
+    for [x, y] in [p0, p1, p2, p1, p3, p2] {
+        vertices.extend_from_slice(&[
+            x,
+            y,
+            SOLID_UV[0][0],
+            SOLID_UV[0][1],
+            color[0],
+            color[1],
+            color[2],
+            color[3],
+        ]);
+    }
+}
+
+/// Approximates a circular ring sector between inner and outer radii using segmented quads.
+fn push_arc_ring(
+    vertices: &mut Vec<f32>,
+    cx: f32,
+    cy: f32,
+    radius: f32,
+    thick: f32,
+    start_angle: f32,
+    color: [f32; 4],
+) {
+    let r_inner = (radius - thick / 2.0).max(0.0);
+    let r_outer = radius + thick / 2.0;
+    const STEPS: usize = 6;
+    let step_angle = std::f32::consts::FRAC_PI_2 / STEPS as f32;
+
+    for i in 0..STEPS {
+        let a0 = start_angle + i as f32 * step_angle;
+        let a1 = start_angle + (i + 1) as f32 * step_angle;
+        let (sin0, cos0) = a0.sin_cos();
+        let (sin1, cos1) = a1.sin_cos();
+
+        let p0 = [cx + r_inner * cos0, cy + r_inner * sin0];
+        let p1 = [cx + r_outer * cos0, cy + r_outer * sin0];
+        let p2 = [cx + r_inner * cos1, cy + r_inner * sin1];
+        let p3 = [cx + r_outer * cos1, cy + r_outer * sin1];
+
+        push_solid_poly_quad(vertices, p0, p1, p2, p3, color);
+    }
+}
+
 /// Returns `true` if the character is in the procedural box drawing or block elements range.
 #[inline]
 pub fn is_procedural_glyph(c: char) -> bool {
@@ -230,9 +284,13 @@ pub fn render_box_drawing(
                 [mid_x - t / 2.0, mid_y + r, mid_x + t / 2.0, y_bot],
                 color,
             );
-            push_solid_quad(
+            push_arc_ring(
                 vertices,
-                [mid_x - t / 2.0, mid_y, mid_x + r, mid_y + r],
+                mid_x + r,
+                mid_y + r,
+                r,
+                t,
+                std::f32::consts::PI,
                 color,
             );
         } else if down && !right {
@@ -247,9 +305,13 @@ pub fn render_box_drawing(
                 [mid_x - t / 2.0, mid_y + r, mid_x + t / 2.0, y_bot],
                 color,
             );
-            push_solid_quad(
+            push_arc_ring(
                 vertices,
-                [mid_x - r, mid_y, mid_x + t / 2.0, mid_y + r],
+                mid_x - r,
+                mid_y + r,
+                r,
+                t,
+                1.5 * std::f32::consts::PI,
                 color,
             );
         } else if !down && !right {
@@ -264,11 +326,7 @@ pub fn render_box_drawing(
                 [mid_x - t / 2.0, y, mid_x + t / 2.0, mid_y - r],
                 color,
             );
-            push_solid_quad(
-                vertices,
-                [mid_x - r, mid_y - r, mid_x + t / 2.0, mid_y],
-                color,
-            );
+            push_arc_ring(vertices, mid_x - r, mid_y - r, r, t, 0.0, color);
         } else {
             // ╰ Arc up & right
             push_solid_quad(
@@ -281,9 +339,13 @@ pub fn render_box_drawing(
                 [mid_x - t / 2.0, y, mid_x + t / 2.0, mid_y - r],
                 color,
             );
-            push_solid_quad(
+            push_arc_ring(
                 vertices,
-                [mid_x - t / 2.0, mid_y - r, mid_x + r, mid_y],
+                mid_x + r,
+                mid_y - r,
+                r,
+                t,
+                std::f32::consts::FRAC_PI_2,
                 color,
             );
         }
@@ -985,5 +1047,37 @@ mod tests {
             color
         ));
         assert!(!vertices.is_empty());
+    }
+
+    #[test]
+    fn test_rounded_corners_segmented_arc_not_solid_block() {
+        let mut vertices = Vec::new();
+        let color = [1.0, 1.0, 1.0, 1.0];
+        // ╭ arc down & right: 2 stems (2 quads) + 6 ring segments (6 quads) = 8 quads = 8 * 48 floats = 384
+        assert!(render_procedural_glyph(
+            &mut vertices,
+            '╭',
+            0.0,
+            0.0,
+            10.0,
+            20.0,
+            color
+        ));
+        assert_eq!(vertices.len(), 8 * 48);
+
+        // Verify all 4 rounded corners render
+        for c in ['╭', '╮', '╯', '╰'] {
+            vertices.clear();
+            assert!(render_procedural_glyph(
+                &mut vertices,
+                c,
+                0.0,
+                0.0,
+                10.0,
+                20.0,
+                color
+            ));
+            assert_eq!(vertices.len(), 8 * 48);
+        }
     }
 }
