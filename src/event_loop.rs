@@ -533,7 +533,11 @@ impl AppState {
         let new_font_size = new_config.font_size();
         let size_changed = (self.config.font_size() - new_font_size).abs() > f32::EPSILON;
 
-        if size_changed && (!new_font_size.is_finite() || new_font_size <= 0.0) {
+        if size_changed
+            && (!new_font_size.is_finite()
+                || new_font_size < crate::font::MIN_FONT_SIZE
+                || new_font_size > crate::font::MAX_FONT_SIZE)
+        {
             eprintln!("ftty: failed to reload font size: invalid size {new_font_size}");
             return;
         }
@@ -614,11 +618,11 @@ impl AppState {
                 self.needs_redraw = true;
             }
             KeyAction::FontIncrease => {
-                let new_size = (self.font_mgr.font_size() + 1.0).min(72.0);
+                let new_size = (self.font_mgr.font_size() + 1.0).min(crate::font::MAX_FONT_SIZE);
                 self.update_font_size(new_size);
             }
             KeyAction::FontDecrease => {
-                let new_size = (self.font_mgr.font_size() - 1.0).max(6.0);
+                let new_size = (self.font_mgr.font_size() - 1.0).max(crate::font::MIN_FONT_SIZE);
                 self.update_font_size(new_size);
             }
             KeyAction::FontReset => {
