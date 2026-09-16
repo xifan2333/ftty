@@ -488,7 +488,9 @@ impl AppState {
                     }
                 });
             } else {
-                self.write_pty_blocking(&payload);
+                // If cloning PTY master failed, do not block the main event loop with an oversized write;
+                // write bounded head chunk only.
+                self.write_pty_blocking(&payload[..4096]);
             }
         }
     }

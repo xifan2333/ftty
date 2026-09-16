@@ -477,7 +477,7 @@ impl KeyboardHandler {
             (
                 KeyAction::ClipboardPaste,
                 config.clipboard_paste.as_ref(),
-                &["Ctrl+Shift+V", "Shift+Insert"][..],
+                &["Ctrl+Shift+V"][..],
             ),
             (
                 KeyAction::PrimaryPaste,
@@ -758,6 +758,27 @@ mod tests {
             handler.check_action(11, &config),
             Some(KeyAction::FontReset)
         );
+
+        // User override: disabling clipboard_paste with "none" keeps primary_paste (Shift+Insert)
+        let custom_paste_config = KeybindingsConfig {
+            clipboard_paste: Some(crate::config::KeyCombos::Single("none".to_string())),
+            ..Default::default()
+        };
+        handler.update_modifiers(5, 0, 0, 0);
+        assert_eq!(handler.check_action(47, &custom_paste_config), None);
+        // Shift active: Insert key (evdev 110) still triggers PrimaryPaste
+        handler.update_modifiers(1, 0, 0, 0);
+        assert_eq!(
+            handler.check_action(110, &custom_paste_config),
+            Some(KeyAction::PrimaryPaste)
+        );
+
+        // User override: disabling primary_paste with "none" disables Shift+Insert
+        let custom_primary_config = KeybindingsConfig {
+            primary_paste: Some(crate::config::KeyCombos::Single("none".to_string())),
+            ..Default::default()
+        };
+        assert_eq!(handler.check_action(110, &custom_primary_config), None);
 
         // User override: disabling clipboard_copy with "none"
         let custom_config = KeybindingsConfig {
