@@ -1670,6 +1670,10 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
                             }
                         }
 
+                        // Rule 3332946: Synchronize Kitty keyboard flags directly on every PTY read iteration,
+                        // ensuring state alignment even if the chunk contained only filtered graphics events.
+                        state.keyboard.kitty_flags = state.terminal.kitty_keyboard_flags;
+
                         if total_read >= 65536 {
                             break;
                         }
