@@ -121,8 +121,13 @@ fn sym_matches(pressed: xkb::Keysym, target: xkb::Keysym) -> bool {
     if pressed == target {
         return true;
     }
-    let p_char = char::from_u32(xkb::keysym_to_utf32(pressed));
-    let t_char = char::from_u32(xkb::keysym_to_utf32(target));
+    let p_u32 = xkb::keysym_to_utf32(pressed);
+    let t_u32 = xkb::keysym_to_utf32(target);
+    if p_u32 == 0 || t_u32 == 0 {
+        return false;
+    }
+    let p_char = char::from_u32(p_u32);
+    let t_char = char::from_u32(t_u32);
     if let (Some(p), Some(t)) = (p_char, t_char) {
         p.eq_ignore_ascii_case(&t)
     } else {
@@ -467,17 +472,17 @@ impl KeyboardHandler {
             (
                 KeyAction::ClipboardCopy,
                 config.clipboard_copy.as_ref(),
-                &[][..],
+                &["Ctrl+Shift+C", "Ctrl+Insert"][..],
             ),
             (
                 KeyAction::ClipboardPaste,
                 config.clipboard_paste.as_ref(),
-                &[][..],
+                &["Ctrl+Shift+V"][..],
             ),
             (
                 KeyAction::PrimaryPaste,
                 config.primary_paste.as_ref(),
-                &[][..],
+                &["Shift+Insert"][..],
             ),
         ];
 
@@ -705,11 +710,83 @@ mod tests {
 
     #[test]
     fn test_check_action_default_bindings() {
-        let handler = KeyboardHandler::new();
+        let mut handler = KeyboardHandler::new();
         let config = KeybindingsConfig::default();
 
         // With no modifiers active, PageUp (evdev 104) is NOT an action
         assert!(handler.check_action(104, &config).is_none());
+
+        // Shift active (mask 1): PageUp (evdev 104) triggers ScrollbackUpPage
+        handler.update_modifiers(1, 0, 0, 0);
+        assert_eq!(
+            handler.check_action(104, &config),
+            Some(KeyAction::ScrollbackUpPage)
+        );
+        // Shift active: PageDown (evdev 109) triggers ScrollbackDownPage
+        assert_eq!(
+            handler.check_action(109, &config),
+            Some(KeyAction::ScrollbackDownPage)
+        );
+
+        // Ctrl + Shift active (mask 4 | 1 = 5):
+        handler.update_modifiers(5, 0, 0, 0);
+        // 'C' key (evdev 46) triggers ClipboardCopy
+        assert_eq!(
+            handler.check_action(46, &config),
+            Some(KeyAction::ClipboardCopy)
+        );
+        // 'V' key (evdev 47) triggers ClipboardPaste
+        assert_eq!(
+            handler.check_action(47, &config),
+            Some(KeyAction::ClipboardPaste)
+        );
+
+        // Ctrl active (mask 4):
+        handler.update_modifiers(4, 0, 0, 0);
+        // '=' key (evdev 13) triggers FontIncrease
+        assert_eq!(
+            handler.check_action(13, &config),
+            Some(KeyAction::FontIncrease)
+        );
+        // '-' key (evdev 12) triggers FontDecrease
+        assert_eq!(
+            handler.check_action(12, &config),
+            Some(KeyAction::FontDecrease)
+        );
+        // '0' key (evdev 11) triggers FontReset
+        assert_eq!(
+            handler.check_action(11, &config),
+            Some(KeyAction::FontReset)
+        );
+
+        // User override: disabling clipboard_paste with "none" keeps primary_paste (Shift+Insert)
+        let custom_paste_config = KeybindingsConfig {
+            clipboard_paste: Some(crate::config::KeyCombos::Single("none".to_string())),
+            ..Default::default()
+        };
+        handler.update_modifiers(5, 0, 0, 0);
+        assert_eq!(handler.check_action(47, &custom_paste_config), None);
+        // Shift active: Insert key (evdev 110) still triggers PrimaryPaste
+        handler.update_modifiers(1, 0, 0, 0);
+        assert_eq!(
+            handler.check_action(110, &custom_paste_config),
+            Some(KeyAction::PrimaryPaste)
+        );
+
+        // User override: disabling primary_paste with "none" disables Shift+Insert
+        let custom_primary_config = KeybindingsConfig {
+            primary_paste: Some(crate::config::KeyCombos::Single("none".to_string())),
+            ..Default::default()
+        };
+        assert_eq!(handler.check_action(110, &custom_primary_config), None);
+
+        // User override: disabling clipboard_copy with "none"
+        let custom_config = KeybindingsConfig {
+            clipboard_copy: Some(crate::config::KeyCombos::Single("none".to_string())),
+            ..Default::default()
+        };
+        handler.update_modifiers(5, 0, 0, 0);
+        assert_eq!(handler.check_action(46, &custom_config), None);
     }
 
     #[test]
