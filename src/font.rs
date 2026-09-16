@@ -55,6 +55,9 @@ struct FallbackFace {
     font: fontdue::Font,
 }
 
+const MAX_FALLBACK_FACES: usize = 64;
+const MAX_RESOLVED_CACHE: usize = 4096;
+
 /// Faces discovered on demand, keyed by (character, style) pairs.
 ///
 /// Nothing is parsed until a frame renders a character the configured faces cannot draw, so
@@ -68,28 +71,19 @@ struct FallbackCache {
 
 impl FallbackCache {
     /// Returns the index of a face covering `c` and the glyph index, loading the face on first use.
-    fn resolve(
-        &mut self,
-        c: char,
-        style: u8,
-        preferred_family: &str,
-        font_size: f32,
-    ) -> Option<(u16, u16)> {
+    fn resolve(&mut self, c: char, style: u8, preferred_family: &str) -> Option<(u16, u16)> {
+        if self.resolved.len() >= MAX_RESOLVED_CACHE && !self.resolved.contains_key(&(c, style)) {
+            self.resolved.clear();
+        }
         if let Some(cached) = self.resolved.get(&(c, style)) {
             return *cached;
         }
-        let resolved = self.discover(c, style, preferred_family, font_size);
+        let resolved = self.discover(c, style, preferred_family);
         self.resolved.insert((c, style), resolved);
         resolved
     }
 
-    fn discover(
-        &mut self,
-        c: char,
-        style: u8,
-        preferred_family: &str,
-        font_size: f32,
-    ) -> Option<(u16, u16)> {
+    fn discover(&mut self, c: char, style: u8, preferred_family: &str) -> Option<(u16, u16)> {
         // Fast path: check if any already loaded fallback face for this style covers `c`
         for (pos, face) in self.faces.iter().enumerate() {
             if face.style == style {
@@ -112,9 +106,13 @@ impl FallbackCache {
                 }) {
                     Some(position) => position,
                     None => {
-                        let Ok(font) = load_font_file(&path, index, font_size) else {
+                        let Ok(font) = load_font_file(&path, index) else {
                             continue;
                         };
+                        if self.faces.len() >= MAX_FALLBACK_FACES {
+                            self.faces.remove(0);
+                            self.resolved.clear();
+                        }
                         self.faces.push(FallbackFace {
                             path,
                             index,
@@ -232,25 +230,28 @@ fn query_fontconfig_candidates(
     Some(vec![(path, index)])
 }
 
-fn load_font_bytes(
-    bytes: &[u8],
-    collection_index: u32,
-    font_size: f32,
-) -> io::Result<fontdue::Font> {
+/// Maximum font zoom size supported by the terminal (see `event_loop.rs` font zoom clamp 72.0).
+///
+/// Fontdue optimizes its vector geometry simplification for `FontSettings::scale`.
+/// Parsing every face at `MAX_FONT_ZOOM_SCALE` guarantees full outline fidelity
+/// across all interactive zoom sizes (6.0..=72.0) without outline degradation.
+pub const MAX_FONT_ZOOM_SCALE: f32 = 72.0;
+
+fn load_font_bytes(bytes: &[u8], collection_index: u32) -> io::Result<fontdue::Font> {
     fontdue::Font::from_bytes(
         bytes,
         fontdue::FontSettings {
             collection_index,
-            scale: font_size,
+            scale: MAX_FONT_ZOOM_SCALE,
             load_substitutions: false,
         },
     )
     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
-fn load_font_file(path: &Path, collection_index: u32, font_size: f32) -> io::Result<fontdue::Font> {
+fn load_font_file(path: &Path, collection_index: u32) -> io::Result<fontdue::Font> {
     let bytes = fs::read(path)?;
-    load_font_bytes(&bytes, collection_index, font_size)
+    load_font_bytes(&bytes, collection_index)
 }
 
 fn style_index(flags: CellFlags) -> usize {
@@ -308,7 +309,7 @@ impl FontManager {
 
         let primary = fc
             .and_then(|fc| match_family(fc, primary_name, bold, italic))
-            .and_then(|(path, index)| load_font_file(&path, index, self.font_size).ok())
+            .and_then(|(path, index)| load_font_file(&path, index).ok())
             .unwrap_or_else(|| fallback_primary.clone());
 
         let fallbacks = fallback_names
@@ -316,7 +317,7 @@ impl FontManager {
             .enumerate()
             .filter_map(|(i, name)| {
                 fc.and_then(|fc| match_family(fc, name, bold, italic))
-                    .and_then(|(path, index)| load_font_file(&path, index, self.font_size).ok())
+                    .and_then(|(path, index)| load_font_file(&path, index).ok())
                     .or_else(|| self.regular_slots.get(i).and_then(|opt| opt.clone()))
             })
             .collect();
@@ -349,10 +350,10 @@ impl FontManager {
 
         // 1. Load the primary Regular font (determines CellMetrics)
         let primary_regular = match_family(fc, primary_name, false, false)
-            .and_then(|(path, index)| load_font_file(&path, index, font_size).ok())
+            .and_then(|(path, index)| load_font_file(&path, index).ok())
             .or_else(|| {
                 let (path, index) = match_family(fc, "monospace", false, false)?;
-                load_font_file(&path, index, font_size).ok()
+                load_font_file(&path, index).ok()
             })
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no monospace font found"))?;
 
@@ -378,7 +379,7 @@ impl FontManager {
             .iter()
             .map(|name| {
                 let (path, index) = match_family(fc, name, false, false)?;
-                load_font_file(&path, index, font_size).ok()
+                load_font_file(&path, index).ok()
             })
             .collect();
 
@@ -536,7 +537,7 @@ impl FontManager {
         let mut fallbacks = self.lock_fallbacks();
         let preferred = self.family();
 
-        match fallbacks.resolve(c, style, preferred, self.font_size) {
+        match fallbacks.resolve(c, style, preferred) {
             Some((face_idx, glyph)) => FaceKey {
                 face: num_configured + face_idx,
                 glyph,
@@ -757,21 +758,21 @@ mod tests {
         let fc = fontconfig().expect("fontconfig must be initialized");
         let (path, _) = match_family(fc, "monospace", false, false).expect("system monospace");
         let bytes = fs::read(&path).expect("read font bytes");
-        assert!(load_font_bytes(&bytes, 0, 14.0).is_ok());
-        assert!(load_font_bytes(&bytes, u32::MAX, 14.0).is_err());
-        assert!(load_font_file(&path, 0, 14.0).is_ok());
-        assert!(load_font_file(&path, u32::MAX, 14.0).is_err());
+        assert!(load_font_bytes(&bytes, 0).is_ok());
+        assert!(load_font_bytes(&bytes, u32::MAX).is_err());
+        assert!(load_font_file(&path, 0).is_ok());
+        assert!(load_font_file(&path, u32::MAX).is_err());
     }
 
     #[test]
     fn fallback_discovery_is_cached_per_character() {
         let mut cache = FallbackCache::default();
-        let first = cache.resolve('中', 0, "monospace", 14.0);
+        let first = cache.resolve('中', 0, "monospace");
         let loaded = cache.faces.len();
         assert_eq!(cache.resolved.len(), 1);
 
         // Repeated lookups must reuse both the resolved answer and the parsed face.
-        assert_eq!(cache.resolve('中', 0, "monospace", 14.0), first);
+        assert_eq!(cache.resolve('中', 0, "monospace"), first);
         assert_eq!(cache.faces.len(), loaded);
         assert_eq!(cache.resolved.len(), 1);
 
@@ -782,7 +783,7 @@ mod tests {
                 0
             );
             let face = &cache.faces[face_idx as usize];
-            assert!(load_font_file(&face.path, face.index, 14.0).is_ok());
+            assert!(load_font_file(&face.path, face.index).is_ok());
         }
     }
 
@@ -836,8 +837,8 @@ mod tests {
     #[test]
     fn styled_fallback_caching() {
         let mut cache = FallbackCache::default();
-        let regular = cache.resolve('中', 0, "monospace", 14.0);
-        let bold = cache.resolve('中', 1, "monospace", 14.0);
+        let regular = cache.resolve('中', 0, "monospace");
+        let bold = cache.resolve('中', 1, "monospace");
         if regular.is_some() {
             assert_eq!(cache.resolved.len(), 2);
         }
@@ -988,5 +989,17 @@ mod tests {
         assert_eq!(fonts.font_size(), 14.0);
         assert_eq!(fonts.metrics.cell_width, initial_width);
         assert_eq!(fonts.metrics.cell_height, initial_height);
+    }
+
+    #[test]
+    fn fallback_cache_has_bounded_capacity() {
+        let mut cache = FallbackCache::default();
+        for i in 0..(MAX_RESOLVED_CACHE + 10) {
+            let c = char::from_u32(0x1000 + i as u32).unwrap_or('A');
+            cache.resolved.insert((c, 0), None);
+        }
+        assert_eq!(cache.resolved.len(), MAX_RESOLVED_CACHE + 10);
+        let _ = cache.resolve('Z', 1, "monospace");
+        assert!(cache.resolved.len() <= MAX_RESOLVED_CACHE);
     }
 }
