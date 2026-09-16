@@ -441,6 +441,49 @@ impl FontManager {
         self.font_size
     }
 
+    /// Dynamically scales the font size and recalculates cell metrics in-memory.
+    ///
+    /// Because `fontdue::Font` maintains vector outlines and supports arbitrary
+    /// scale factors during rasterization, this avoids re-reading font files from
+    /// disk or re-querying Fontconfig on runtime zoom. Returns `true` if the size changed.
+    pub fn set_font_size(&mut self, new_size: f32) -> bool {
+        if !new_size.is_finite() || new_size <= 0.0 {
+            return false;
+        }
+        if (self.font_size - new_size).abs() < f32::EPSILON {
+            return false;
+        }
+        self.font_size = new_size;
+
+        let cell_width = self
+            .regular
+            .primary
+            .metrics('0', new_size)
+            .advance_width
+            .ceil()
+            .max(1.0) as u32;
+
+        let (cell_height, ascent) = self
+            .regular
+            .primary
+            .horizontal_line_metrics(new_size)
+            .map(|line| {
+                (
+                    line.new_line_size.ceil().max(1.0) as u32,
+                    line.ascent.ceil() as i32,
+                )
+            })
+            .unwrap_or((new_size.ceil().max(1.0) as u32, new_size.ceil() as i32));
+
+        self.metrics = CellMetrics {
+            cell_width,
+            cell_height,
+            ascent,
+        };
+
+        true
+    }
+
     /// Falls back to the regular face if a styled face cannot be loaded.
     #[must_use]
     pub fn font_for_style(&self, flags: CellFlags) -> &fontdue::Font {
@@ -916,5 +959,34 @@ mod tests {
                 .get_or_insert('A', CellFlags::empty(), fonts())
                 .is_some()
         );
+    }
+
+    #[test]
+    fn test_set_font_size_updates_metrics_in_memory_without_reloading() {
+        let mut fonts = FontManager::load(14.0).expect("load monospace");
+        let initial_width = fonts.metrics.cell_width;
+        let initial_height = fonts.metrics.cell_height;
+
+        // Scale up to 28.0 (double size)
+        assert!(fonts.set_font_size(28.0));
+        assert_eq!(fonts.font_size(), 28.0);
+        assert!(fonts.metrics.cell_width > initial_width);
+        assert!(fonts.metrics.cell_height > initial_height);
+
+        // Setting same size returns false
+        assert!(!fonts.set_font_size(28.0));
+
+        // Invalid sizes rejected
+        assert!(!fonts.set_font_size(0.0));
+        assert!(!fonts.set_font_size(-5.0));
+        assert!(!fonts.set_font_size(f32::NAN));
+        assert!(!fonts.set_font_size(f32::INFINITY));
+        assert_eq!(fonts.font_size(), 28.0);
+
+        // Scale back down
+        assert!(fonts.set_font_size(14.0));
+        assert_eq!(fonts.font_size(), 14.0);
+        assert_eq!(fonts.metrics.cell_width, initial_width);
+        assert_eq!(fonts.metrics.cell_height, initial_height);
     }
 }

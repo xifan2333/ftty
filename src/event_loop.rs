@@ -529,17 +529,23 @@ impl AppState {
             self.terminal.grid.viewport_offset = self.terminal.grid.viewport_offset.min(max_sb);
         }
 
-        let font_changed = self.config.font_families() != new_config.font_families()
-            || (self.config.font_size() - new_config.font_size()).abs() > f32::EPSILON;
+        let families_changed = self.config.font_families() != new_config.font_families();
+        let new_font_size = new_config.font_size();
+        let size_changed = (self.config.font_size() - new_font_size).abs() > f32::EPSILON;
 
-        let maybe_new_font = if font_changed {
+        if size_changed && (!new_font_size.is_finite() || new_font_size <= 0.0) {
+            eprintln!("ftty: failed to reload font size: invalid size {new_font_size}");
+            return;
+        }
+
+        let maybe_new_font = if families_changed {
             match FontManager::load_with_families(
                 &new_config.font_families(),
                 new_config.font_size(),
             ) {
                 Ok(mgr) => Some(mgr),
                 Err(e) => {
-                    eprintln!("ftty: failed to reload font face or size: {e}");
+                    eprintln!("ftty: failed to reload font face: {e}");
                     return;
                 }
             }
@@ -562,6 +568,8 @@ impl AppState {
             self.font_mgr = new_font_mgr;
             self.atlas.clear();
             let _ = self.resize_terminal();
+        } else if size_changed {
+            self.update_font_size(new_font_size);
         } else if padding_changed {
             let _ = self.resize_terminal();
         }
@@ -627,13 +635,7 @@ impl AppState {
     }
 
     fn update_font_size(&mut self, new_size: f32) {
-        if (self.font_mgr.font_size() - new_size).abs() < f32::EPSILON {
-            return;
-        }
-        if let Ok(new_font_mgr) =
-            FontManager::load_with_families(self.font_mgr.families(), new_size)
-        {
-            self.font_mgr = new_font_mgr;
+        if self.font_mgr.set_font_size(new_size) {
             self.atlas.clear();
             let _ = self.resize_terminal();
             self.needs_redraw = true;
