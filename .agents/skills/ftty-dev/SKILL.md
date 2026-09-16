@@ -77,8 +77,8 @@ Follow progressive disclosure: consult specific reference files depending on you
 ### Task: Implementing an Issue / Feature / Bugfix
 Read **[references/issue-pr-workflow.md](references/issue-pr-workflow.md)**
 - The strict 5-phase Issue + Draft PR chronological lifecycle (`gh pr create --draft`).
-- Single-item focused implementation loop and atomic Conventional Commits.
-- Unified push upon completion and marking PR ready for review.
+- Single-item focused implementation loop: atomic commit, immediate PR checklist sync (`- [x]`), and push per item.
+- Marking PR ready for review once all checklist tasks are completed.
 - **Review Bot Triage & Verification**: Never rush to merge! Poll until Qodo and CodeRabbit finish analyzing, resolve all reported bugs, and verify `Bugs (0)` before merging.
 
 ### Task: Architecture, Module Boundaries & Safety Invariants
