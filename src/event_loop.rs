@@ -50,7 +50,7 @@ use crate::kitty::{ImagePlacement, KittyAction, KittyEvent, KittyParser, kitty_r
 use crate::mouse::{MouseModifiers, encode_mouse_event};
 use crate::parser::Terminal;
 use crate::pty::Pty;
-use crate::render::{ColorScheme, RenderOptions, Renderer};
+use crate::render::{ColorScheme, HoveredHyperlinkSpan, RenderOptions, Renderer};
 use crate::selection::{Selection, SelectionPoint, SelectionType, find_word_boundaries};
 use crate::wayland::WaylandState;
 
@@ -86,7 +86,8 @@ pub struct AppState {
     pub last_click_cell: Option<(usize, usize)>,
     pub last_serial: u32,
     pub pointer_serial: u32,
-    pub hovered_hyperlink: Option<u32>,
+    pub pointer_in_surface: bool,
+    pub hovered_span: Option<HoveredHyperlinkSpan>,
     pub current_cursor_shape: Option<Shape>,
     pub clipboard_text: Option<String>,
     pub pending_offers: Vec<crate::wayland::OfferData>,
@@ -204,7 +205,8 @@ impl AppState {
             last_click_cell: None,
             last_serial: 0,
             pointer_serial: 0,
-            hovered_hyperlink: None,
+            pointer_in_surface: false,
+            hovered_span: None,
             current_cursor_shape: None,
             clipboard_text: None,
             pending_offers: Vec::new(),
@@ -219,9 +221,26 @@ impl AppState {
         })
     }
 
+    /// Initializes the cursor shape device if protocol is available and updates shape if focused.
+    pub fn try_init_cursor_shape(&mut self, qh: &QueueHandle<Self>) {
+        if self.wayland.cursor_shape_device.is_none() {
+            self.wayland.init_cursor_shape(qh);
+            if self.wayland.cursor_shape_device.is_some()
+                && self.pointer_in_surface
+                && self.pointer_serial != 0
+            {
+                self.current_cursor_shape = None;
+                self.update_cursor_shape();
+            }
+        }
+    }
+
     /// Updates the Wayland cursor shape based on whether a hyperlink is currently hovered.
     pub fn update_cursor_shape(&mut self) {
-        let shape = if self.hovered_hyperlink.is_some() {
+        if !self.pointer_in_surface || self.pointer_serial == 0 {
+            return;
+        }
+        let shape = if self.hovered_span.is_some() {
             Shape::Pointer
         } else {
             Shape::Text
@@ -237,19 +256,40 @@ impl AppState {
 
     /// Updates the hovered hyperlink and cursor shape based on current pointer coordinates.
     pub fn update_hover_state(&mut self) {
-        let hovered_id = if self.mouse_pressed {
+        let new_span = if !self.pointer_in_surface || self.mouse_pressed {
             None
         } else {
-            let (_, screen_row, col) = self.cell_at_pointer(self.mouse_pos[0], self.mouse_pos[1]);
-            self.terminal
-                .grid
-                .visible_line(screen_row)
-                .cells
-                .get(col)
-                .and_then(|c| c.hyperlink_id)
+            let (line, screen_row, col) =
+                self.cell_at_pointer(self.mouse_pos[0], self.mouse_pos[1]);
+            let row = self.terminal.grid.visible_line(screen_row);
+            if let Some(cell) = row.cells.get(col)
+                && let Some(id) = cell.hyperlink_id
+                && id > 0
+                && self.terminal.hyperlink_url(id).is_some()
+            {
+                let mut start_col = col;
+                while start_col > 0
+                    && row.cells.get(start_col - 1).and_then(|c| c.hyperlink_id) == Some(id)
+                {
+                    start_col -= 1;
+                }
+                let mut end_col = col;
+                while end_col + 1 < row.cells.len()
+                    && row.cells.get(end_col + 1).and_then(|c| c.hyperlink_id) == Some(id)
+                {
+                    end_col += 1;
+                }
+                Some(HoveredHyperlinkSpan {
+                    line,
+                    start_col,
+                    end_col,
+                })
+            } else {
+                None
+            }
         };
-        if self.hovered_hyperlink != hovered_id {
-            self.hovered_hyperlink = hovered_id;
+        if self.hovered_span != new_span {
+            self.hovered_span = new_span;
             self.needs_redraw = true;
             self.update_cursor_shape();
         }
@@ -840,7 +880,7 @@ impl Dispatch<WlRegistry, ()> for AppState {
                 "wp_cursor_shape_manager_v1" => {
                     let manager = registry.bind::<WpCursorShapeManagerV1, _, _>(name, 1, qh, ());
                     state.wayland.cursor_shape_manager = Some(manager);
-                    state.wayland.init_cursor_shape(qh);
+                    state.try_init_cursor_shape(qh);
                 }
                 _ => {}
             }
@@ -957,10 +997,22 @@ impl Dispatch<WlSeat, ()> for AppState {
                 let keyboard = proxy.get_keyboard(qh, ());
                 state.wayland.keyboard = Some(keyboard);
             }
-            if caps.contains(Capability::Pointer) && state.wayland.pointer.is_none() {
-                let pointer = proxy.get_pointer(qh, ());
-                state.wayland.pointer = Some(pointer);
-                state.wayland.init_cursor_shape(qh);
+            if caps.contains(Capability::Pointer) {
+                if state.wayland.pointer.is_none() {
+                    let pointer = proxy.get_pointer(qh, ());
+                    state.wayland.pointer = Some(pointer);
+                    state.try_init_cursor_shape(qh);
+                }
+            } else {
+                if let Some(device) = state.wayland.cursor_shape_device.take() {
+                    device.destroy();
+                }
+                if let Some(pointer) = state.wayland.pointer.take() {
+                    pointer.release();
+                }
+                state.hovered_span = None;
+                state.current_cursor_shape = None;
+                state.pointer_in_surface = false;
             }
         }
     }
@@ -1078,6 +1130,7 @@ impl Dispatch<WlPointer, ()> for AppState {
                 surface_y,
                 ..
             } => {
+                state.pointer_in_surface = true;
                 state.pointer_serial = serial;
                 state.last_serial = serial;
                 state.mouse_pos = [surface_x, surface_y];
@@ -1086,8 +1139,9 @@ impl Dispatch<WlPointer, ()> for AppState {
                 state.update_cursor_shape();
             }
             wl_pointer::Event::Leave { .. } => {
-                if state.hovered_hyperlink.is_some() {
-                    state.hovered_hyperlink = None;
+                state.pointer_in_surface = false;
+                if state.hovered_span.is_some() {
+                    state.hovered_span = None;
                     state.needs_redraw = true;
                 }
                 state.current_cursor_shape = None;
@@ -1098,6 +1152,7 @@ impl Dispatch<WlPointer, ()> for AppState {
                 ..
             } => {
                 state.mouse_pos = [surface_x, surface_y];
+                state.update_hover_state();
                 let held = state.mouse_buttons_held != 0 || state.mouse_reported;
                 if state.terminal.mouse.reports_motion(held) {
                     let button = if held {
@@ -1118,7 +1173,6 @@ impl Dispatch<WlPointer, ()> for AppState {
                     state.selection.end = SelectionPoint::new(line, col);
                     state.needs_redraw = true;
                 }
-                state.update_hover_state();
             }
             wl_pointer::Event::Button {
                 button,
@@ -1127,7 +1181,6 @@ impl Dispatch<WlPointer, ()> for AppState {
                 serial,
             } => {
                 state.last_serial = serial;
-                state.pointer_serial = serial;
                 let Some(index) = x11_button_index(button) else {
                     return;
                 };
@@ -1657,6 +1710,10 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
             app_state.sync_output_start = None;
         }
 
+        if app_state.needs_redraw && !sync_active && app_state.frame_callback.is_none() {
+            app_state.update_hover_state();
+        }
+
         if app_state.needs_redraw
             && !sync_active
             && app_state.frame_callback.is_none()
@@ -1672,7 +1729,7 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
                 app_state.ime.preedit.as_ref(),
                 Some(&app_state.selection),
             )
-            .with_hovered_hyperlink(app_state.hovered_hyperlink);
+            .with_hovered_span(app_state.hovered_span);
             renderer.render_grid(
                 &app_state.terminal.grid,
                 colors,
@@ -2210,34 +2267,79 @@ mod tests {
         let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
         let mut app = AppState::new(term, pty).expect("AppState new");
 
-        // Cell at (row 0, col 5) has hyperlink ID 1
-        app.terminal.grid.lines[0].cells[5].hyperlink_id = Some(1);
+        // Intern a real URL so hyperlink_id 1 is resolvable
+        let id = app
+            .terminal
+            .get_or_intern_hyperlink("https://example.com".to_string());
+        assert_eq!(id, 1);
+
+        // Cells at cols 4..=6 have hyperlink ID 1
+        for col in 4..=6 {
+            app.terminal.grid.lines[0].cells[col].hyperlink_id = Some(1);
+        }
+        // Cell at col 8 has hyperlink ID 0 (invalid/exhausted sentinel)
+        app.terminal.grid.lines[0].cells[8].hyperlink_id = Some(0);
 
         let cw = f64::from(app.font_mgr.metrics.cell_width);
         let ch = f64::from(app.font_mgr.metrics.cell_height);
 
+        // If pointer is not in surface, hover must be None
+        app.pointer_in_surface = false;
+        app.mouse_pos = [cw * 5.5, ch * 0.5];
+        app.update_hover_state();
+        assert_eq!(app.hovered_span, None);
+
+        // Enter surface
+        app.pointer_in_surface = true;
+
         // Pointer over cell (row 0, col 0) has no hyperlink
         app.mouse_pos = [cw * 0.5, ch * 0.5];
         app.update_hover_state();
-        assert_eq!(app.hovered_hyperlink, None);
+        assert_eq!(app.hovered_span, None);
 
-        // Move pointer over cell (row 0, col 5) with hyperlink
+        // Move pointer over cell (row 0, col 5): detects contiguous span [4..=6]
         app.mouse_pos = [cw * 5.5, ch * 0.5];
         app.needs_redraw = false;
         app.update_hover_state();
-        assert_eq!(app.hovered_hyperlink, Some(1));
+        assert_eq!(
+            app.hovered_span,
+            Some(HoveredHyperlinkSpan {
+                line: 0,
+                start_col: 4,
+                end_col: 6,
+            })
+        );
         assert!(app.needs_redraw);
+
+        // Pointer over cell with sentinel id 0 (pool exhaustion) must produce no hover
+        app.mouse_pos = [cw * 8.5, ch * 0.5];
+        app.needs_redraw = false;
+        app.update_hover_state();
+        assert_eq!(app.hovered_span, None);
+        assert!(app.needs_redraw);
+
+        // Back to col 5
+        app.mouse_pos = [cw * 5.5, ch * 0.5];
+        app.update_hover_state();
+        assert!(app.hovered_span.is_some());
 
         // If mouse is pressed (dragging selection), hover is suppressed
         app.mouse_pressed = true;
         app.needs_redraw = false;
         app.update_hover_state();
-        assert_eq!(app.hovered_hyperlink, None);
+        assert_eq!(app.hovered_span, None);
         assert!(app.needs_redraw);
 
         // When mouse is released, hover is restored
         app.mouse_pressed = false;
         app.update_hover_state();
-        assert_eq!(app.hovered_hyperlink, Some(1));
+        assert_eq!(
+            app.hovered_span,
+            Some(HoveredHyperlinkSpan {
+                line: 0,
+                start_col: 4,
+                end_col: 6,
+            })
+        );
     }
 }

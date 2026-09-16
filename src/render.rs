@@ -41,13 +41,21 @@ impl<'a> ColorScheme<'a> {
     }
 }
 
+/// Represents the contiguous grid span of a hovered hyperlink.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HoveredHyperlinkSpan {
+    pub line: usize,
+    pub start_col: usize,
+    pub end_col: usize,
+}
+
 /// Options controlling frame layout, window padding, active IME composition, and text selection.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RenderOptions<'a> {
     pub padding: [u16; 2],
     pub preedit: Option<&'a Preedit>,
     pub selection: Option<&'a Selection>,
-    pub hovered_hyperlink: Option<u32>,
+    pub hovered_span: Option<HoveredHyperlinkSpan>,
 }
 
 impl<'a> RenderOptions<'a> {
@@ -61,13 +69,13 @@ impl<'a> RenderOptions<'a> {
             padding,
             preedit,
             selection,
-            hovered_hyperlink: None,
+            hovered_span: None,
         }
     }
 
     #[must_use]
-    pub fn with_hovered_hyperlink(mut self, hovered_hyperlink: Option<u32>) -> Self {
-        self.hovered_hyperlink = hovered_hyperlink;
+    pub fn with_hovered_span(mut self, hovered_span: Option<HoveredHyperlinkSpan>) -> Self {
+        self.hovered_span = hovered_span;
         self
     }
 }
@@ -977,6 +985,7 @@ fn build_vertices(
     }
 
     for row in 0..grid.rows {
+        let abs_line = grid.scrollback.len() + row - grid.viewport_offset;
         let line = grid.visible_line(row);
         for (col, cell) in line.cells.iter().enumerate() {
             if cell
@@ -1047,9 +1056,10 @@ fn build_vertices(
                 cw
             };
             let has_explicit_underline = cell.flags.contains(CellFlags::UNDERLINE);
-            let has_hover_underline = options
-                .hovered_hyperlink
-                .is_some_and(|id| cell.hyperlink_id == Some(id));
+            let has_hover_underline = cell.hyperlink_id.is_some()
+                && options.hovered_span.is_some_and(|span| {
+                    span.line == abs_line && col >= span.start_col && col <= span.end_col
+                });
             if has_explicit_underline || has_hover_underline {
                 let ul_color = if cell.underline_color != Color::DefaultForeground {
                     let resolved = cell.underline_color.to_rgb(
@@ -1498,7 +1508,7 @@ mod tests {
         let fonts = FontManager::load(14.0).expect("system monospace font");
         let mut grid = Grid::new(10, 2, 0);
         grid.cursor.visible = false;
-        // Write character with hyperlink_id 1
+        // Write character with hyperlink_id 1 at line 0, col 0
         grid.write_char_styled(
             'a',
             Color::DefaultForeground,
@@ -1530,7 +1540,11 @@ mod tests {
             fonts.metrics,
             &fonts,
             &atlas,
-            RenderOptions::new([0, 0], None, None).with_hovered_hyperlink(Some(2)),
+            RenderOptions::new([0, 0], None, None).with_hovered_span(Some(HoveredHyperlinkSpan {
+                line: 1, // different line
+                start_col: 0,
+                end_col: 0,
+            })),
         );
 
         let mut vertices_matched_hover = Vec::new();
@@ -1541,7 +1555,11 @@ mod tests {
             fonts.metrics,
             &fonts,
             &atlas,
-            RenderOptions::new([0, 0], None, None).with_hovered_hyperlink(Some(1)),
+            RenderOptions::new([0, 0], None, None).with_hovered_span(Some(HoveredHyperlinkSpan {
+                line: 0,
+                start_col: 0,
+                end_col: 0,
+            })),
         );
 
         // Without hover and with mismatched hover, only the character glyph quad is produced (48 f32 floats)
@@ -1549,5 +1567,57 @@ mod tests {
         assert_eq!(vertices_mismatched_hover.len(), 48);
         // With matched hover, an extra solid underline quad is produced (+48 f32 floats = 96)
         assert_eq!(vertices_matched_hover.len(), 96);
+    }
+
+    #[test]
+    fn test_hovered_hyperlink_scopes_to_span_not_entire_url() {
+        let fonts = FontManager::load(14.0).expect("system monospace font");
+        let mut grid = Grid::new(10, 2, 0);
+        grid.cursor.visible = false;
+        // Line 0: write 'x' with hyperlink 1
+        grid.cursor.row = 0;
+        grid.cursor.col = 0;
+        grid.write_char_styled(
+            'x',
+            Color::DefaultForeground,
+            Color::DefaultBackground,
+            CellFlags::empty(),
+            Color::DefaultForeground,
+            Some(1),
+        );
+        // Line 1: write 'y' with SAME hyperlink 1
+        grid.cursor.row = 1;
+        grid.cursor.col = 0;
+        grid.write_char_styled(
+            'y',
+            Color::DefaultForeground,
+            Color::DefaultBackground,
+            CellFlags::empty(),
+            Color::DefaultForeground,
+            Some(1),
+        );
+
+        let mut atlas = GlyphAtlas::new(64, 64);
+        prepare_atlas(&grid, &fonts, &mut atlas, None);
+
+        let mut vertices = Vec::new();
+        // Hover ONLY the span on line 1
+        build_vertices(
+            &mut vertices,
+            &grid,
+            ColorScheme::new(&default_256_palette(), DEFAULT_FG, DEFAULT_BG),
+            fonts.metrics,
+            &fonts,
+            &atlas,
+            RenderOptions::new([0, 0], None, None).with_hovered_span(Some(HoveredHyperlinkSpan {
+                line: 1,
+                start_col: 0,
+                end_col: 0,
+            })),
+        );
+
+        // 2 characters (48 floats each) + 1 underline quad for line 1 only (48 floats) = 144 floats.
+        // If line 0 had also been underlined due to identical URL ID, it would be 192 floats.
+        assert_eq!(vertices.len(), 144);
     }
 }

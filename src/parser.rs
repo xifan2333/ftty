@@ -519,7 +519,7 @@ impl Perform for Terminal {
                     self.active_hyperlink = None;
                 } else if let Ok(url) = std::str::from_utf8(url_bytes) {
                     let id = self.get_or_intern_hyperlink(url.to_string());
-                    self.active_hyperlink = Some(id);
+                    self.active_hyperlink = if id > 0 { Some(id) } else { None };
                 }
             }
         }
@@ -1324,6 +1324,15 @@ mod tests {
         // Enter alt screen, execute RIS, exit alt screen
         alt_term.advance_bytes(b"\x1b[?1049h\x1bc\x1b[?1049l");
         assert_eq!(alt_term.grid.lines[0].cells[0].hyperlink_id, None);
+
+        // When pool reaches MAX_HYPERLINKS, subsequent new URLs return 0 and active_hyperlink is None
+        let mut full_term = Terminal::new(80, 24, 100);
+        for i in 0..MAX_HYPERLINKS {
+            let _ = full_term.get_or_intern_hyperlink(format!("https://unique-{i}.com"));
+        }
+        full_term.advance_bytes(b"\x1b]8;;https://overflow.com\x07Overflow\x1b]8;;\x07");
+        assert_eq!(full_term.active_hyperlink, None);
+        assert_eq!(full_term.grid.lines[0].cells[0].hyperlink_id, None);
     }
 
     #[test]

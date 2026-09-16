@@ -36,6 +36,6 @@ pub use kitty::{
 pub use mouse::{MouseEncoding, MouseModifiers, MouseState, MouseTracking, encode_mouse_event};
 pub use parser::Terminal;
 pub use pty::Pty;
-pub use render::{ColorScheme, RenderOptions, Renderer};
+pub use render::{ColorScheme, HoveredHyperlinkSpan, RenderOptions, Renderer};
 pub use selection::{Selection, SelectionPoint, SelectionType, find_word_boundaries};
 pub use wayland::{OfferData, WaylandState};
