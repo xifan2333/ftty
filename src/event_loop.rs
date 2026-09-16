@@ -519,16 +519,6 @@ impl AppState {
             }
         };
 
-        let max_sb = new_config.scrollback_lines();
-        self.terminal.grid.max_scrollback = max_sb;
-        if self.terminal.grid.scrollback.len() > max_sb {
-            let overflow = self.terminal.grid.scrollback.len() - max_sb;
-            for _ in 0..overflow {
-                self.terminal.grid.scrollback.pop_front();
-            }
-            self.terminal.grid.viewport_offset = self.terminal.grid.viewport_offset.min(max_sb);
-        }
-
         let families_changed = self.config.font_families() != new_config.font_families();
         let new_font_size = new_config.font_size();
         let size_changed = (self.config.font_size() - new_font_size).abs() > f32::EPSILON;
@@ -556,6 +546,16 @@ impl AppState {
         } else {
             None
         };
+
+        let max_sb = new_config.scrollback_lines();
+        self.terminal.grid.max_scrollback = max_sb;
+        if self.terminal.grid.scrollback.len() > max_sb {
+            let overflow = self.terminal.grid.scrollback.len() - max_sb;
+            for _ in 0..overflow {
+                self.terminal.grid.scrollback.pop_front();
+            }
+            self.terminal.grid.viewport_offset = self.terminal.grid.viewport_offset.min(max_sb);
+        }
 
         let padding_changed = self.config.padding_x() != new_config.padding_x()
             || self.config.padding_y() != new_config.padding_y();
@@ -1957,6 +1957,9 @@ mod tests {
         std::fs::write(
             &config_path,
             r##"
+            [scrollback]
+            lines = 100
+
             [font]
             size = 14.0
 
@@ -1975,10 +1978,22 @@ mod tests {
         let mut app = AppState::with_config(term, pty, Some(config_path.clone()))
             .expect("AppState with_config");
 
-        // Write an invalid font size (0.0), along with changed colors and cursor
+        // Populate scrollback with lines
+        for _ in 0..10 {
+            app.terminal
+                .grid
+                .scrollback
+                .push_back(crate::grid::Row::new(80));
+        }
+        assert_eq!(app.terminal.grid.scrollback.len(), 10);
+
+        // Write an invalid font size (0.0), along with changed colors, cursor, and smaller scrollback
         std::fs::write(
             &config_path,
             r##"
+            [scrollback]
+            lines = 2
+
             [font]
             size = 0.0
 
@@ -1995,7 +2010,9 @@ mod tests {
         app.needs_redraw = false;
         app.reload_config();
 
-        // Ensure state was NOT partially committed
+        // Ensure state was NOT partially committed (scrollback must not be truncated!)
+        assert_eq!(app.terminal.grid.scrollback.len(), 10);
+        assert_eq!(app.terminal.grid.max_scrollback, 100);
         assert_eq!(app.default_bg, Rgb::new(0, 0, 0));
         assert_eq!(app.default_fg, Rgb::new(255, 255, 255));
         assert_eq!(app.terminal.grid.cursor.shape, CursorShape::Block);
