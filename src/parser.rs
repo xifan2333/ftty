@@ -72,7 +72,8 @@ pub struct Terminal {
     pub progress: Option<ProgressState>,
     /// Currently active hyperlink ID for incoming text.
     pub active_hyperlink: Option<u32>,
-    hyperlink_pool: Vec<String>,
+    next_hyperlink_id: u32,
+    hyperlink_pool: Vec<(u32, String)>,
     /// Active flags for the Kitty keyboard protocol.
     pub kitty_keyboard_flags: u8,
     pub kitty_keyboard_stack: Vec<u8>,
@@ -109,6 +110,7 @@ impl Terminal {
             report_window_size: false,
             progress: None,
             active_hyperlink: None,
+            next_hyperlink_id: 1,
             hyperlink_pool: Vec::new(),
             kitty_keyboard_flags: 0,
             kitty_keyboard_stack: Vec::new(),
@@ -165,27 +167,38 @@ impl Terminal {
         std::mem::take(&mut self.responses)
     }
 
-    /// Interns a URL into the terminal's hyperlink storage and returns its 1-based ID.
+    /// Interns a URL into the terminal's hyperlink storage and returns its ID.
+    ///
+    /// The pool is bounded to [`MAX_HYPERLINKS`]. When capacity is reached, the oldest
+    /// entry is evicted via FIFO while preserving unique identifiers for surviving URLs.
     pub fn get_or_intern_hyperlink(&mut self, url: String) -> u32 {
-        if let Some(pos) = self.hyperlink_pool.iter().position(|u| u == &url) {
-            pos as u32 + 1
-        } else if self.hyperlink_pool.len() < MAX_HYPERLINKS {
-            self.hyperlink_pool.push(url);
-            self.hyperlink_pool.len() as u32
+        if let Some((id, _)) = self.hyperlink_pool.iter().find(|(_, u)| u == &url) {
+            *id
         } else {
-            0
+            if self.hyperlink_pool.len() >= MAX_HYPERLINKS {
+                self.hyperlink_pool.remove(0);
+            }
+            let id = self.next_hyperlink_id;
+            self.next_hyperlink_id = if self.next_hyperlink_id == u32::MAX {
+                1
+            } else {
+                self.next_hyperlink_id + 1
+            };
+            self.hyperlink_pool.push((id, url));
+            id
         }
     }
 
-    /// Resolves a 1-based hyperlink ID to its underlying URL.
+    /// Resolves a hyperlink ID to its underlying URL.
     #[must_use]
     pub fn hyperlink_url(&self, id: u32) -> Option<&str> {
         if id == 0 {
             return None;
         }
         self.hyperlink_pool
-            .get((id - 1) as usize)
-            .map(String::as_str)
+            .iter()
+            .find(|(i, _)| *i == id)
+            .map(|(_, u)| u.as_str())
     }
 
     /// Drains pending clipboard updates received through OSC 52.
@@ -519,7 +532,7 @@ impl Perform for Terminal {
                     self.active_hyperlink = None;
                 } else if let Ok(url) = std::str::from_utf8(url_bytes) {
                     let id = self.get_or_intern_hyperlink(url.to_string());
-                    self.active_hyperlink = Some(id);
+                    self.active_hyperlink = if id > 0 { Some(id) } else { None };
                 }
             }
         }
@@ -884,6 +897,7 @@ impl Perform for Terminal {
                 self.active_hyperlink = None;
                 self.grid.clear_all_hyperlinks();
                 self.hyperlink_pool.clear();
+                self.next_hyperlink_id = 1;
                 self.kitty_keyboard_flags = 0;
                 self.kitty_keyboard_stack.clear();
                 self.pending_kitty_keyboard = Some((0, 1));
@@ -1324,6 +1338,26 @@ mod tests {
         // Enter alt screen, execute RIS, exit alt screen
         alt_term.advance_bytes(b"\x1b[?1049h\x1bc\x1b[?1049l");
         assert_eq!(alt_term.grid.lines[0].cells[0].hyperlink_id, None);
+
+        // When pool reaches MAX_HYPERLINKS, FIFO eviction ensures new URLs continue to be interned
+        let mut full_term = Terminal::new(80, 24, 100);
+        let first_id = full_term.get_or_intern_hyperlink("https://first.com".to_string());
+        for i in 1..MAX_HYPERLINKS {
+            let _ = full_term.get_or_intern_hyperlink(format!("https://unique-{i}.com"));
+        }
+        assert_eq!(full_term.hyperlink_url(first_id), Some("https://first.com"));
+
+        // Overflow: 1025th URL evicts the oldest entry (first_id)
+        full_term.advance_bytes(b"\x1b]8;;https://overflow.com\x07Overflow\x1b]8;;\x07");
+        let cell = full_term.grid.lines[0].cells[0];
+        assert!(cell.hyperlink_id.is_some());
+        let overflow_id = cell.hyperlink_id.unwrap();
+        assert_eq!(
+            full_term.hyperlink_url(overflow_id),
+            Some("https://overflow.com")
+        );
+        // The evicted URL now safely resolves to None without aliasing
+        assert_eq!(full_term.hyperlink_url(first_id), None);
     }
 
     #[test]
