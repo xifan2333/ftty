@@ -71,22 +71,32 @@ All coding agents must strictly adhere to the SOP:
 
 ### Phase 2: Single-Item Focused Implementation Loop
 
-For each sub-task in the issue checklist:
+For each sub-task in the issue checklist (in strict sequential order, maintaining minimal granularity):
 
-1. Implement code changes targeted strictly to that task.
-2. Run local quality gate preview: `mise run check:plan`
-3. Execute quality checks and auto-format: `mise run fix` and `mise run check:changed`
-4. Run tests: `mise run test`
-5. Create local atomic commit following Conventional Commits format.
-
-### Phase 3: PR Finalization & Readiness
-
-1. Push all commits to the branch: `git push origin <branch_name>`
-2. Update PR description to check off completed items (`- [x]`):
+1. **Targeted Implementation**: Implement code changes targeted strictly to that single task.
+2. **Quality Gates Preview & Execution**:
+   - Preview checks: `mise run check:plan`
+   - Auto-format and lint: `mise run fix && mise run check:changed`
+   - Run unit tests: `mise run test`
+3. **Local Atomic Commit**: Create an atomic commit following Conventional Commits format:
+   ```bash
+   git add <modified_files>
+   git commit -m "<type>(<scope>): <concise summary> (#<issue_id>)"
+   ```
+4. **Immediate PR Progress Sync**: Update the Draft PR description immediately to check off the completed item (`- [x]`):
    ```bash
    gh pr edit --body "..."
    ```
-3. Mark PR ready for review (this activates review bots: CodeRabbit, Greptile):
+5. **Incremental Push**: Push the commit to the remote branch immediately to guarantee transparent progress:
+   ```bash
+   git push origin <branch_name>
+   ```
+
+### Phase 3: PR Readiness & Review Activation
+
+Once all checklist items are completed, checked off, and pushed:
+
+1. Mark PR ready for review (this activates review bots: Qodo, CodeRabbit, Greptile):
    ```bash
    gh pr ready
    ```

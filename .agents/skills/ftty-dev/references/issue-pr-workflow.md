@@ -27,51 +27,47 @@ To maintain development velocity without compromising quality gates:
 |    gh pr create --draft (ALL checklist items unchecked: - [ ])         |
 +-----------------------------------+------------------------------------+
                                     |
-                +-------------------v-------------------+
-                | 2. Single-Item Focused Development    |
-                |    Only implement the topmost - [ ]   |
-                +-------------------+-------------------+
+```
++------------------------------------------------------------------------+
+| 1. Pre-Code Initialization (MANDATORY BEFORE ANY CODE IS WRITTEN)       |
+|    gh issue view <id>                                                  |
+|    git checkout -b <type>/<short-description>                          |
+|    git commit --allow-empty -m "<type>(<scope>): start <desc> (#<id>)" |
+|    git push -u origin <type>/<short-description>                       |
+|    gh pr create --draft (ALL checklist items unchecked: - [ ])         |
++-----------------------------------+------------------------------------+
                                     |
-                +-------------------v-------------------+
-                | 3. Local Quality Gate & Pre-check     |
-                |    mise run check:plan                |
-                |    mise run fix                       |
-                |    mise run check:changed             |
-                |    mise run test                      |
-                +-------------------+-------------------+
-                                    |
-                +-------------------v-------------------+
-                | 4. Local Atomic Commit                |
-                |    git add <modified_files>           |
-                |    git commit -m "<type>: ..."        |
-                |    (Keep commit atomic)               |
-                +-------------------+-------------------+
-                                    | (Remaining tasks?)
-                                    +-------- Yes -------+
-                                    | No                 |
-+-----------------------------------v-------------------+|
-| 5. Unified Push & Mark Ready                          ||
-|    git push origin <branch>                           ||
-|    gh pr edit --body "<updated_checklist>"            ||
-|    gh pr ready                                        ||
-+-----------------------------------+-------------------+|
-                                    |                    |
-+-----------------------------------v-------------------+|
-| 6. Review Bot Triage & Verification Loop (CRITICAL)   ||
-|    - Poll until review bots finish processing         ||
-|    - Inspect Qodo, CodeRabbit, and Greptile feedback  ||
-|    - Fix ALL reported bugs defensively                ||
-|    - Push fixes and WAIT for bot re-review            ||
-|    - DO NOT MERGE until ALL bugs are [Resolved]!      ||
-+-----------------------------------+-------------------+|
-                                    | (All clean?)       |
-                                    +--- No: Loop back --+
++-----------------------------------v------------------------------------+
+| 2. Per-Item Focused Implementation Loop (Repeat for each item)         |
+|    a. Implement strictly the topmost unchecked - [ ] item              |
+|    b. Quality Gates: check:plan, fix, check:changed, test              |
+|    c. Local Atomic Commit: git commit -m "<type>: ... (#<id>)"         |
+|    d. Immediate PR Sync: gh pr edit --body (check off item: - [x])     |
+|    e. Incremental Push: git push origin <branch> (transparent progress)|
++-----------------------------------+------------------------------------+
+                                    | (All items checked off - [x]?)
                                     | Yes
-+-----------------------------------v-------------------+
-| 7. Final Squash-Merge                                 |
-|    gh pr checks (all green)                           |
-|    gh pr merge --squash --delete-branch               |
-+-------------------------------------------------------+
++-----------------------------------v------------------------------------+
+| 3. PR Readiness & Review Activation                                    |
+|    gh pr ready (activates review bots: Qodo, CodeRabbit, Greptile)     |
++-----------------------------------+------------------------------------+
+                                    |
++-----------------------------------v------------------------------------+
+| 4. Review Bot Triage & Verification Loop (CRITICAL)                    |
+|    - Poll until review bots finish processing                          |
+|    - Inspect Qodo, CodeRabbit, and Greptile feedback                   |
+|    - Fix ALL reported bugs defensively                                 |
+|    - Push fixes and WAIT for bot re-review                             |
+|    - DO NOT MERGE until ALL bugs are [Resolved]!                       |
++-----------------------------------+------------------------------------+
+                                    | (All clean?)
+                                    +--- No: Loop back
+                                    | Yes
++-----------------------------------v------------------------------------+
+| 5. Final Squash-Merge                                                  |
+|    gh pr checks (all green)                                            |
+|    gh pr merge --squash --delete-branch                                |
++------------------------------------------------------------------------+
 ```
 
 ---
@@ -102,7 +98,7 @@ gh pr create --draft \
 ```
 
 ### Phase 2: Single-Item Execution Loop
-For each unchecked `- [ ]` task in strict sequential order:
+For each unchecked `- [ ]` task in strict sequential order (maintaining minimal granularity):
 1. **Targeted Implementation**: Write code *strictly* targeted to the topmost unchecked task.
 2. **Quality Gates Preview & Execution**:
    ```bash
@@ -117,16 +113,21 @@ For each unchecked `- [ ]` task in strict sequential order:
    git add <modified_files>
    git commit -m "<type>(<scope>): <concise summary> (#<issue_id>)"
    ```
+4. **Immediate PR Progress Sync**:
+   Update the Draft PR description immediately to check off the completed item (`- [x]`):
+   ```bash
+   gh pr edit --body "..."
+   ```
+5. **Incremental Push**:
+   Push the commit to origin immediately to keep remote progress transparent and resilient:
+   ```bash
+   git push origin <branch>
+   ```
 
-### Phase 3: Finalize & Unified Push
+### Phase 3: PR Readiness & Review Activation
+Once all checklist items are completed, checked off, and pushed:
 ```bash
-# 1. Push all completed atomic commits
-git push origin <branch>
-
-# 2. Update Draft PR body to check off all completed tasks (- [x])
-gh pr edit --body "..."
-
-# 3. Mark PR ready for review (activates review bots: CodeRabbit, Qodo, Greptile)
+# Mark PR ready for review (activates review bots: CodeRabbit, Qodo, Greptile)
 gh pr ready
 ```
 
