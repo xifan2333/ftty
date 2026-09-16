@@ -1,6 +1,6 @@
 //! System monospace fonts, cell metrics, and a growing grayscale glyph atlas.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::CString;
 use std::fs;
 use std::io;
@@ -58,6 +58,18 @@ struct FallbackFace {
 const MAX_FALLBACK_FACES: usize = 64;
 const MAX_RESOLVED_CACHE: usize = 4096;
 
+/// Minimum font size in points/pixels supported by the terminal.
+pub const MIN_FONT_SIZE: f32 = 6.0;
+/// Maximum font size in points/pixels supported by the terminal.
+pub const MAX_FONT_SIZE: f32 = 72.0;
+
+/// Maximum font zoom size supported by the terminal.
+///
+/// Fontdue optimizes its vector geometry simplification for `FontSettings::scale`.
+/// Parsing every face at `MAX_FONT_ZOOM_SCALE` guarantees full outline fidelity
+/// across all interactive zoom sizes without outline degradation.
+pub const MAX_FONT_ZOOM_SCALE: f32 = MAX_FONT_SIZE;
+
 /// Faces discovered on demand, keyed by (character, style) pairs.
 ///
 /// Nothing is parsed until a frame renders a character the configured faces cannot draw, so
@@ -67,19 +79,25 @@ struct FallbackCache {
     faces: Vec<FallbackFace>,
     /// Maps `(c, style)` to `Some((face_index, glyph_index))` or `None` if no installed font covers it.
     resolved: HashMap<(char, u8), Option<(u16, u16)>>,
+    /// Tracks insertion order for deterministic FIFO eviction at capacity.
+    resolved_order: VecDeque<(char, u8)>,
 }
 
 impl FallbackCache {
     /// Returns the index of a face covering `c` and the glyph index, loading the face on first use.
     fn resolve(&mut self, c: char, style: u8, preferred_family: &str) -> Option<(u16, u16)> {
-        if self.resolved.len() >= MAX_RESOLVED_CACHE && !self.resolved.contains_key(&(c, style)) {
-            self.resolved.clear();
-        }
-        if let Some(cached) = self.resolved.get(&(c, style)) {
+        let key = (c, style);
+        if let Some(cached) = self.resolved.get(&key) {
             return *cached;
         }
         let resolved = self.discover(c, style, preferred_family);
-        self.resolved.insert((c, style), resolved);
+        if self.resolved.len() >= MAX_RESOLVED_CACHE
+            && let Some(oldest) = self.resolved_order.pop_front()
+        {
+            self.resolved.remove(&oldest);
+        }
+        self.resolved_order.push_back(key);
+        self.resolved.insert(key, resolved);
         resolved
     }
 
@@ -112,6 +130,7 @@ impl FallbackCache {
                         if self.faces.len() >= MAX_FALLBACK_FACES {
                             self.faces.remove(0);
                             self.resolved.clear();
+                            self.resolved_order.clear();
                         }
                         self.faces.push(FallbackFace {
                             path,
@@ -230,13 +249,6 @@ fn query_fontconfig_candidates(
     Some(vec![(path, index)])
 }
 
-/// Maximum font zoom size supported by the terminal (see `event_loop.rs` font zoom clamp 72.0).
-///
-/// Fontdue optimizes its vector geometry simplification for `FontSettings::scale`.
-/// Parsing every face at `MAX_FONT_ZOOM_SCALE` guarantees full outline fidelity
-/// across all interactive zoom sizes (6.0..=72.0) without outline degradation.
-pub const MAX_FONT_ZOOM_SCALE: f32 = 72.0;
-
 fn load_font_bytes(bytes: &[u8], collection_index: u32) -> io::Result<fontdue::Font> {
     fontdue::Font::from_bytes(
         bytes,
@@ -330,10 +342,10 @@ impl FontManager {
     /// # Errors
     /// Returns an error for an invalid size, missing font, or unreadable font data.
     pub fn load_with_families(families: &[String], font_size: f32) -> io::Result<Self> {
-        if !font_size.is_finite() || font_size <= 0.0 {
+        if !font_size.is_finite() || font_size < MIN_FONT_SIZE || font_size > MAX_FONT_SIZE {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "invalid font size",
+                format!("font size must be between {MIN_FONT_SIZE} and {MAX_FONT_SIZE}"),
             ));
         }
         let fc = fontconfig()
@@ -448,7 +460,7 @@ impl FontManager {
     /// scale factors during rasterization, this avoids re-reading font files from
     /// disk or re-querying Fontconfig on runtime zoom. Returns `true` if the size changed.
     pub fn set_font_size(&mut self, new_size: f32) -> bool {
-        if !new_size.is_finite() || new_size <= 0.0 {
+        if !new_size.is_finite() || new_size < MIN_FONT_SIZE || new_size > MAX_FONT_SIZE {
             return false;
         }
         if (self.font_size - new_size).abs() < f32::EPSILON {
@@ -746,7 +758,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_font_sizes() {
-        for size in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+        for size in [0.0, -1.0, 5.9, 72.1, f32::NAN, f32::INFINITY] {
             assert!(
                 matches!(FontManager::load(size), Err(e) if e.kind() == io::ErrorKind::InvalidInput)
             );
@@ -994,12 +1006,19 @@ mod tests {
     #[test]
     fn fallback_cache_has_bounded_capacity() {
         let mut cache = FallbackCache::default();
-        for i in 0..(MAX_RESOLVED_CACHE + 10) {
+        for i in 0..MAX_RESOLVED_CACHE {
             let c = char::from_u32(0x1000 + i as u32).unwrap_or('A');
+            cache.resolved_order.push_back((c, 0));
             cache.resolved.insert((c, 0), None);
         }
-        assert_eq!(cache.resolved.len(), MAX_RESOLVED_CACHE + 10);
+        assert_eq!(cache.resolved.len(), MAX_RESOLVED_CACHE);
+        let oldest = char::from_u32(0x1000).unwrap();
+        assert!(cache.resolved.contains_key(&(oldest, 0)));
+
+        // Resolving a new character evicts the oldest entry (FIFO)
         let _ = cache.resolve('Z', 1, "monospace");
-        assert!(cache.resolved.len() <= MAX_RESOLVED_CACHE);
+        assert_eq!(cache.resolved.len(), MAX_RESOLVED_CACHE);
+        assert!(!cache.resolved.contains_key(&(oldest, 0)));
+        assert!(cache.resolved.contains_key(&('Z', 1)));
     }
 }
