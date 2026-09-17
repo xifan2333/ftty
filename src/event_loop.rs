@@ -13,17 +13,14 @@ use nix::fcntl::OFlag;
 use nix::poll::{PollFd, PollFlags, poll};
 
 use wayland_client::protocol::{
-    wl_callback::{self, WlCallback},
-    wl_compositor::WlCompositor,
+    wl_callback::WlCallback,
     wl_data_device::{self, WlDataDevice},
     wl_data_device_manager::WlDataDeviceManager,
     wl_data_offer::{self, WlDataOffer},
     wl_data_source::{self, WlDataSource},
     wl_keyboard::{self, KeyState, WlKeyboard},
     wl_pointer::{self, Axis, ButtonState, WlPointer},
-    wl_registry::{self, WlRegistry},
     wl_seat::{self, Capability, WlSeat},
-    wl_surface::WlSurface,
 };
 use wayland_client::{Connection, Dispatch, QueueHandle, WEnum};
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::{
@@ -93,14 +90,14 @@ pub struct AppState {
     pub pending_offers: Vec<crate::wayland::OfferData>,
     pub running: bool,
     pub needs_redraw: bool,
-    frame_callback: Option<WlCallback>,
-    pending_size: Option<[u32; 2]>,
+    pub(crate) frame_callback: Option<WlCallback>,
+    pub(crate) pending_size: Option<[u32; 2]>,
     /// Set by an `xdg_surface.configure`; the resize is applied once the queue is drained so a
     /// burst of configures collapses into a single, final size.
-    configure_pending: bool,
-    render_error: Option<io::Error>,
-    sync_output_start: Option<std::time::Instant>,
-    last_sync_gen: u64,
+    pub(crate) configure_pending: bool,
+    pub(crate) render_error: Option<io::Error>,
+    pub(crate) sync_output_start: Option<std::time::Instant>,
+    pub(crate) last_sync_gen: u64,
 }
 
 fn best_text_mime(mimes: &[String]) -> Option<&str> {
@@ -882,83 +879,6 @@ fn terminal_size([width, height]: [u32; 2], metrics: CellMetrics, padding: [u16;
 // Wayland Dispatch Implementations
 // ---------------------------------------------------------------------------
 
-impl Dispatch<WlRegistry, ()> for AppState {
-    fn event(
-        state: &mut Self,
-        registry: &WlRegistry,
-        event: wl_registry::Event,
-        _data: &(),
-        _conn: &Connection,
-        qh: &QueueHandle<Self>,
-    ) {
-        if let wl_registry::Event::Global {
-            name,
-            interface,
-            version,
-        } = event
-        {
-            match interface.as_str() {
-                "wl_compositor" => {
-                    let comp = registry.bind::<WlCompositor, _, _>(name, version.min(4), qh, ());
-                    state.wayland.compositor = Some(comp);
-                    state.wayland.init_window(qh);
-                }
-                "xdg_wm_base" => {
-                    let xdg = registry.bind::<XdgWmBase, _, _>(name, 1, qh, ());
-                    state.wayland.xdg_wm_base = Some(xdg);
-                    state.wayland.init_window(qh);
-                }
-                "wl_seat" => {
-                    let seat = registry.bind::<WlSeat, _, _>(name, version.min(5), qh, ());
-                    state.wayland.seat = Some(seat);
-                    state.wayland.init_text_input(qh);
-                    state.wayland.init_data_device(qh);
-                }
-                "zwp_text_input_manager_v3" => {
-                    let manager = registry.bind::<ZwpTextInputManagerV3, _, _>(name, 1, qh, ());
-                    state.wayland.text_input_manager = Some(manager);
-                    state.wayland.init_text_input(qh);
-                }
-                "wl_data_device_manager" => {
-                    let manager = registry.bind::<WlDataDeviceManager, _, _>(name, 3, qh, ());
-                    state.wayland.data_device_manager = Some(manager);
-                    state.wayland.init_data_device(qh);
-                }
-                "wp_cursor_shape_manager_v1" => {
-                    let manager = registry.bind::<WpCursorShapeManagerV1, _, _>(name, 1, qh, ());
-                    state.wayland.cursor_shape_manager = Some(manager);
-                    state.try_init_cursor_shape(qh);
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
-impl Dispatch<WlCompositor, ()> for AppState {
-    fn event(
-        _state: &mut Self,
-        _proxy: &WlCompositor,
-        _event: <WlCompositor as wayland_client::Proxy>::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-    ) {
-    }
-}
-
-impl Dispatch<WlSurface, ()> for AppState {
-    fn event(
-        _state: &mut Self,
-        _proxy: &WlSurface,
-        _event: <WlSurface as wayland_client::Proxy>::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-    ) {
-    }
-}
-
 impl Dispatch<XdgWmBase, ()> for AppState {
     fn event(
         _state: &mut Self,
@@ -1529,23 +1449,6 @@ impl Dispatch<WlDataOffer, ()> for AppState {
             {
                 current.mime_types.push(mime_type);
             }
-        }
-    }
-}
-
-impl Dispatch<WlCallback, ()> for AppState {
-    fn event(
-        state: &mut Self,
-        proxy: &WlCallback,
-        event: wl_callback::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-    ) {
-        if let wl_callback::Event::Done { .. } = event
-            && state.frame_callback.as_ref() == Some(proxy)
-        {
-            state.frame_callback = None;
         }
     }
 }
