@@ -106,8 +106,8 @@ For each unchecked `- [ ]` task in strict sequential order (maintaining minimal 
    mise run fix               # auto-format modified files
    mise run check:changed     # run clippy and rustfmt on changed files (fast, < 2s)
    cargo test <owning_test_name> # run targeted unit test (verify tests run > 0, fast, < 1s)
-   # Note: Do NOT run the full 170+ test suite (`mise run test`, > 2 min) locally on every task.
-   # Full regression suite on the default Linux target is offloaded to GitHub Actions CI.
+   # Hardware Liberation Principle: DO NOT run `cargo build --release` or `mise run test` locally.
+   # All heavy compilation and full regression suite are offloaded to GitHub Actions CI.
    ```
 3. **Local Atomic Commit**:
    Commit following Conventional Commits format:

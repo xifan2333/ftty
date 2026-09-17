@@ -46,7 +46,15 @@ Verify component scope before making changes:
 
 ---
 
-## 3. Universal Code Quality Gate (`hk` / `mise`)
+## 3. Universal Code Quality Gate (`hk` / `mise`) & Hardware Liberation
+
+### Hardware Liberation Principle (解放本地硬件原则)
+
+> ⚡ **CRITICAL DIRECTIVE**: Local developer hardware must be liberated!
+> - **DO NOT run heavy release builds (`cargo build --release`) locally** unless the user explicitly requests benchmarking or actual manual testing.
+> - **DO NOT run full test suites (`mise run test` / `cargo test`) locally** across micro-tasks.
+> - Rely primarily on **GitHub Actions CI** for heavy compilation and full-suite testing.
+> - Keep local commands strictly to fast gates: `mise run fix && mise run check:changed` (< 2s) and targeted single-function unit tests when needed (< 1s).
 
 Always run quality verification before committing:
 
@@ -62,9 +70,6 @@ mise run fix
 
 # 4. Run targeted unit test for modified module or owning subsystem (verify tests run > 0, fast, < 1s)
 cargo test <test_filter>
-
-# 5. Note: Full 170+ test suite regression on Linux default target is offloaded to GitHub Actions CI.
-# Avoid running full `mise run test` (> 2 min) locally on every iteration.
 ```
 
 ---
