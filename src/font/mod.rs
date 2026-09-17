@@ -7,7 +7,7 @@ pub(crate) mod fallback;
 mod tests;
 
 use std::io;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use fontconfig::Fontconfig;
 
@@ -63,7 +63,7 @@ pub struct FontManager {
     bold: OnceLock<StyleChain>,
     italic: OnceLock<StyleChain>,
     bold_italic: OnceLock<StyleChain>,
-    fallbacks: Mutex<FallbackCache>,
+    fallbacks: Arc<Mutex<FallbackCache>>,
     families: Vec<String>,
     font_size: f32,
     pub metrics: CellMetrics,
@@ -188,13 +188,26 @@ impl FontManager {
             fallbacks: regular_fallbacks,
         };
 
+        let fallbacks = Arc::new(Mutex::new(FallbackCache::default()));
+        let fallbacks_prewarm = Arc::clone(&fallbacks);
+        let preferred = valid_families[0].clone();
+        std::thread::Builder::new()
+            .name("font-prewarm".to_string())
+            .spawn(move || {
+                let mut cache = fallbacks_prewarm
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let _ = cache.resolve('中', 0, &preferred);
+            })
+            .ok();
+
         Ok(Self {
             regular,
             regular_slots,
             bold: OnceLock::new(),
             italic: OnceLock::new(),
             bold_italic: OnceLock::new(),
-            fallbacks: Mutex::new(FallbackCache::default()),
+            fallbacks,
             families: valid_families,
             font_size,
             metrics: CellMetrics {

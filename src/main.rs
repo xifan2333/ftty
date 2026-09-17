@@ -79,7 +79,7 @@ fn main() {
         }
     };
 
-    let app_state = match AppState::with_config(term, pty, config_path) {
+    let app_state = match AppState::with_loaded_config(term, pty, config, config_path) {
         Ok(state) => state,
         Err(e) => {
             eprintln!("ftty: failed to initialize font or state: {e}");

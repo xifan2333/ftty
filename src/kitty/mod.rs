@@ -18,12 +18,12 @@ const MAX_APC_PAYLOAD: usize = 32 * 1024 * 1024;
 
 #[inline]
 fn may_contain_kitty_apc(bytes: &[u8]) -> bool {
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == 0x1b && (i + 1 >= bytes.len() || bytes[i + 1] == b'_') {
+    let mut rest = bytes;
+    while let Some(pos) = memchr::memchr(0x1b, rest) {
+        if pos + 1 >= rest.len() || rest[pos + 1] == b'_' {
             return true;
         }
-        i += 1;
+        rest = &rest[pos + 1..];
     }
     false
 }

@@ -240,6 +240,7 @@ dependencies = [
  "glow",
  "khronos-egl",
  "libc",
+ "memchr",
  "nix",
  "png",
  "serde",

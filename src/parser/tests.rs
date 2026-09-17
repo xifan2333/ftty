@@ -508,3 +508,14 @@ fn test_combined_underline_and_bold_does_not_corrupt() {
     assert!(!cell.flags.contains(CellFlags::UNDERLINE_DOUBLE));
     assert!(!cell.flags.contains(CellFlags::UNDERLINE_CURLY));
 }
+
+#[test]
+fn test_parser_instance_reuse_across_invocations() {
+    let mut term = Terminal::new(80, 24, 100);
+    term.advance_bytes(b"A");
+    assert_eq!(term.grid.lines[0].cells[0].c, 'A');
+    term.advance_bytes(b"B");
+    assert_eq!(term.grid.lines[0].cells[1].c, 'B');
+    term.advance_bytes(b"\r\nC");
+    assert_eq!(term.grid.lines[1].cells[0].c, 'C');
+}

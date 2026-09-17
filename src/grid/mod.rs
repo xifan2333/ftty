@@ -229,8 +229,10 @@ impl Grid {
                 row.dirty.set(true);
             }
         }
-        for row in &self.scrollback {
-            row.dirty.set(true);
+        if self.viewport_offset > 0 {
+            for row in &self.scrollback {
+                row.dirty.set(true);
+            }
         }
     }
 
@@ -240,21 +242,23 @@ impl Grid {
         }
         if self.scrollback.len() >= self.max_scrollback {
             self.scrollback.pop_front();
-            self.placements.retain_mut(|p| {
-                if p.line == 0 {
-                    false
-                } else {
-                    p.line -= 1;
-                    true
-                }
-            });
+            if !self.placements.is_empty() {
+                self.placements.retain_mut(|p| {
+                    if p.line == 0 {
+                        false
+                    } else {
+                        p.line -= 1;
+                        true
+                    }
+                });
+            }
         }
         self.scrollback.push_back(row);
         // If user is currently viewing history, keep the view anchored on the same lines
         if self.viewport_offset > 0 {
             self.viewport_offset = (self.viewport_offset + 1).min(self.scrollback.len());
+            self.mark_all_dirty();
         }
-        self.mark_all_dirty();
     }
 
     /// Scrolls the viewport up by `delta` lines to view older history.
@@ -338,12 +342,23 @@ impl Grid {
             return;
         }
 
-        if self.scroll_region_top == 0
+        let is_full_screen = self.scroll_region_top == 0
             && self.scroll_region_bottom == self.rows.saturating_sub(1)
-            && self.alt_lines.is_none()
-        {
+            && self.alt_lines.is_none();
+
+        if is_full_screen && self.max_scrollback > 0 {
             for i in 0..count {
-                self.push_scrollback(self.lines[i].clone());
+                if self.scrollback.len() >= self.max_scrollback {
+                    if let Some(mut recycled) = self.scrollback.pop_front() {
+                        recycled.reset();
+                        let old = std::mem::replace(&mut self.lines[i], recycled);
+                        self.push_scrollback(old);
+                    }
+                } else {
+                    let fresh = Row::new(self.cols);
+                    let old = std::mem::replace(&mut self.lines[i], fresh);
+                    self.push_scrollback(old);
+                }
             }
         }
 
@@ -353,7 +368,9 @@ impl Grid {
         {
             row.reset();
         }
-        self.mark_all_dirty();
+        for row in &self.lines[self.scroll_region_top..=self.scroll_region_bottom] {
+            row.dirty.set(true);
+        }
     }
 
     /// Scrolls lines inside the active scroll region downward.
@@ -371,7 +388,9 @@ impl Grid {
         for row in &mut self.lines[self.scroll_region_top..self.scroll_region_top + count] {
             row.reset();
         }
-        self.mark_all_dirty();
+        for row in &self.lines[self.scroll_region_top..=self.scroll_region_bottom] {
+            row.dirty.set(true);
+        }
     }
 
     /// Clears part or all of the active display screen.
@@ -490,7 +509,11 @@ impl Grid {
         underline_color: Color,
         hyperlink_id: Option<u32>,
     ) {
-        let width = c.width().unwrap_or(1);
+        let width = if c.is_ascii() && c >= ' ' {
+            1
+        } else {
+            c.width().unwrap_or(1)
+        };
         if width == 0 {
             // Combining character: decode Kitty Unicode placeholder diacritics
             if let Some(idx) = diacritic_to_index(c)
