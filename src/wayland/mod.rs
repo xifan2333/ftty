@@ -1,6 +1,7 @@
 //! Wayland client connection, globals binding, and XDG Shell window lifecycle.
 
 pub mod init;
+pub mod xdg;
 
 use wayland_client::QueueHandle;
 use wayland_client::protocol::{
