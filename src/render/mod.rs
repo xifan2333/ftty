@@ -19,8 +19,8 @@ use wayland_client::protocol::wl_surface::WlSurface;
 use crate::color::Rgb;
 use crate::font::{CellMetrics, FontManager, GlyphAtlas};
 use crate::grid::{CursorShape, Grid};
-use crate::ime::Preedit;
-use crate::selection::Selection;
+use crate::input::ime::Preedit;
+use crate::input::selection::Selection;
 
 pub use box_drawing::{is_procedural_glyph, render_procedural_glyph};
 pub(crate) use egl::EglContext;

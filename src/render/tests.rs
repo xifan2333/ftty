@@ -1,7 +1,7 @@
 use crate::color::{Color, default_256_palette};
 use crate::font::{FontManager, GlyphAtlas};
 use crate::grid::{Cell, CellFlags, Grid};
-use crate::ime::Preedit;
+use crate::input::ime::Preedit;
 use crate::render::shader::FRAGMENT_SHADER;
 use crate::render::text::{
     KITTY_PLACEHOLDER, SELECTION_BG, build_row_backgrounds, build_row_foregrounds, build_vertices,

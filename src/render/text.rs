@@ -5,7 +5,7 @@
 use crate::color::{Color, Rgb};
 use crate::font::{CellMetrics, FontManager, GlyphAtlas};
 use crate::grid::{Cell, CellFlags, CursorShape, Grid};
-use crate::ime::Preedit;
+use crate::input::ime::Preedit;
 use crate::render::{ColorScheme, RenderOptions};
 
 pub(crate) const SOLID_UV: [[f32; 2]; 2] = [[-1.0, -1.0]; 2];

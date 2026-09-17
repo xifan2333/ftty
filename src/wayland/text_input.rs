@@ -86,7 +86,7 @@ impl AppState {
         let Some(text_input) = &self.wayland.text_input else {
             return;
         };
-        let (x, y, w, h) = crate::ime::calculate_cursor_rect(
+        let (x, y, w, h) = crate::input::ime::calculate_cursor_rect(
             &self.terminal.grid,
             self.font_mgr.metrics,
             [self.config.padding_x(), self.config.padding_y()],

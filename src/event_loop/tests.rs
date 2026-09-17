@@ -9,10 +9,10 @@ use crate::color::Rgb;
 use crate::event_loop::{AppState, terminal_size};
 use crate::font::CellMetrics;
 use crate::input::KeyAction;
+use crate::input::selection::{Selection, SelectionPoint, SelectionType};
 use crate::parser::Terminal;
 use crate::pty::Pty;
 use crate::render::HoveredHyperlinkSpan;
-use crate::selection::{Selection, SelectionPoint, SelectionType};
 
 #[test]
 fn clipboard_offer_is_created_and_dispatched_from_the_wire() {
@@ -356,7 +356,7 @@ fn pointer_events_from_the_wire_drive_mouse_reports() {
     use std::os::unix::net::UnixStream;
     use wayland_client::Proxy;
 
-    use crate::mouse::{MouseEncoding, MouseTracking};
+    use crate::input::mouse::{MouseEncoding, MouseTracking};
 
     let (client, mut server) = UnixStream::pair().unwrap();
     let conn = Connection::from_socket(client).unwrap();
@@ -364,8 +364,6 @@ fn pointer_events_from_the_wire_drive_mouse_reports() {
     let qh = queue.handle();
     let registry = conn.display().get_registry(&qh, ());
     let seat = registry.bind::<WlSeat, _, _>(1, 5, &qh, ());
-
-    // wl_seat.capabilities(pointer): the client binds wl_pointer in response.
     let mut events = Vec::new();
     for word in [seat.id().protocol_id(), 12 << 16, 1] {
         events.extend_from_slice(&word.to_ne_bytes());
@@ -434,7 +432,7 @@ fn x11_buttons_map_to_protocol_indexes() {
 
 #[test]
 fn mouse_reports_are_forwarded_only_when_tracking_is_enabled() {
-    use crate::mouse::{MouseEncoding, MouseTracking};
+    use crate::input::mouse::{MouseEncoding, MouseTracking};
 
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");

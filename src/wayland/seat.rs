@@ -17,9 +17,9 @@ use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_manager_v1:
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3;
 
 use crate::event_loop::AppState;
-use crate::mouse::{MouseModifiers, encode_mouse_event};
+use crate::input::mouse::{MouseModifiers, encode_mouse_event};
+use crate::input::selection::{Selection, SelectionPoint, SelectionType, find_word_boundaries};
 use crate::render::HoveredHyperlinkSpan;
-use crate::selection::{Selection, SelectionPoint, SelectionType, find_word_boundaries};
 
 /// Maps a Linux input button code to the X11 mouse button index used on the wire.
 #[must_use]
@@ -105,7 +105,7 @@ impl Dispatch<WlKeyboard, ()> for AppState {
                             zwp_text_input_v3::ContentHint::None,
                             zwp_text_input_v3::ContentPurpose::Terminal,
                         );
-                        let (x, y, w, h) = crate::ime::calculate_cursor_rect(
+                        let (x, y, w, h) = crate::input::ime::calculate_cursor_rect(
                             &state.terminal.grid,
                             state.font_mgr.metrics,
                             [state.config.padding_x(), state.config.padding_y()],
