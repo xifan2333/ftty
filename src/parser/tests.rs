@@ -66,7 +66,7 @@ fn window_geometry_queries_are_answered_in_height_width_order() {
 
 #[test]
 fn test_mouse_tracking_modes() {
-    use crate::mouse::{MouseEncoding, MouseTracking};
+    use crate::input::mouse::{MouseEncoding, MouseTracking};
 
     let mut term = Terminal::new(80, 24, 100);
     assert!(!term.mouse.is_reporting());

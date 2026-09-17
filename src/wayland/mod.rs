@@ -6,6 +6,9 @@ pub mod seat;
 pub mod text_input;
 pub mod xdg;
 
+#[cfg(test)]
+mod tests;
+
 pub use clipboard::best_text_mime;
 pub use seat::x11_button_index;
 

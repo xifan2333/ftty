@@ -22,13 +22,13 @@ use crate::color::Rgb;
 use crate::config::Config;
 use crate::font::{FontManager, GlyphAtlas};
 use crate::grid::CellFlags;
-use crate::ime::ImeState;
 use crate::input::KeyboardHandler;
+use crate::input::ime::ImeState;
+use crate::input::selection::{Selection, SelectionPoint, SelectionType};
 use crate::kitty::{KittyEvent, KittyParser};
 use crate::parser::Terminal;
 use crate::pty::Pty;
 use crate::render::{ColorScheme, HoveredHyperlinkSpan, RenderOptions, Renderer};
-use crate::selection::{Selection, SelectionPoint, SelectionType};
 use crate::wayland::WaylandState;
 
 /// Shared application state passed to all calloop sources and Wayland event dispatches.

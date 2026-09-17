@@ -13,7 +13,7 @@ use vte::{Params, Parser, Perform};
 
 use crate::color::{Color, Rgb};
 use crate::grid::{CellFlags, ClearMode, Grid};
-use crate::mouse::MouseState;
+use crate::input::mouse::MouseState;
 
 pub(crate) const MAX_HYPERLINKS: usize = 1024;
 
