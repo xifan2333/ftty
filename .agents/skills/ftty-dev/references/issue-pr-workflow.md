@@ -105,9 +105,9 @@ For each unchecked `- [ ]` task in strict sequential order (maintaining minimal 
    mise run check:plan        # preview which checks will run
    mise run fix               # auto-format modified files
    mise run check:changed     # run clippy and rustfmt on changed files (fast, < 2s)
-   cargo test <module>::tests # run targeted unit test for modified module (fast, < 1s)
+   cargo test <owning_test_name> # run targeted unit test (verify tests run > 0, fast, < 1s)
    # Note: Do NOT run the full 170+ test suite (`mise run test`, > 2 min) locally on every task.
-   # Full multi-target compilation and full regression suite are offloaded to GitHub Actions CI.
+   # Full regression suite on the default Linux target is offloaded to GitHub Actions CI.
    ```
 3. **Local Atomic Commit**:
    Commit following Conventional Commits format:
@@ -148,8 +148,11 @@ gh pr ready
 # Watch CI status with native interval polling (do NOT use manual sleep loops)
 gh pr checks <pr_id> --watch --interval 10
 
-# Filter Qodo review status directly via GitHub CLI
-gh pr view <pr_id> --json comments --jq '.comments[] | select(.author.login=="qodo-code-review") | .body' | grep -E "Bugs \([0-9]+\)|Qodo is busy working"
+# Fetch current PR HEAD commit SHA
+HEAD_SHA=$(git rev-parse HEAD)
+
+# Ensure the latest Qodo review evaluates the current HEAD_SHA
+gh pr view <pr_id> --json comments --jq '.comments[] | select(.author.login=="qodo-code-review") | .body' | grep -F "$HEAD_SHA"
 
 # Inspect line-level review comments
 gh api repos/:owner/:repo/pulls/<pr_id>/comments
@@ -199,11 +202,12 @@ After pushing fixes, **repeat Step 1**:
 
 ## 5. Phase 5: Final Squash-Merge
 
-**Pre-Merge Hard Checklist** (All 4 conditions MUST be satisfied):
+**Pre-Merge Hard Checklist** (All 5 conditions MUST be satisfied):
 1. [x] `gh pr checks <pr_id>` is 100% green (`pass`).
-2. [x] Qodo status is `Code Review by Qodo` (no `Qodo is busy working`).
-3. [x] Qodo reports **`Bugs (0)`** and all previously flagged items show `[✓ Resolved]`.
-4. [x] CodeRabbit and Greptile have no unresolved blocking feedback.
+2. [x] Qodo has evaluated the current PR `HEAD_SHA` (`gh pr view <pr_id> --json comments ... | grep "$HEAD_SHA"`).
+3. [x] Qodo status is `Code Review by Qodo` (no `Qodo is busy working`).
+4. [x] Qodo reports **`Bugs (0)`** on the current HEAD commit and all previously flagged items show `[✓ Resolved]`.
+5. [x] CodeRabbit and Greptile have no unresolved blocking feedback.
 
 ```bash
 # 1. Perform squash-merge and delete remote branch

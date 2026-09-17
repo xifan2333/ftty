@@ -46,9 +46,9 @@ Run quality commands during development:
 mise run check:plan     # preview execution plan for modified files
 mise run check:changed  # run hk checks (rustfmt + clippy) across modified files (fast, < 2s)
 mise run fix            # auto-format modified files
-cargo test <module>::tests # run targeted unit tests for modified module (fast, < 1s)
+cargo test <owning_module_or_test_name> # run targeted unit tests (verify tests run > 0, fast, < 1s)
 # Note: Avoid running the full 170+ test suite (`mise run test`, > 2 min) locally on every micro-task.
-# Full regression and multi-target compilation are offloaded to GitHub Actions CI.
+# Full regression on the default Linux target is offloaded to GitHub Actions CI.
 ```
 
 ---
@@ -79,7 +79,7 @@ For each sub-task in the issue checklist (in strict sequential order, maintainin
 2. **Quality Gates Preview & Execution**:
    - Preview checks: `mise run check:plan`
    - Auto-format and lint: `mise run fix && mise run check:changed`
-   - Fast targeted test: `cargo test <modified_module>::tests` (fast, < 2s).
+   - Fast targeted test: `cargo test <owning_test_name>` (verify executed test count > 0, fast < 2s).
    - *Note*: Rely on GitHub Actions CI for full-suite verification; do not run full `mise run test` locally on every item.
 3. **Local Atomic Commit**: Create an atomic commit following Conventional Commits format:
    ```bash
@@ -117,15 +117,20 @@ Once all checklist items are completed, checked off, and pushed:
      ```
    - Let GitHub Actions CI execute the full 170+ test suite and compilation in the cloud.
 
-2. **Poll Review Bot Comments (Single-PR Resolution)**:
-   - Check Qodo analysis status:
+2. **Poll Review Bot Comments (Single-PR Resolution & Head Match)**:
+   - Fetch the current pull-request HEAD commit SHA:
      ```bash
-     gh pr view <pr_id> --json comments --jq '.comments[] | select(.author.login=="qodo-code-review") | .body' | grep -E "Bugs \([0-9]+\)|Qodo is busy working"
+     HEAD_SHA=$(git rev-parse HEAD)
      ```
-   - If output contains `Qodo is busy working`: **MERGING IS STRICTLY FORBIDDEN**. Wait and poll again.
-   - If output contains `Bugs (N)` where `N > 0`:
-     - Inspect the comment cards in detail (`gh pr view <pr_id> --comments`).
-     - **ALL bugs MUST be resolved within the SAME PR before merging.** Never merge a buggy PR to fix in a subsequent PR.
+   - Check Qodo review status and ensure it evaluates the current `HEAD_SHA`:
+     ```bash
+     gh pr view <pr_id> --json comments --jq '.comments[] | select(.author.login=="qodo-code-review") | .body' | grep -F "$HEAD_SHA"
+     ```
+   - If Qodo has not evaluated `HEAD_SHA` yet or shows `Qodo is busy working`: **MERGING IS STRICTLY FORBIDDEN**. Wait and poll again.
+   - Once the review for `HEAD_SHA` is complete, inspect `Bugs (N)`:
+     - If `Bugs > 0`:
+       - Inspect the comment cards in detail (`gh pr view <pr_id> --comments`).
+       - **ALL bugs MUST be resolved within the SAME PR before merging.** Never merge a buggy PR to fix in a subsequent PR.
 
 3. **Defensive Fix & Verification**:
    - Implement targeted fix and add unit regression tests.
@@ -139,11 +144,12 @@ Once all checklist items are completed, checked off, and pushed:
 
 ### Phase 5: Final Squash-Merge
 
-**Pre-Merge Hard Checklist** (All 4 conditions MUST be satisfied):
+**Pre-Merge Hard Checklist** (All 5 conditions MUST be satisfied):
 1. [x] `gh pr checks <pr_id>` is 100% green (`pass`).
-2. [x] Qodo status is `Code Review by Qodo` (no `Qodo is busy working`).
-3. [x] Qodo reports **`Bugs (0)`** and all previously flagged items show `[✓ Resolved]`.
-4. [x] CodeRabbit and Greptile have no unresolved blocking feedback.
+2. [x] Qodo has evaluated the current PR `HEAD_SHA` (`gh pr view <pr_id> --json comments ... | grep "$HEAD_SHA"`).
+3. [x] Qodo status is `Code Review by Qodo` (no `Qodo is busy working`).
+4. [x] Qodo reports **`Bugs (0)`** on the current HEAD commit and all previously flagged items show `[✓ Resolved]`.
+5. [x] CodeRabbit and Greptile have no unresolved blocking feedback.
 
 Once all 4 conditions are met, perform squash-merge and branch cleanup:
 ```bash

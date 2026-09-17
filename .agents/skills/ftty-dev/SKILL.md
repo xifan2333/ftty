@@ -60,10 +60,10 @@ mise run check:changed
 # 3. Automatically fix formatting (rustfmt edition 2024)
 mise run fix
 
-# 4. Run targeted unit test for modified module (fast, < 1s)
-cargo test <module>::tests
+# 4. Run targeted unit test for modified module or owning subsystem (verify tests run > 0, fast, < 1s)
+cargo test <test_filter>
 
-# 5. Note: Full 170+ test suite and multi-target compilation are offloaded to GitHub Actions CI.
+# 5. Note: Full 170+ test suite regression on Linux default target is offloaded to GitHub Actions CI.
 # Avoid running full `mise run test` (> 2 min) locally on every iteration.
 ```
 

@@ -28,7 +28,8 @@ Qodo is a deep semantic analysis bot that detects edge-case defects, resource bo
   ```
   **ACTION**: **WAIT.** **MERGING IS STRICTLY FORBIDDEN.** Poll using:
   ```bash
-  gh pr view <pr_id> --json comments --jq '.comments[] | select(.author.login=="qodo-code-review") | .body' | grep -E "Bugs \([0-9]+\)|Qodo is busy working"
+  HEAD_SHA=$(git rev-parse HEAD)
+  gh pr view <pr_id> --json comments --jq '.comments[] | select(.author.login=="qodo-code-review") | .body' | grep -F "$HEAD_SHA"
   ```
 - **Completed Analysis State**:
   The comment updates to:
@@ -80,8 +81,8 @@ When a review bot reports issues:
 | 3. Local Verification & Quality Gates                       |
 |    - mise run fix                                           |
 |    - mise run check:changed (fast, < 2s)                    |
-|    - cargo test <module>::tests (fast, < 1s)                |
-|    - (CI executes full 170+ test suite upon push)           |
+|    - cargo test <owning_test_name> (verify run > 0, < 1s)   |
+|    - (CI executes full Linux test suite upon push)          |
 +------------------------------+------------------------------+
                                |
 +------------------------------v------------------------------+
