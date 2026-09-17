@@ -40,7 +40,7 @@ Verify component scope before making changes:
    - **Fcitx5 IME First-Class Citizen**: Wayland `text-input-v3` integration for precise candidate box cursor tracking and preedit text rendering.
    - **Modern Keyboard & Protocol Standard**: Native Kitty Keyboard Protocol progressive enhancement (`CSI u`), Synchronized Output (Mode 2026), OSC 8 hyperlinks, OSC 52 clipboard, and styled undercurl.
 4. **Strict Rust Safety**:
-   - `unsafe_code = "deny"` across the entire crate. The only exceptions are audited FFI boundaries (`src/render.rs` for OpenGL and `src/pty.rs` for POSIX PTY).
+   - `unsafe_code = "deny"` across the entire crate. The only exceptions are audited FFI boundaries (`src/render/` for OpenGL/EGL and `src/pty.rs` for POSIX PTY).
    - Clippy denies `unwrap_used` and `expect_used` in production code (explicitly allowed in `#[cfg(test)]` modules).
    - Undocumented unsafe blocks are denied everywhere.
 
