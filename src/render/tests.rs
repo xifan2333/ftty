@@ -2,13 +2,13 @@ use crate::color::{Color, default_256_palette};
 use crate::font::{FontManager, GlyphAtlas};
 use crate::grid::{Cell, CellFlags, Grid};
 use crate::ime::Preedit;
+use crate::render::shader::FRAGMENT_SHADER;
 use crate::render::text::{
     KITTY_PLACEHOLDER, SELECTION_BG, build_row_backgrounds, build_row_foregrounds, build_vertices,
     cell_colors, cursor_cell, prepare_atlas,
 };
 use crate::render::{
-    ColorScheme, DEFAULT_BG, DEFAULT_FG, FRAGMENT_SHADER, HoveredHyperlinkSpan, RenderOptions,
-    native_size,
+    ColorScheme, DEFAULT_BG, DEFAULT_FG, HoveredHyperlinkSpan, RenderOptions, native_size,
 };
 
 #[test]

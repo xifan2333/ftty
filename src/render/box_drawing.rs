@@ -5,6 +5,8 @@
 //! this module renders `U+2500..=U+259F` with pixel-perfect geometry directly
 //! to the OpenGL vertex buffer.
 
+#![forbid(unsafe_code)]
+
 const SOLID_UV: [[f32; 2]; 2] = [[-1.0, -1.0]; 2];
 
 /// Pushes a solid quad with `SOLID_UV` to the vertex buffer.
