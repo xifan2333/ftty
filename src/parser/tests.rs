@@ -195,6 +195,11 @@ fn test_synchronized_output_and_decrqm_queries() {
     term.advance_bytes(b"\x1b[?2026h");
     assert!(term.synchronized_output);
 
+    // Repeated enable must increment generation to refresh timeout
+    let gen1 = term.sync_output_gen;
+    term.advance_bytes(b"\x1b[?2026h");
+    assert_eq!(term.sync_output_gen, gen1.wrapping_add(1));
+
     // Query mode 2026 after setting: enabled (1)
     term.advance_bytes(b"\x1b[?2026$p");
     assert_eq!(term.take_responses(), vec![b"\x1b[?2026;1$y".to_vec()]);

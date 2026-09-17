@@ -113,7 +113,7 @@ impl Terminal {
                         1004 => self.focus_reporting = enabled,
                         2004 => self.bracketed_paste = enabled,
                         2026 => {
-                            if enabled && !self.synchronized_output {
+                            if enabled {
                                 self.sync_output_gen = self.sync_output_gen.wrapping_add(1);
                             }
                             self.synchronized_output = enabled;
