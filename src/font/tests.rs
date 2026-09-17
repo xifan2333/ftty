@@ -287,3 +287,16 @@ fn fallback_cache_has_bounded_capacity() {
     assert!(!cache.resolved.contains_key(&(oldest, 0)));
     assert!(cache.resolved.contains_key(&('Z', 1)));
 }
+
+#[test]
+fn test_cross_style_fallback_glyph_reuse() {
+    let mut cache = FallbackCache::default();
+    let regular = cache.resolve('中', 0, "monospace");
+    if regular.is_some() {
+        let initial_faces = cache.faces.len();
+        // Resolving bold style must reuse the already loaded regular face without adding new faces
+        let bold = cache.resolve('中', 1, "monospace");
+        assert_eq!(bold, regular);
+        assert_eq!(cache.faces.len(), initial_faces);
+    }
+}

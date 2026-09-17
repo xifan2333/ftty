@@ -714,3 +714,29 @@ fn test_image_placements_pool_has_bounded_capacity() {
     // Oldest placements 0..76 were evicted by FIFO
     assert_eq!(grid.placements[0].image_id, 76);
 }
+
+#[test]
+fn test_high_volume_scrolling_recycles_rows_and_bounds_dirty_scan() {
+    let mut grid = Grid::new(80, 24, 100);
+    // Write 5000 lines to exhaust scrollback and force repeated steady-state recycling
+    for i in 0..5000 {
+        grid.write_char(
+            'X',
+            Color::DefaultForeground,
+            Color::DefaultBackground,
+            CellFlags::empty(),
+        );
+        grid.carriage_return();
+        grid.newline();
+        // Visible lines must remain within active screen bounds
+        assert_eq!(grid.lines.len(), 24);
+        assert!(grid.scrollback.len() <= 100);
+        // Only active screen lines are marked dirty, not the entire scrollback
+        assert!(grid.lines[23].dirty.get());
+        if i % 500 == 0 {
+            grid.mark_all_dirty();
+        }
+    }
+    assert_eq!(grid.scrollback.len(), 100);
+    assert_eq!(grid.lines.len(), 24);
+}

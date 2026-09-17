@@ -491,3 +491,14 @@ fn test_update_hover_state_and_pointer_shape() {
         })
     );
 }
+
+#[test]
+fn test_app_state_with_loaded_config() {
+    let term = Terminal::new(80, 24, 100);
+    let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
+    let config = crate::config::Config::default();
+    let app = AppState::with_loaded_config(term, pty, config, None).expect("with_loaded_config");
+    assert_eq!(app.terminal.grid.cols, 80);
+    assert_eq!(app.terminal.grid.rows, 24);
+    assert!(app.font_mgr.metrics.cell_width > 0);
+}
