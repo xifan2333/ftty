@@ -304,5 +304,5 @@ pub fn diacritic_to_index(c: char) -> Option<u16> {
         '\u{1D243}',
         '\u{1D244}',
     ];
-    DIACRITICS.iter().position(|&d| d == c).map(|p| p as u16)
+    DIACRITICS.binary_search(&c).ok().map(|p| p as u16)
 }
