@@ -8,7 +8,10 @@ This guide details how coding agents must interact with automated review bots (Q
 
 > 🛑 **NEVER RUSH TO MERGE A PR!**
 > Marking a PR ready for review triggers asynchronous AI analysis bots.
-> **You MUST poll until all bots finish their full analysis, fix every reported issue defensively, and wait for re-review confirmation showing zero unresolved bugs before merging.**
+> **You MUST poll until all bots finish their full analysis, fix every reported issue defensively within the SAME PR, and wait for re-review confirmation showing zero unresolved bugs before merging.**
+>
+> ⚠️ **CRITICAL: `gh pr checks` DOES NOT SHOW QODO STATUS!**
+> `gh pr checks` reflects GitHub Actions CI and CodeRabbit ONLY. Qodo reports strictly via PR comments (`author: qodo-code-review`). A green `gh pr checks` is **NOT** a signal to merge!
 
 ---
 
@@ -23,9 +26,10 @@ Qodo is a deep semantic analysis bot that detects edge-case defects, resource bo
   Check back in a few minutes. Qodo's code review agents are on it.
   <img src="...anteater-looking-at-ants..." ...>
   ```
-  **ACTION**: **WAIT.** Do not merge! Sleep 15-20 seconds and poll with:
+  **ACTION**: **WAIT.** **MERGING IS STRICTLY FORBIDDEN.** Poll using:
   ```bash
-  gh pr view <pr_id> --comments
+  HEAD_SHA=$(git rev-parse HEAD)
+  gh pr view <pr_id> --json comments --jq '.comments[] | select(.author.login=="qodo-code-review") | .body' | grep -F "$HEAD_SHA"
   ```
 - **Completed Analysis State**:
   The comment updates to:
@@ -35,7 +39,9 @@ Qodo is a deep semantic analysis bot that detects edge-case defects, resource bo
   ```
   - **Verify Head Commit**: Check the trailing link or commit SHA at the bottom of the comment to ensure it evaluates the current head commit, not an older push.
   - **If `Bugs > 0`**:
-    Inspect every bug card. Qodo provides:
+    **MERGING IS STRICTLY FORBIDDEN.** Inspect every bug card (`gh pr view <pr_id> --comments`).
+    - **Resolution**: Fix all bugs in the **SAME PR**. Never merge and open a new PR.
+    Qodo provides:
     - **Description**: What went wrong.
     - **Evidence**: Specific line references in your code and upstream protocol specs.
     - **Agent prompt**: Recommended remediation instructions.
@@ -45,7 +51,7 @@ Qodo is a deep semantic analysis bot that detects edge-case defects, resource bo
 ### 2. CodeRabbit (`author: coderabbitai`)
 CodeRabbit provides high-level architectural summaries and structured agent prompts.
 
-- Check PR checks: `gh pr checks <pr_id>` (should display `pass`).
+- Watch CI checks natively: `gh pr checks <pr_id> --watch --interval 10` (should display `pass`).
 - Check PR comments for `> Prompt for AI Agents` blocks. Verify findings independently before applying.
 
 ### 3. Greptile (`author: greptile-apps`)
@@ -74,8 +80,9 @@ When a review bot reports issues:
 +------------------------------v------------------------------+
 | 3. Local Verification & Quality Gates                       |
 |    - mise run fix                                           |
-|    - mise run check:changed                                 |
-|    - mise run test                                          |
+|    - mise run check:changed (fast, < 2s)                    |
+|    - cargo test <owning_test_name> (verify run > 0, < 1s)   |
+|    - (CI executes full Linux test suite upon push)          |
 +------------------------------+------------------------------+
                                |
 +------------------------------v------------------------------+

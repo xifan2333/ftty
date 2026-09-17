@@ -51,6 +51,7 @@ impl FallbackCache {
     }
 
     fn discover(&mut self, c: char, style: u8, preferred_family: &str) -> Option<(u16, u16)> {
+        // Step 1: Check if an already loaded face matching the exact requested style covers `c`
         for (pos, face) in self.faces.iter().enumerate() {
             if face.style == style {
                 let glyph = face.font.lookup_glyph_index(c);
@@ -60,23 +61,15 @@ impl FallbackCache {
             }
         }
 
-        // Fast path: if any already loaded fallback face covers `c` in another style,
-        // reuse it to avoid expensive Fontconfig matching and redundant disk/parsing overhead.
-        for (pos, face) in self.faces.iter().enumerate() {
-            let glyph = face.font.lookup_glyph_index(c);
-            if glyph != 0 {
-                return Some((pos as u16, glyph));
-            }
-        }
-
-        let fc = fontconfig()?;
+        // Step 2: Attempt Fontconfig discovery for the specific requested style (bold/italic)
         let bold = (style & 1) != 0;
         let italic = (style & 2) != 0;
-        let candidates = query_fontconfig_candidates(fc, preferred_family, bold, italic, c)?;
-
-        for (path, index) in candidates {
-            let position =
-                match self.faces.iter().position(|face| {
+        if let Some(fc) = fontconfig()
+            && let Some(candidates) =
+                query_fontconfig_candidates(fc, preferred_family, bold, italic, c)
+        {
+            for (path, index) in candidates {
+                let position = match self.faces.iter().position(|face| {
                     face.path == path && face.index == index && face.style == style
                 }) {
                     Some(position) => position,
@@ -99,9 +92,19 @@ impl FallbackCache {
                     }
                 };
 
-            let glyph = self.faces[position].font.lookup_glyph_index(c);
+                let glyph = self.faces[position].font.lookup_glyph_index(c);
+                if glyph != 0 {
+                    return Some((position as u16, glyph));
+                }
+            }
+        }
+
+        // Step 3: Graceful fallback: If no style-specific face was discovered (e.g. the font has no
+        // bold/italic variant installed), reuse an already loaded face of any other style covering `c`
+        for (pos, face) in self.faces.iter().enumerate() {
+            let glyph = face.font.lookup_glyph_index(c);
             if glyph != 0 {
-                return Some((position as u16, glyph));
+                return Some((pos as u16, glyph));
             }
         }
 

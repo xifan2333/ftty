@@ -236,22 +236,27 @@ impl Grid {
         }
     }
 
+    pub(crate) fn evict_oldest_scrollback_row(&mut self) -> Option<Row> {
+        let row = self.scrollback.pop_front()?;
+        if !self.placements.is_empty() {
+            self.placements.retain_mut(|p| {
+                if p.line == 0 {
+                    false
+                } else {
+                    p.line -= 1;
+                    true
+                }
+            });
+        }
+        Some(row)
+    }
+
     pub(crate) fn push_scrollback(&mut self, row: Row) {
         if self.max_scrollback == 0 {
             return;
         }
         if self.scrollback.len() >= self.max_scrollback {
-            self.scrollback.pop_front();
-            if !self.placements.is_empty() {
-                self.placements.retain_mut(|p| {
-                    if p.line == 0 {
-                        false
-                    } else {
-                        p.line -= 1;
-                        true
-                    }
-                });
-            }
+            self.evict_oldest_scrollback_row();
         }
         self.scrollback.push_back(row);
         // If user is currently viewing history, keep the view anchored on the same lines
@@ -349,10 +354,15 @@ impl Grid {
         if is_full_screen && self.max_scrollback > 0 {
             for i in 0..count {
                 if self.scrollback.len() >= self.max_scrollback {
-                    if let Some(mut recycled) = self.scrollback.pop_front() {
+                    if let Some(mut recycled) = self.evict_oldest_scrollback_row() {
                         recycled.reset();
                         let old = std::mem::replace(&mut self.lines[i], recycled);
-                        self.push_scrollback(old);
+                        self.scrollback.push_back(old);
+                        if self.viewport_offset > 0 {
+                            self.viewport_offset =
+                                (self.viewport_offset + 1).min(self.scrollback.len());
+                            self.mark_all_dirty();
+                        }
                     }
                 } else {
                     let fresh = Row::new(self.cols);

@@ -48,24 +48,23 @@ Verify component scope before making changes:
 
 ## 3. Universal Code Quality Gate (`hk` / `mise`)
 
-Always run quality verification before committing or marking tasks complete:
+Always run quality verification before committing:
 
 ```bash
 # 1. Preview which linter/formatter steps match modified files
 mise run check:plan
 
-# 2. Check changed files safely (rustfmt + cargo clippy)
+# 2. Check changed files safely (rustfmt + cargo clippy) (fast, < 2s)
 mise run check:changed
 
 # 3. Automatically fix formatting (rustfmt edition 2024)
 mise run fix
 
-# 4. Run all unit tests
-mise run test
+# 4. Run targeted unit test for modified module or owning subsystem (verify tests run > 0, fast, < 1s)
+cargo test <test_filter>
 
-# 5. Build debug / release binaries
-mise run build
-mise run build:release
+# 5. Note: Full 170+ test suite regression on Linux default target is offloaded to GitHub Actions CI.
+# Avoid running full `mise run test` (> 2 min) locally on every iteration.
 ```
 
 ---
@@ -79,7 +78,7 @@ Read **[references/issue-pr-workflow.md](references/issue-pr-workflow.md)**
 - The strict 5-phase Issue + Draft PR chronological lifecycle (`gh pr create --draft`).
 - Single-item focused implementation loop: atomic commit, immediate PR checklist sync (`- [x]`), and push per item.
 - Marking PR ready for review once all checklist tasks are completed.
-- **Review Bot Triage & Verification**: Never rush to merge! Poll until Qodo and CodeRabbit finish analyzing, resolve all reported bugs, and verify `Bugs (0)` before merging.
+- **Review Bot Triage & Verification**: Never rush to merge! Qodo reports via PR comments (not Check Runs). Poll until Qodo and CodeRabbit finish analyzing, resolve all reported bugs within the SAME PR, and verify `Bugs (0)` before merging. Use `gh pr checks --watch --interval 10` for native CI monitoring.
 
 ### Task: Architecture, Module Boundaries & Safety Invariants
 Read **[references/architecture-and-safety.md](references/architecture-and-safety.md)**
