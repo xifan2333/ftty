@@ -4,7 +4,6 @@
 // propagate errors. Cargo.toml enables `clippy::unwrap_used`/`expect_used` crate-wide.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
-pub mod box_drawing;
 pub mod color;
 pub mod config;
 pub mod event_loop;
@@ -20,6 +19,7 @@ pub mod parser;
 pub mod pty;
 #[allow(unsafe_code)]
 pub mod render;
+pub use render::box_drawing;
 pub mod selection;
 pub mod wayland;
 

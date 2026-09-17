@@ -33,7 +33,7 @@ pub(crate) fn prepare_atlas(
         let _ = atlas.get_or_insert('?', CellFlags::empty(), fonts);
         if let Some(p) = preedit {
             for c in p.text.chars() {
-                if crate::box_drawing::is_procedural_glyph(c) {
+                if crate::render::box_drawing::is_procedural_glyph(c) {
                     continue;
                 }
                 full |= atlas
@@ -47,7 +47,7 @@ pub(crate) fn prepare_atlas(
                 continue;
             }
             for cell in line.cells.iter().filter(|cell| visible_glyph(cell)) {
-                if crate::box_drawing::is_procedural_glyph(cell.c) {
+                if crate::render::box_drawing::is_procedural_glyph(cell.c) {
                     continue;
                 }
                 full |= atlas.get_or_insert(cell.c, cell.flags, fonts).is_none();
@@ -229,8 +229,9 @@ pub(crate) fn build_row_foregrounds(vertices: &mut Vec<f32>, row: usize, ctx: &R
             cw
         };
         if visible_glyph(cell) {
-            if crate::box_drawing::render_procedural_glyph(vertices, cell.c, x, y, width, ch, color)
-            {
+            if crate::render::box_drawing::render_procedural_glyph(
+                vertices, cell.c, x, y, width, ch, color,
+            ) {
                 // Procedural box drawing and block elements glyph
             } else if let Some(glyph) = atlas.get(cell.c, cell.flags, fonts) {
                 if glyph.width > 0 && glyph.height > 0 {
@@ -424,7 +425,7 @@ pub(crate) fn build_dynamic_overlays(vertices: &mut Vec<f32>, ctx: &RenderContex
 
             // Draw preedit glyph
             let span_right = px + span_w;
-            if crate::box_drawing::render_procedural_glyph(
+            if crate::render::box_drawing::render_procedural_glyph(
                 vertices,
                 c,
                 px,

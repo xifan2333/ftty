@@ -1,5 +1,6 @@
 //! Wayland EGL ownership and batched OpenGL ES 2 terminal rendering.
 
+pub mod box_drawing;
 pub mod text;
 
 #[cfg(test)]
@@ -24,10 +25,7 @@ use crate::render::text::{
 };
 use crate::selection::Selection;
 
-#[cfg(test)]
-const DEFAULT_FG: Rgb = Rgb::new(220, 220, 220);
-#[cfg(test)]
-const DEFAULT_BG: Rgb = Rgb::new(24, 24, 24);
+pub use box_drawing::{is_procedural_glyph, render_procedural_glyph};
 
 /// Active color scheme holding the 256-color palette and default foreground/background.
 #[derive(Debug, Clone, Copy)]
@@ -87,11 +85,17 @@ impl<'a> RenderOptions<'a> {
     }
 }
 
+#[cfg(test)]
+const DEFAULT_FG: Rgb = Rgb::new(220, 220, 220);
+#[cfg(test)]
+const DEFAULT_BG: Rgb = Rgb::new(24, 24, 24);
+
 struct EglContext {
     egl: egl::DynamicInstance<egl::EGL1_5>,
     display: egl::Display,
     context: Option<egl::Context>,
     surface: Option<egl::Surface>,
+    initialized: bool,
     // Field order keeps the Wayland connection alive through native window destruction.
     window: WlEglSurface,
     _surface: WlSurface,
@@ -115,65 +119,84 @@ impl EglContext {
             display,
             context: None,
             surface: None,
+            initialized: false,
             window,
             _surface: surface.clone(),
             _connection: connection.clone(),
         };
-        context
-            .egl
-            .bind_api(egl::OPENGL_ES_API)
-            .map_err(io::Error::other)?;
-        let config = context
-            .egl
-            .choose_first_config(
-                display,
-                &[
-                    egl::SURFACE_TYPE,
-                    egl::WINDOW_BIT,
-                    egl::RENDERABLE_TYPE,
-                    egl::OPENGL_ES2_BIT,
-                    egl::RED_SIZE,
-                    8,
-                    egl::GREEN_SIZE,
-                    8,
-                    egl::BLUE_SIZE,
-                    8,
-                    egl::ALPHA_SIZE,
-                    8,
-                    egl::NONE,
-                ],
-            )
-            .map_err(io::Error::other)?
-            .ok_or_else(|| io::Error::other("no EGL configuration supports OpenGL ES 2"))?;
-        context.context = Some(
+
+        let init_result = (|| -> io::Result<()> {
             context
                 .egl
-                .create_context(
+                .bind_api(egl::OPENGL_ES_API)
+                .map_err(io::Error::other)?;
+            let config = context
+                .egl
+                .choose_first_config(
                     display,
-                    config,
-                    None,
-                    &[egl::CONTEXT_CLIENT_VERSION, 2, egl::NONE],
+                    &[
+                        egl::SURFACE_TYPE,
+                        egl::WINDOW_BIT,
+                        egl::RENDERABLE_TYPE,
+                        egl::OPENGL_ES2_BIT,
+                        egl::RED_SIZE,
+                        8,
+                        egl::GREEN_SIZE,
+                        8,
+                        egl::BLUE_SIZE,
+                        8,
+                        egl::ALPHA_SIZE,
+                        8,
+                        egl::NONE,
+                    ],
                 )
+                .map_err(io::Error::other)?
+                .ok_or_else(|| io::Error::other("no EGL configuration supports OpenGL ES 2"))?;
+            context.context = Some(
+                context
+                    .egl
+                    .create_context(
+                        display,
+                        config,
+                        None,
+                        &[egl::CONTEXT_CLIENT_VERSION, 2, egl::NONE],
+                    )
+                    .map_err(io::Error::other)?,
+            );
+            // SAFETY: window wraps a live wl_surface on this EGL display.
+            context.surface = Some(
+                unsafe {
+                    context.egl.create_window_surface(
+                        display,
+                        config,
+                        context.window.ptr().cast_mut(),
+                        None,
+                    )
+                }
                 .map_err(io::Error::other)?,
-        );
-        // SAFETY: window wraps a live wl_surface on this EGL display.
-        context.surface = Some(
-            unsafe {
-                context.egl.create_window_surface(
-                    display,
-                    config,
-                    context.window.ptr().cast_mut(),
-                    None,
-                )
+            );
+            context.make_current()?;
+            // Frame callbacks pace drawing; swapping must not block PTY and signal dispatch.
+            context
+                .egl
+                .swap_interval(display, 0)
+                .map_err(io::Error::other)?;
+            Ok(())
+        })();
+
+        if let Err(err) = init_result {
+            let _ = context.egl.make_current(display, None, None, None);
+            if let Some(surface) = context.surface {
+                let _ = context.egl.destroy_surface(display, surface);
             }
-            .map_err(io::Error::other)?,
-        );
-        context.make_current()?;
-        // Frame callbacks pace drawing; swapping must not block PTY and signal dispatch.
-        context
-            .egl
-            .swap_interval(display, 0)
-            .map_err(io::Error::other)?;
+            if let Some(ctx) = context.context {
+                let _ = context.egl.destroy_context(display, ctx);
+            }
+            let _ = context.egl.terminate(display);
+            return Err(err);
+        }
+
+        context.initialized = true;
         Ok(context)
     }
 
@@ -186,6 +209,9 @@ impl EglContext {
 
 impl Drop for EglContext {
     fn drop(&mut self) {
+        if !self.initialized {
+            return;
+        }
         let _ = self.egl.make_current(self.display, None, None, None);
         if let Some(surface) = self.surface {
             let _ = self.egl.destroy_surface(self.display, surface);
