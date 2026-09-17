@@ -164,13 +164,17 @@ pub(crate) fn build_row_backgrounds(vertices: &mut Vec<f32>, row: usize, ctx: &R
     // Draw background and selection on this row
     for (col, cell) in line.cells.iter().enumerate() {
         let (_, bg) = cell_colors(cell, colors);
-        let x = pad_x + col as f32 * cw;
         if bg != colors.background {
+            let x = pad_x + col as f32 * cw;
             push_quad(vertices, [x, y, x + cw, y + ch], SOLID_UV, rgba(bg));
         }
-        if options.selection.is_some_and(|s| s.contains(abs_line, col)) {
-            push_quad(vertices, [x, y, x + cw, y + ch], SOLID_UV, SELECTION_BG);
-        }
+    }
+    if let Some(selection) = options.selection
+        && let Some((start_col, end_col)) = selection.line_span(abs_line, grid.cols)
+    {
+        let sx = pad_x + start_col as f32 * cw;
+        let ex = pad_x + (end_col + 1) as f32 * cw;
+        push_quad(vertices, [sx, y, ex, y + ch], SOLID_UV, SELECTION_BG);
     }
 
     // Draw block cursor on this row if present

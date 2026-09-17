@@ -80,6 +80,37 @@ impl Selection {
         line >= start.line && line <= end.line
     }
 
+    /// Returns the column span `Some((start_col, end_col))` selected on the given line, if any.
+    #[must_use]
+    pub fn line_span(&self, line: usize, cols: usize) -> Option<(usize, usize)> {
+        if self.is_empty() || cols == 0 {
+            return None;
+        }
+        let (start, end) = self.normalized();
+        if line < start.line || line > end.line {
+            return None;
+        }
+        let max_col = cols.saturating_sub(1);
+        let start_col = if line == start.line && self.kind != SelectionType::Line {
+            if start.col > max_col {
+                return None;
+            }
+            start.col
+        } else {
+            0
+        };
+        let end_col = if line == end.line && self.kind != SelectionType::Line {
+            end.col.min(max_col)
+        } else {
+            max_col
+        };
+        if start_col <= end_col {
+            Some((start_col, end_col))
+        } else {
+            None
+        }
+    }
+
     /// Extracts clean UTF-8 text from the grid within this selection range.
     ///
     /// Respects wrapped lines (omits newline) and trims trailing spaces from rows.
@@ -262,5 +293,44 @@ mod tests {
 
         let text = sel.extract_text(&grid);
         assert_eq!(text, "hello\nworld");
+    }
+
+    #[test]
+    fn test_selection_line_span() {
+        let sel = Selection::new(
+            SelectionPoint::new(1, 5),
+            SelectionPoint::new(3, 10),
+            SelectionType::Simple,
+        );
+
+        // Outside selection
+        assert_eq!(sel.line_span(0, 80), None);
+        assert_eq!(sel.line_span(4, 80), None);
+
+        // Start line: col 5 to max_col 79
+        assert_eq!(sel.line_span(1, 80), Some((5, 79)));
+
+        // Intermediate line: col 0 to max_col 79
+        assert_eq!(sel.line_span(2, 80), Some((0, 79)));
+
+        // End line: col 0 to col 10
+        assert_eq!(sel.line_span(3, 80), Some((0, 10)));
+
+        // Empty selection
+        let empty = Selection::new(
+            SelectionPoint::new(1, 5),
+            SelectionPoint::new(1, 5),
+            SelectionType::Simple,
+        );
+        assert_eq!(empty.line_span(1, 80), None);
+
+        // Start column beyond grid width (e.g. after shrink) yields None on start line
+        let shrunk = Selection::new(
+            SelectionPoint::new(1, 100),
+            SelectionPoint::new(2, 20),
+            SelectionType::Simple,
+        );
+        assert_eq!(shrunk.line_span(1, 80), None);
+        assert_eq!(shrunk.line_span(2, 80), Some((0, 20)));
     }
 }

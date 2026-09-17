@@ -8,7 +8,15 @@ use crate::parser::Terminal;
 
 impl Terminal {
     pub(crate) fn handle_sgr(&mut self, params: &Params) {
-        let param_list: Vec<&[u16]> = params.iter().collect();
+        let mut param_list_buf: [&[u16]; 32] = [&[]; 32];
+        let mut param_count = 0;
+        for param in params.iter() {
+            if param_count < param_list_buf.len() {
+                param_list_buf[param_count] = param;
+                param_count += 1;
+            }
+        }
+        let param_list = &param_list_buf[..param_count];
         if param_list.is_empty() {
             self.reset_attributes();
             return;

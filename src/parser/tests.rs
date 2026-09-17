@@ -519,3 +519,17 @@ fn test_parser_instance_reuse_across_invocations() {
     term.advance_bytes(b"\r\nC");
     assert_eq!(term.grid.lines[1].cells[0].c, 'C');
 }
+
+#[test]
+fn test_stack_allocated_parameter_parsing_dense_sgr() {
+    let mut term = Terminal::new(80, 24, 100);
+    // Sequence with many chained parameters
+    term.advance_bytes(b"\x1b[0;1;3;4;31;48;2;10;20;30;24;58;2;40;50;60mZ\x1b[0m");
+    let cell = term.grid.lines[0].cells[0];
+    assert_eq!(cell.c, 'Z');
+    assert!(cell.flags.contains(CellFlags::BOLD));
+    assert!(cell.flags.contains(CellFlags::ITALIC));
+    assert_eq!(cell.fg, Color::Indexed(1));
+    assert_eq!(cell.bg, Color::Rgb(10, 20, 30));
+    assert_eq!(cell.underline_color, Color::Rgb(40, 50, 60));
+}

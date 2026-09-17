@@ -304,5 +304,19 @@ pub fn diacritic_to_index(c: char) -> Option<u16> {
         '\u{1D243}',
         '\u{1D244}',
     ];
-    DIACRITICS.iter().position(|&d| d == c).map(|p| p as u16)
+    DIACRITICS.binary_search(&c).ok().map(|p| p as u16)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_diacritic_to_index_binary_search() {
+        assert_eq!(diacritic_to_index('\u{305}'), Some(0));
+        assert_eq!(diacritic_to_index('\u{1D244}'), Some(296));
+        assert_eq!(diacritic_to_index('\u{483}'), Some(30));
+        assert_eq!(diacritic_to_index('A'), None);
+        assert_eq!(diacritic_to_index(KITTY_PLACEHOLDER), None);
+    }
 }
