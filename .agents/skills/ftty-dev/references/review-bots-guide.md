@@ -82,7 +82,7 @@ When a review bot reports issues:
 |    - mise run fix                                           |
 |    - mise run check:changed (fast, < 2s)                    |
 |    - cargo test <owning_test_name> (verify run > 0, < 1s)   |
-|    - (CI executes full Linux test suite upon push)          |
+|    - (Hardware Liberation: release build & CI test on push) |
 +------------------------------+------------------------------+
                                |
 +------------------------------v------------------------------+
@@ -93,8 +93,8 @@ When a review bot reports issues:
                                |
 +------------------------------v------------------------------+
 | 5. Wait for Bot Re-Review                                   |
-|    - Sleep 15-20s, poll gh pr view <id> --comments          |
-|    - Wait for "Qodo is busy working" to finish              |
+|    - gh pr checks <id> --watch --interval 10                |
+|    - Poll Qodo status until busy state clears               |
 |    - Verify review applies to current head commit           |
 |    - Confirm Bugs count is 0 and items show [✓ Resolved]    |
 |    - Confirm CodeRabbit & Greptile have no blockers         |
