@@ -198,6 +198,7 @@ impl FontManager {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let _ = cache.resolve('中', 0, &preferred);
+                let _ = cache.resolve('中', 1, &preferred);
             })
             .ok();
 
