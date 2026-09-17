@@ -9,10 +9,11 @@ pub mod config;
 pub mod event_loop;
 pub mod font;
 pub mod grid;
-pub mod ime;
 pub mod input;
+pub use input::ime;
+pub use input::mouse;
+pub use input::selection;
 pub mod kitty;
-pub mod mouse;
 pub mod parser;
 // Audited FFI boundaries: EGL/OpenGL and the PTY ioctl wrappers.
 #[allow(unsafe_code)]
@@ -20,7 +21,6 @@ pub mod pty;
 #[allow(unsafe_code)]
 pub mod render;
 pub use render::box_drawing;
-pub mod selection;
 pub mod wayland;
 
 pub use color::{Color, Rgb, default_256_palette};
