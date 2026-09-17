@@ -44,9 +44,11 @@ Run quality commands during development:
 
 ```bash
 mise run check:plan     # preview execution plan for modified files
-mise run check:changed  # run hk checks across modified/staged/untracked files
+mise run check:changed  # run hk checks (rustfmt + clippy) across modified files (fast, < 2s)
 mise run fix            # auto-format modified files
-mise run build          # compile project
+cargo test <module>::tests # run targeted unit tests for modified module (fast, < 1s)
+# Note: Avoid running the full 170+ test suite (`mise run test`, > 2 min) locally on every micro-task.
+# Full regression and multi-target compilation are offloaded to GitHub Actions CI.
 ```
 
 ---
@@ -77,7 +79,8 @@ For each sub-task in the issue checklist (in strict sequential order, maintainin
 2. **Quality Gates Preview & Execution**:
    - Preview checks: `mise run check:plan`
    - Auto-format and lint: `mise run fix && mise run check:changed`
-   - Run unit tests: `mise run test`
+   - Fast targeted test: `cargo test <modified_module>::tests` (fast, < 2s).
+   - *Note*: Rely on GitHub Actions CI for full-suite verification; do not run full `mise run test` locally on every item.
 3. **Local Atomic Commit**: Create an atomic commit following Conventional Commits format:
    ```bash
    git add <modified_files>
@@ -103,24 +106,46 @@ Once all checklist items are completed, checked off, and pushed:
 
 ### Phase 4: Automated Review Triage & Fix Loop (Post-Ready)
 
-Once the PR is marked ready, CI gates and review bots automatically analyze the changes:
+> ⚠️ **CRITICAL MERGE PREVENTION RULE**:
+> `gh pr checks` ONLY reflects GitHub Actions CI and CodeRabbit status. **Qodo DOES NOT create a Check Run — Qodo reports ONLY via PR comments.**
+> A green `gh pr checks` is **NOT** sufficient to merge! You MUST wait for Qodo to complete and verify `Bugs (0)`.
 
-1. **Poll Check Status & Feedback**:
-   - Verify CI status: `gh pr checks`
-   - Inspect PR comments: `gh pr view <pr_id> --comments`
-   - Inspect line-level review comments: `gh api repos/:owner/:repo/pulls/<pr_id>/comments`
-2. **Review Bot Feedback Ingestion**:
-   - **CodeRabbit**: Extract `> Prompt for AI Agents` structured blocks when available.
-   - **Greptile**: Inspect cross-file architecture consistency alerts (`greptile.json`).
+1. **Watch CI with Native Interval**:
+   - Do NOT use manual `sleep` scripts. Use the native `--watch` flag:
+     ```bash
+     gh pr checks <pr_id> --watch --interval 10
+     ```
+   - Let GitHub Actions CI execute the full 170+ test suite and compilation in the cloud.
+
+2. **Poll Review Bot Comments (Single-PR Resolution)**:
+   - Check Qodo analysis status:
+     ```bash
+     gh pr view <pr_id> --json comments --jq '.comments[] | select(.author.login=="qodo-code-review") | .body' | grep -E "Bugs \([0-9]+\)|Qodo is busy working"
+     ```
+   - If output contains `Qodo is busy working`: **MERGING IS STRICTLY FORBIDDEN**. Wait and poll again.
+   - If output contains `Bugs (N)` where `N > 0`:
+     - Inspect the comment cards in detail (`gh pr view <pr_id> --comments`).
+     - **ALL bugs MUST be resolved within the SAME PR before merging.** Never merge a buggy PR to fix in a subsequent PR.
+
 3. **Defensive Fix & Verification**:
-   - Treat all bot feedback as review suggestions; verify against actual code logic.
-   - Run `mise run check:changed` and `mise run test` locally.
-   - Commit atomic fix: `git commit -m "fix(review): address review feedback (#<issue_id>)"` and push.
+   - Implement targeted fix and add unit regression tests.
+   - Run local fast-gates: `mise run fix && mise run check:changed && cargo test <module>::tests`.
+   - Commit atomic fix:
+     ```bash
+     git commit -m "fix(review): address review feedback (#<issue_id>)"
+     git push origin <branch_name>
+     ```
+   - Loop back to Step 1: watch CI, wait for Qodo re-review, and verify it updates to **`Bugs (0)`** and **`✓ Resolved`**.
 
 ### Phase 5: Final Squash-Merge
 
-1. Confirm all CI checks and bot checks pass (`gh pr checks`).
-2. Perform squash-merge and delete the remote branch:
-   ```bash
-   gh pr merge --squash --delete-branch
-   ```
+**Pre-Merge Hard Checklist** (All 4 conditions MUST be satisfied):
+1. [x] `gh pr checks <pr_id>` is 100% green (`pass`).
+2. [x] Qodo status is `Code Review by Qodo` (no `Qodo is busy working`).
+3. [x] Qodo reports **`Bugs (0)`** and all previously flagged items show `[✓ Resolved]`.
+4. [x] CodeRabbit and Greptile have no unresolved blocking feedback.
+
+Once all 4 conditions are met, perform squash-merge and branch cleanup:
+```bash
+gh pr merge <pr_id> --squash --delete-branch
+```
