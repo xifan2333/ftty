@@ -10,13 +10,13 @@ pub mod text;
 mod tests;
 
 use std::collections::HashMap;
-use std::io;
 
 use glow::HasContext;
 use wayland_client::Connection;
 use wayland_client::protocol::wl_surface::WlSurface;
 
 use crate::color::Rgb;
+use crate::error::RenderError;
 use crate::font::{CellMetrics, FontManager, GlyphAtlas};
 use crate::grid::{CursorShape, Grid};
 use crate::input::ime::Preedit;
@@ -130,7 +130,11 @@ impl Renderer {
     ///
     /// # Errors
     /// Returns an error if EGL, shaders, or GL resources cannot be initialized.
-    pub fn new(surface: &WlSurface, connection: &Connection, size: [u32; 2]) -> io::Result<Self> {
+    pub fn new(
+        surface: &WlSurface,
+        connection: &Connection,
+        size: [u32; 2],
+    ) -> Result<Self, RenderError> {
         let egl = EglContext::new(surface, connection, size)?;
         // SAFETY: EGL is current, and its library and connection outlive the GL objects.
         let gl = unsafe {
@@ -167,8 +171,18 @@ impl Renderer {
         unsafe {
             let program = create_program(&renderer.gl)?;
             renderer.program = Some(program);
-            renderer.vbo = Some(renderer.gl.create_buffer().map_err(io::Error::other)?);
-            renderer.texture = Some(renderer.gl.create_texture().map_err(io::Error::other)?);
+            renderer.vbo = Some(
+                renderer
+                    .gl
+                    .create_buffer()
+                    .map_err(RenderError::BufferCreation)?,
+            );
+            renderer.texture = Some(
+                renderer
+                    .gl
+                    .create_texture()
+                    .map_err(RenderError::TextureCreation)?,
+            );
             let gl = &renderer.gl;
             renderer.viewport = gl.get_uniform_location(program, "u_viewport");
             renderer.atlas_size = gl.get_uniform_location(program, "u_atlas_size");
@@ -198,7 +212,7 @@ impl Renderer {
     ///
     /// # Errors
     /// Returns an error for zero or unrepresentable dimensions.
-    pub fn resize(&mut self, size: [u32; 2]) -> io::Result<()> {
+    pub fn resize(&mut self, size: [u32; 2]) -> Result<(), RenderError> {
         let [width, height] = native_size(size)?;
         self.egl.window.resize(width, height, 0, 0);
         self.clear_cache();
@@ -217,7 +231,7 @@ impl Renderer {
         atlas: &mut GlyphAtlas,
         size: [u32; 2],
         options: RenderOptions<'_>,
-    ) -> io::Result<()> {
+    ) -> Result<(), RenderError> {
         let [width, height] = native_size(size)?;
         self.egl.make_current()?;
         let repacked = prepare_atlas(grid, fonts, atlas, options.preedit);
@@ -296,15 +310,12 @@ impl Renderer {
     ///
     /// # Errors
     /// Returns an error if EGL cannot present the buffer.
-    pub fn present(&self) -> io::Result<()> {
-        let surface = self
-            .egl
-            .surface
-            .ok_or_else(|| io::Error::other("EGL window surface is not initialized"))?;
+    pub fn present(&self) -> Result<(), RenderError> {
+        let surface = self.egl.surface.ok_or(RenderError::SurfaceNotInitialized)?;
         self.egl
             .egl
             .swap_buffers(self.egl.display, surface)
-            .map_err(io::Error::other)
+            .map_err(|e| RenderError::Gl(format!("{e:?}")))
     }
 
     fn build_incremental_vertices(
