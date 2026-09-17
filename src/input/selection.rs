@@ -291,4 +291,34 @@ mod tests {
         let text = sel.extract_text(&grid);
         assert_eq!(text, "hello\nworld");
     }
+
+    #[test]
+    fn test_selection_line_span() {
+        let sel = Selection::new(
+            SelectionPoint::new(1, 5),
+            SelectionPoint::new(3, 10),
+            SelectionType::Simple,
+        );
+
+        // Outside selection
+        assert_eq!(sel.line_span(0, 80), None);
+        assert_eq!(sel.line_span(4, 80), None);
+
+        // Start line: col 5 to max_col 79
+        assert_eq!(sel.line_span(1, 80), Some((5, 79)));
+
+        // Intermediate line: col 0 to max_col 79
+        assert_eq!(sel.line_span(2, 80), Some((0, 79)));
+
+        // End line: col 0 to col 10
+        assert_eq!(sel.line_span(3, 80), Some((0, 10)));
+
+        // Empty selection
+        let empty = Selection::new(
+            SelectionPoint::new(1, 5),
+            SelectionPoint::new(1, 5),
+            SelectionType::Simple,
+        );
+        assert_eq!(empty.line_span(1, 80), None);
+    }
 }
