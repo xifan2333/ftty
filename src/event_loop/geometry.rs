@@ -1,9 +1,8 @@
 //! Terminal geometry calculation, pixel dimension sizing, and renderer configuration.
 
-use std::io;
-
 use wayland_client::Connection;
 
+use crate::error::{FttyError, WaylandError};
 use crate::event_loop::AppState;
 use crate::font::CellMetrics;
 use crate::render::Renderer;
@@ -39,7 +38,7 @@ impl AppState {
         }
     }
 
-    pub(crate) fn resize_terminal(&mut self) -> io::Result<()> {
+    pub(crate) fn resize_terminal(&mut self) -> Result<(), FttyError> {
         let padding = [self.config.padding_x(), self.config.padding_y()];
         let (cols, rows) = terminal_size(
             [self.wayland.width, self.wayland.height],
@@ -70,7 +69,7 @@ impl AppState {
         Ok(())
     }
 
-    pub(crate) fn configure_renderer(&mut self, connection: &Connection) -> io::Result<()> {
+    pub(crate) fn configure_renderer(&mut self, connection: &Connection) -> Result<(), FttyError> {
         let size = self
             .pending_size
             .take()
@@ -82,7 +81,7 @@ impl AppState {
                 .wayland
                 .surface
                 .as_ref()
-                .ok_or_else(|| io::Error::other("configured without a Wayland surface"))?;
+                .ok_or(WaylandError::WindowNotCreated)?;
             self.renderer = Some(Renderer::new(surface, connection, size)?);
         }
         [self.wayland.width, self.wayland.height] = size;

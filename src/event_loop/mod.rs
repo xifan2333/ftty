@@ -20,6 +20,7 @@ use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::
 
 use crate::color::Rgb;
 use crate::config::Config;
+use crate::error::{FttyError, WaylandError};
 use crate::font::{FontManager, GlyphAtlas};
 use crate::grid::CellFlags;
 use crate::input::KeyboardHandler;
@@ -75,7 +76,7 @@ pub struct AppState {
     /// Set by an `xdg_surface.configure`; the resize is applied once the queue is drained so a
     /// burst of configures collapses into a single, final size.
     pub(crate) configure_pending: bool,
-    pub(crate) render_error: Option<io::Error>,
+    pub(crate) render_error: Option<FttyError>,
     pub(crate) sync_output_start: Option<std::time::Instant>,
     pub(crate) last_sync_gen: u64,
 }
@@ -84,20 +85,20 @@ impl AppState {
     /// Creates a new `AppState` with default configuration path.
     ///
     /// # Errors
-    /// Returns [`std::io::Error`] if font discovery or configuration loading fails.
-    pub fn new(terminal: Terminal, pty: Pty) -> Result<Self, io::Error> {
+    /// Returns [`FttyError`] if font discovery or configuration loading fails.
+    pub fn new(terminal: Terminal, pty: Pty) -> Result<Self, FttyError> {
         Self::with_config(terminal, pty, None)
     }
 
     /// Creates a new `AppState` with terminal, PTY, optional custom configuration path.
     ///
     /// # Errors
-    /// Returns [`std::io::Error`] if font discovery or configuration loading fails.
+    /// Returns [`FttyError`] if font discovery or configuration loading fails.
     pub fn with_config(
         mut terminal: Terminal,
         pty: Pty,
         config_path: Option<PathBuf>,
-    ) -> Result<Self, io::Error> {
+    ) -> Result<Self, FttyError> {
         let config = Config::load_from_path_or_default(config_path.as_deref())?;
         let font_mgr =
             FontManager::load_with_families(&config.font_families(), config.font_size())?;
@@ -198,10 +199,9 @@ impl AppState {
 /// Runs the unified calloop event loop until terminal exits.
 ///
 /// # Errors
-/// Returns [`io::Error`] if Wayland connection, calloop initialization, or event dispatching fails.
-pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
-    let conn = Connection::connect_to_env()
-        .map_err(|e| io::Error::new(io::ErrorKind::ConnectionRefused, e))?;
+/// Returns [`FttyError`] if Wayland connection, calloop initialization, or event dispatching fails.
+pub fn run_event_loop(mut app_state: AppState) -> Result<(), FttyError> {
+    let conn = Connection::connect_to_env().map_err(|e| WaylandError::Connection(e.to_string()))?;
 
     let event_queue = conn.new_event_queue();
     let qh = event_queue.handle();
@@ -209,7 +209,8 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
     let display = conn.display();
     display.get_registry(&qh, ());
 
-    let mut event_loop: EventLoop<AppState> = EventLoop::try_new().map_err(io::Error::other)?;
+    let mut event_loop: EventLoop<AppState> =
+        EventLoop::try_new().map_err(|e| WaylandError::Dispatch(e.to_string()))?;
 
     // 1. Wayland Event Source
     let wayland_source = WaylandSource::new(conn.clone(), event_queue);
@@ -218,7 +219,7 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
         .insert_source(wayland_source, |(), queue, state: &mut AppState| {
             queue.dispatch_pending(state)
         })
-        .map_err(io::Error::other)?;
+        .map_err(|e| WaylandError::Dispatch(e.to_string()))?;
 
     // 2. PTY Master Read Event Source
     let pty_master = app_state.pty.try_clone_master()?;
@@ -278,7 +279,7 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
             }
             Ok(calloop::PostAction::Continue)
         })
-        .map_err(io::Error::other)?;
+        .map_err(|e| WaylandError::Dispatch(e.to_string()))?;
 
     // 3. POSIX Signals Event Source
     let signals = Signals::new(&[
@@ -287,7 +288,7 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
         Signal::SIGTERM,
         Signal::SIGUSR1,
     ])
-    .map_err(io::Error::other)?;
+    .map_err(|e| WaylandError::Dispatch(e.to_string()))?;
     event_loop
         .handle()
         .insert_source(signals, |event, _, state: &mut AppState| {
@@ -306,7 +307,7 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
                 _ => {}
             }
         })
-        .map_err(io::Error::other)?;
+        .map_err(|e| WaylandError::Dispatch(e.to_string()))?;
 
     // 4. Main Event Loop Tick
     while app_state.running {
@@ -318,7 +319,7 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
 
         event_loop
             .dispatch(dispatch_timeout, &mut app_state)
-            .map_err(io::Error::other)?;
+            .map_err(|e| WaylandError::Dispatch(e.to_string()))?;
 
         if !app_state.running {
             break;
@@ -393,6 +394,9 @@ pub fn run_event_loop(mut app_state: AppState) -> io::Result<()> {
                 app_state.frame_callback = Some(surface.frame(&qh, ()));
             }
             renderer.present()?;
+            let _ = app_state
+                .wayland
+                .transition_window_to(crate::wayland::WindowState::Active);
             app_state.update_ime_cursor_area();
             app_state.needs_redraw = false;
         }

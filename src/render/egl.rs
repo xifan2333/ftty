@@ -1,11 +1,11 @@
 //! EGL context initialization, native Wayland window binding, and context teardown.
 
-use std::io;
-
 use khronos_egl as egl;
 use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::{Connection, Proxy};
 use wayland_egl::WlEglSurface;
+
+use crate::error::RenderError;
 
 pub(crate) struct EglContext {
     pub(crate) egl: egl::DynamicInstance<egl::EGL1_5>,
@@ -24,16 +24,18 @@ impl EglContext {
         surface: &WlSurface,
         connection: &Connection,
         size: [u32; 2],
-    ) -> io::Result<Self> {
+    ) -> Result<Self, RenderError> {
         let [width, height] = native_size(size)?;
-        let window = WlEglSurface::new(surface.id(), width, height).map_err(io::Error::other)?;
+        let window = WlEglSurface::new(surface.id(), width, height)
+            .map_err(|e| RenderError::EglSurface(format!("{e:?}")))?;
         // SAFETY: the library stays loaded in this instance for all EGL calls.
         let egl = unsafe { egl::DynamicInstance::<egl::EGL1_5>::load_required() }
-            .map_err(io::Error::other)?;
+            .map_err(|e| RenderError::Gl(format!("{e:?}")))?;
         // SAFETY: connection owns the live libwayland display and is retained below.
         let display = unsafe { egl.get_display(connection.backend().display_ptr().cast()) }
-            .ok_or_else(|| io::Error::other("eglGetDisplay failed"))?;
-        egl.initialize(display).map_err(io::Error::other)?;
+            .ok_or_else(|| RenderError::EglDisplay("eglGetDisplay failed".to_string()))?;
+        egl.initialize(display)
+            .map_err(|e| RenderError::EglInit(format!("{e:?}")))?;
         // Own each handle as soon as it exists, including during failed initialization.
         let mut context = Self {
             egl,
@@ -46,11 +48,11 @@ impl EglContext {
             _connection: connection.clone(),
         };
 
-        let init_result = (|| -> io::Result<()> {
+        let init_result = (|| -> Result<(), RenderError> {
             context
                 .egl
                 .bind_api(egl::OPENGL_ES_API)
-                .map_err(io::Error::other)?;
+                .map_err(|e| RenderError::Gl(format!("{e:?}")))?;
             let config = context
                 .egl
                 .choose_first_config(
@@ -71,8 +73,8 @@ impl EglContext {
                         egl::NONE,
                     ],
                 )
-                .map_err(io::Error::other)?
-                .ok_or_else(|| io::Error::other("no EGL configuration supports OpenGL ES 2"))?;
+                .map_err(|e| RenderError::Gl(format!("{e:?}")))?
+                .ok_or(RenderError::NoSupportedConfig)?;
             context.context = Some(
                 context
                     .egl
@@ -82,7 +84,7 @@ impl EglContext {
                         None,
                         &[egl::CONTEXT_CLIENT_VERSION, 2, egl::NONE],
                     )
-                    .map_err(io::Error::other)?,
+                    .map_err(|e| RenderError::ContextCreation(format!("{e:?}")))?,
             );
             // SAFETY: window wraps a live wl_surface on this EGL display.
             context.surface = Some(
@@ -94,14 +96,14 @@ impl EglContext {
                         None,
                     )
                 }
-                .map_err(io::Error::other)?,
+                .map_err(|e| RenderError::SurfaceCreation(format!("{e:?}")))?,
             );
             context.make_current()?;
             // Frame callbacks pace drawing; swapping must not block PTY and signal dispatch.
             context
                 .egl
                 .swap_interval(display, 0)
-                .map_err(io::Error::other)?;
+                .map_err(|e| RenderError::Gl(format!("{e:?}")))?;
             Ok(())
         })();
 
@@ -121,10 +123,10 @@ impl EglContext {
         Ok(context)
     }
 
-    pub(crate) fn make_current(&self) -> io::Result<()> {
+    pub(crate) fn make_current(&self) -> Result<(), RenderError> {
         self.egl
             .make_current(self.display, self.surface, self.surface, self.context)
-            .map_err(io::Error::other)
+            .map_err(|e| RenderError::MakeCurrent(format!("{e:?}")))
     }
 }
 
@@ -144,12 +146,9 @@ impl Drop for EglContext {
     }
 }
 
-pub fn native_size([width, height]: [u32; 2]) -> io::Result<[i32; 2]> {
+pub fn native_size([width, height]: [u32; 2]) -> Result<[i32; 2], RenderError> {
     if width == 0 || height == 0 || width > i32::MAX as u32 || height > i32::MAX as u32 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "invalid surface size",
-        ));
+        return Err(RenderError::InvalidDimensions(width, height));
     }
     Ok([width as i32, height as i32])
 }

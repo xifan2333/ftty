@@ -1,8 +1,8 @@
 //! OpenGL ES 2.0 shader compilation and shader program linking.
 
-use std::io;
-
 use glow::HasContext;
+
+use crate::error::RenderError;
 
 pub const VERTEX_SHADER: &str = r#"
 attribute vec2 a_position;
@@ -41,22 +41,32 @@ pub(crate) fn compile_shader(
     gl: &glow::Context,
     kind: u32,
     source: &str,
-) -> io::Result<glow::Shader> {
+) -> Result<glow::Shader, RenderError> {
     // SAFETY: callers hold the current EGL context.
     unsafe {
-        let shader = gl.create_shader(kind).map_err(io::Error::other)?;
+        let shader = gl
+            .create_shader(kind)
+            .map_err(RenderError::ShaderCreation)?;
         gl.shader_source(shader, source);
         gl.compile_shader(shader);
         if !gl.get_shader_compile_status(shader) {
             let log = gl.get_shader_info_log(shader);
             gl.delete_shader(shader);
-            return Err(io::Error::other(log));
+            let kind_name = if kind == glow::VERTEX_SHADER {
+                "vertex"
+            } else {
+                "fragment"
+            };
+            return Err(RenderError::ShaderCompile {
+                kind: kind_name,
+                log,
+            });
         }
         Ok(shader)
     }
 }
 
-pub(crate) fn create_program(gl: &glow::Context) -> io::Result<glow::Program> {
+pub(crate) fn create_program(gl: &glow::Context) -> Result<glow::Program, RenderError> {
     // SAFETY: initialization holds the current EGL context.
     unsafe {
         let vertex = compile_shader(gl, glow::VERTEX_SHADER, VERTEX_SHADER)?;
@@ -72,7 +82,7 @@ pub(crate) fn create_program(gl: &glow::Context) -> io::Result<glow::Program> {
             Err(error) => {
                 gl.delete_shader(vertex);
                 gl.delete_shader(fragment);
-                return Err(io::Error::other(error));
+                return Err(RenderError::ProgramCreation(error));
             }
         };
         gl.attach_shader(program, vertex);
@@ -88,7 +98,7 @@ pub(crate) fn create_program(gl: &glow::Context) -> io::Result<glow::Program> {
         if !gl.get_program_link_status(program) {
             let log = gl.get_program_info_log(program);
             gl.delete_program(program);
-            return Err(io::Error::other(log));
+            return Err(RenderError::ProgramLink { log });
         }
         Ok(program)
     }

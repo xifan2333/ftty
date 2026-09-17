@@ -6,6 +6,7 @@
 
 pub mod color;
 pub mod config;
+pub mod error;
 pub mod event_loop;
 pub mod font;
 pub mod grid;
@@ -21,6 +22,9 @@ pub mod wayland;
 
 pub use color::{Color, Rgb, default_256_palette};
 pub use config::Config;
+pub use error::{
+    ConfigError, FontError, FttyError, KittyError, PtyError, RenderError, WaylandError,
+};
 pub use event_loop::{AppState, run_event_loop};
 pub use font::{CellMetrics, FontManager, GlyphAtlas};
 pub use grid::{Cell, CellFlags, ClearMode, Cursor, CursorShape, Grid, Row};
@@ -37,4 +41,4 @@ pub use kitty::{
 pub use parser::Terminal;
 pub use pty::Pty;
 pub use render::{ColorScheme, HoveredHyperlinkSpan, RenderOptions, Renderer};
-pub use wayland::{OfferData, WaylandState};
+pub use wayland::{OfferData, WaylandState, WindowState};

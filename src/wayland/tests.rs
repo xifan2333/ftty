@@ -10,7 +10,7 @@ use crate::input::mouse::{MouseEncoding, MouseTracking};
 use crate::input::selection::SelectionPoint;
 use crate::parser::Terminal;
 use crate::pty::Pty;
-use crate::wayland::WaylandState;
+use crate::wayland::{WaylandState, WindowState};
 
 #[test]
 fn test_wayland_state_initialization() {
@@ -18,8 +18,85 @@ fn test_wayland_state_initialization() {
     assert_eq!(state.width, 720);
     assert_eq!(state.height, 480);
     assert!(!state.configured);
+    assert_eq!(state.window_state, WindowState::Unmapped);
     assert!(!state.close_requested);
     assert!(state.surface.is_none());
+}
+
+#[test]
+fn test_window_state_lifecycle_transitions() {
+    let mut state = WaylandState::new();
+    assert_eq!(state.window_state, WindowState::Unmapped);
+    assert!(!state.configured);
+
+    // Valid progression: Unmapped -> Initializing -> Configured -> Active
+    assert!(
+        state
+            .transition_window_to(WindowState::Initializing)
+            .is_ok()
+    );
+    assert_eq!(state.window_state, WindowState::Initializing);
+    assert!(!state.configured);
+
+    assert!(state.transition_window_to(WindowState::Configured).is_ok());
+    assert_eq!(state.window_state, WindowState::Configured);
+    assert!(state.configured);
+
+    assert!(state.transition_window_to(WindowState::Active).is_ok());
+    assert_eq!(state.window_state, WindowState::Active);
+    assert!(state.configured);
+
+    // Re-configure during active state
+    assert!(state.transition_window_to(WindowState::Configured).is_ok());
+    assert_eq!(state.window_state, WindowState::Configured);
+    assert!(state.configured);
+
+    assert!(state.transition_window_to(WindowState::Active).is_ok());
+
+    // Close
+    assert!(state.transition_window_to(WindowState::Closed).is_ok());
+    assert_eq!(state.window_state, WindowState::Closed);
+    assert!(!state.configured);
+}
+
+#[test]
+fn test_invalid_window_state_transitions_rejected() {
+    let mut state = WaylandState::new();
+
+    // Cannot jump Unmapped -> Active
+    let err = state.transition_window_to(WindowState::Active).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("invalid window state transition from Unmapped to Active")
+    );
+
+    // Cannot jump Unmapped -> Configured
+    assert!(state.transition_window_to(WindowState::Configured).is_err());
+
+    // Initializing -> Active without configure must be rejected
+    assert!(
+        state
+            .transition_window_to(WindowState::Initializing)
+            .is_ok()
+    );
+    assert!(state.transition_window_to(WindowState::Active).is_err());
+
+    // Closed cannot transition back to Initializing
+    assert!(state.transition_window_to(WindowState::Closed).is_ok());
+    assert!(
+        state
+            .transition_window_to(WindowState::Initializing)
+            .is_err()
+    );
+}
+
+#[test]
+fn test_window_state_as_str() {
+    assert_eq!(WindowState::Unmapped.as_str(), "Unmapped");
+    assert_eq!(WindowState::Initializing.as_str(), "Initializing");
+    assert_eq!(WindowState::Configured.as_str(), "Configured");
+    assert_eq!(WindowState::Active.as_str(), "Active");
+    assert_eq!(WindowState::Closed.as_str(), "Closed");
 }
 
 #[test]
