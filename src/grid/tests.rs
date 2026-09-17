@@ -693,3 +693,24 @@ fn test_shrink_and_grow_restores_placeholder_coordinates_and_bounds_overflow() {
         Some(&(1, 2, 3))
     );
 }
+
+#[test]
+fn test_image_placements_pool_has_bounded_capacity() {
+    let mut grid = Grid::new(80, 24, 100);
+    for i in 0..1100 {
+        grid.add_placement(ImagePlacement {
+            image_id: i as u32,
+            placement_id: 0,
+            line: 0,
+            col: 0,
+            cols: 1,
+            rows: 1,
+            offset_x: 0,
+            offset_y: 0,
+            z_index: 0,
+        });
+    }
+    assert_eq!(grid.placements.len(), 1024);
+    // Oldest placements 0..76 were evicted by FIFO
+    assert_eq!(grid.placements[0].image_id, 76);
+}

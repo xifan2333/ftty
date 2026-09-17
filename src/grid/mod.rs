@@ -16,6 +16,9 @@ use crate::kitty::{DeleteTarget, ImageData, ImagePlacement};
 pub use diacritics::{KITTY_PLACEHOLDER, diacritic_to_index};
 pub use row::{Cell, CellFlags, ClearMode, Cursor, CursorShape, Row};
 
+pub(crate) const MAX_PLACEMENTS: usize = 1024;
+pub(crate) const MAX_STORED_IMAGES: usize = 256;
+
 /// 2D Screen grid with scrollback history and alternate screen support.
 #[derive(Debug, Clone)]
 pub struct Grid {
@@ -86,8 +89,8 @@ impl Grid {
         let ver = self.image_versions.entry(id).or_insert(0);
         *ver = ver.wrapping_add(1);
 
-        // Cap stored images to 256 by removing unplaced images
-        if self.images.len() > 256 {
+        // Cap stored images to MAX_STORED_IMAGES by removing unplaced images
+        if self.images.len() > MAX_STORED_IMAGES {
             let mut active_ids: std::collections::HashSet<u32> = self
                 .placements
                 .iter()
@@ -124,11 +127,33 @@ impl Grid {
                 .retain(|img_id, _| active_ids.contains(img_id) || *img_id == id);
             self.image_versions
                 .retain(|img_id, _| self.images.contains_key(img_id));
+
+            // If active placements exceed capacity, evict oldest unreferenced images
+            if self.images.len() > MAX_STORED_IMAGES {
+                let to_evict = self.images.len() - MAX_STORED_IMAGES;
+                let evict_keys: Vec<u32> = self
+                    .images
+                    .keys()
+                    .copied()
+                    .filter(|&k| k != id)
+                    .take(to_evict)
+                    .collect();
+                for k in evict_keys {
+                    self.images.remove(&k);
+                    self.image_versions.remove(&k);
+                    self.placements.retain(|p| p.image_id != k);
+                    self.alt_placements.retain(|p| p.image_id != k);
+                    self.virtual_placements.remove(&k);
+                }
+            }
         }
     }
 
-    /// Adds an image placement instance anchored to grid cells.
+    /// Adds an image placement instance anchored to grid cells with FIFO eviction.
     pub fn add_placement(&mut self, placement: ImagePlacement) {
+        if self.placements.len() >= MAX_PLACEMENTS {
+            self.placements.remove(0);
+        }
         self.placements.push(placement);
     }
 
