@@ -7,7 +7,7 @@ use crate::ime::Preedit;
 use crate::render::{ColorScheme, RenderOptions};
 
 pub(crate) const SOLID_UV: [[f32; 2]; 2] = [[-1.0, -1.0]; 2];
-pub(crate) const SELECTION_BG: [f32; 4] = [0.3, 0.4, 0.6, 0.5];
+pub(crate) const SELECTION_BG: [f32; 4] = [0.35, 0.45, 0.70, 0.5];
 pub(crate) const KITTY_PLACEHOLDER: char = '\u{10EEEE}';
 
 pub(crate) fn visible_glyph(cell: &Cell) -> bool {
