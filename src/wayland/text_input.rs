@@ -79,3 +79,19 @@ impl Dispatch<ZwpTextInputV3, ()> for AppState {
         }
     }
 }
+
+impl AppState {
+    /// Updates the Wayland `text-input-v3` cursor bounding box so the IME popup window tracks the cursor.
+    pub fn update_ime_cursor_area(&self) {
+        let Some(text_input) = &self.wayland.text_input else {
+            return;
+        };
+        let (x, y, w, h) = crate::ime::calculate_cursor_rect(
+            &self.terminal.grid,
+            self.font_mgr.metrics,
+            [self.config.padding_x(), self.config.padding_y()],
+        );
+        text_input.set_cursor_rectangle(x, y, w, h);
+        text_input.commit();
+    }
+}

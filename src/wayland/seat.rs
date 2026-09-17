@@ -9,7 +9,7 @@ use wayland_client::protocol::{
 };
 use wayland_client::{Connection, Dispatch, QueueHandle, WEnum};
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::{
-    self, WpCursorShapeDeviceV1,
+    self, Shape, WpCursorShapeDeviceV1,
 };
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_manager_v1::{
     self, WpCursorShapeManagerV1,
@@ -17,6 +17,8 @@ use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_manager_v1:
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3;
 
 use crate::event_loop::AppState;
+use crate::mouse::{MouseModifiers, encode_mouse_event};
+use crate::render::HoveredHyperlinkSpan;
 use crate::selection::{Selection, SelectionPoint, SelectionType, find_word_boundaries};
 
 /// Maps a Linux input button code to the X11 mouse button index used on the wire.
@@ -396,5 +398,142 @@ impl Dispatch<WpCursorShapeDeviceV1, ()> for AppState {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
+    }
+}
+
+impl AppState {
+    /// Initializes the cursor shape device if protocol is available and updates shape if focused.
+    pub fn try_init_cursor_shape(&mut self, qh: &QueueHandle<Self>) {
+        if self.wayland.cursor_shape_device.is_none() {
+            self.wayland.init_cursor_shape(qh);
+            if self.wayland.cursor_shape_device.is_some()
+                && self.pointer_in_surface
+                && self.pointer_serial != 0
+            {
+                self.current_cursor_shape = None;
+                self.update_cursor_shape();
+            }
+        }
+    }
+
+    /// Updates the Wayland cursor shape based on whether a hyperlink is currently hovered.
+    pub fn update_cursor_shape(&mut self) {
+        if !self.pointer_in_surface || self.pointer_serial == 0 {
+            return;
+        }
+        let shape = if self.hovered_span.is_some() {
+            Shape::Pointer
+        } else {
+            Shape::Text
+        };
+        if self.current_cursor_shape == Some(shape) {
+            return;
+        }
+        if let Some(device) = &self.wayland.cursor_shape_device {
+            device.set_shape(self.pointer_serial, shape);
+            self.current_cursor_shape = Some(shape);
+        }
+    }
+
+    /// Updates the hovered hyperlink and cursor shape based on current pointer coordinates.
+    pub fn update_hover_state(&mut self) {
+        let new_span = if !self.pointer_in_surface || self.mouse_pressed {
+            None
+        } else {
+            let (line, screen_row, col) =
+                self.cell_at_pointer(self.mouse_pos[0], self.mouse_pos[1]);
+            let row = self.terminal.grid.visible_line(screen_row);
+            if let Some(cell) = row.cells.get(col)
+                && let Some(id) = cell.hyperlink_id
+                && id > 0
+                && self.terminal.hyperlink_url(id).is_some()
+            {
+                let mut start_col = col;
+                while start_col > 0
+                    && row.cells.get(start_col - 1).and_then(|c| c.hyperlink_id) == Some(id)
+                {
+                    start_col -= 1;
+                }
+                let mut end_col = col;
+                while end_col + 1 < row.cells.len()
+                    && row.cells.get(end_col + 1).and_then(|c| c.hyperlink_id) == Some(id)
+                {
+                    end_col += 1;
+                }
+                Some(HoveredHyperlinkSpan {
+                    line,
+                    start_col,
+                    end_col,
+                })
+            } else {
+                None
+            }
+        };
+        if self.hovered_span != new_span {
+            self.hovered_span = new_span;
+            self.needs_redraw = true;
+            self.update_cursor_shape();
+        }
+    }
+
+    /// Returns the absolute `(line, screen_row, col)` grid coordinates under the surface-relative pointer position.
+    #[must_use]
+    pub fn cell_at_pointer(&self, surface_x: f64, surface_y: f64) -> (usize, usize, usize) {
+        let cw = f64::from(self.font_mgr.metrics.cell_width);
+        let ch = f64::from(self.font_mgr.metrics.cell_height);
+        let pad_x = f64::from(self.config.padding_x());
+        let pad_y = f64::from(self.config.padding_y());
+
+        let col = ((surface_x - pad_x) / cw).max(0.0) as usize;
+        let col = col.min(self.terminal.grid.cols.saturating_sub(1));
+
+        let screen_row = ((surface_y - pad_y) / ch).max(0.0) as usize;
+        let screen_row = screen_row.min(self.terminal.grid.rows.saturating_sub(1));
+
+        let abs_line =
+            self.terminal.grid.scrollback.len() + screen_row - self.terminal.grid.viewport_offset;
+        (abs_line, screen_row, col)
+    }
+
+    /// Encodes a pointer event for the application, or `None` when the event stays local.
+    ///
+    /// Mouse reports are suppressed while tracking is disabled and while Shift is held,
+    /// which is the conventional override that hands the pointer back to text selection.
+    pub(crate) fn mouse_report_bytes(
+        &self,
+        button: u8,
+        pressed: bool,
+        motion: bool,
+    ) -> Option<Vec<u8>> {
+        if !self.terminal.mouse.is_reporting() {
+            return None;
+        }
+        let modifiers = self.keyboard.modifiers();
+        if modifiers.shift && pressed {
+            return None;
+        }
+        let (_, screen_row, col) = self.cell_at_pointer(self.mouse_pos[0], self.mouse_pos[1]);
+        encode_mouse_event(
+            self.terminal.mouse.encoding,
+            button,
+            col,
+            screen_row,
+            pressed,
+            motion,
+            MouseModifiers {
+                shift: modifiers.shift,
+                alt: modifiers.alt,
+                ctrl: modifiers.ctrl,
+            },
+        )
+    }
+
+    /// Forwards a pointer event to the PTY and reports whether the application consumed it.
+    pub(crate) fn report_mouse_event(&mut self, button: u8, pressed: bool, motion: bool) -> bool {
+        let Some(bytes) = self.mouse_report_bytes(button, pressed, motion) else {
+            return false;
+        };
+        self.write_pty_blocking(&bytes);
+        true
     }
 }

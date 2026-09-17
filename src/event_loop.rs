@@ -8,8 +8,6 @@ use calloop::generic::Generic;
 use calloop::signals::{Signal, Signals};
 use calloop::{EventLoop, Interest, Mode};
 use calloop_wayland_source::WaylandSource;
-use nix::errno::Errno;
-use nix::fcntl::OFlag;
 use nix::poll::{PollFd, PollFlags, poll};
 
 use wayland_client::protocol::wl_callback::WlCallback;
@@ -23,12 +21,11 @@ use crate::grid::CellFlags;
 use crate::ime::ImeState;
 use crate::input::{KeyAction, KeyboardHandler};
 use crate::kitty::{ImagePlacement, KittyAction, KittyEvent, KittyParser, kitty_response};
-use crate::mouse::{MouseModifiers, encode_mouse_event};
 use crate::parser::Terminal;
 use crate::pty::Pty;
 use crate::render::{ColorScheme, HoveredHyperlinkSpan, RenderOptions, Renderer};
 use crate::selection::{Selection, SelectionPoint, SelectionType};
-use crate::wayland::{WaylandState, best_text_mime};
+use crate::wayland::WaylandState;
 
 /// Shared application state passed to all calloop sources and Wayland event dispatches.
 pub struct AppState {
@@ -189,165 +186,6 @@ impl AppState {
         })
     }
 
-    /// Initializes the cursor shape device if protocol is available and updates shape if focused.
-    pub fn try_init_cursor_shape(&mut self, qh: &QueueHandle<Self>) {
-        if self.wayland.cursor_shape_device.is_none() {
-            self.wayland.init_cursor_shape(qh);
-            if self.wayland.cursor_shape_device.is_some()
-                && self.pointer_in_surface
-                && self.pointer_serial != 0
-            {
-                self.current_cursor_shape = None;
-                self.update_cursor_shape();
-            }
-        }
-    }
-
-    /// Updates the Wayland cursor shape based on whether a hyperlink is currently hovered.
-    pub fn update_cursor_shape(&mut self) {
-        if !self.pointer_in_surface || self.pointer_serial == 0 {
-            return;
-        }
-        let shape = if self.hovered_span.is_some() {
-            Shape::Pointer
-        } else {
-            Shape::Text
-        };
-        if self.current_cursor_shape == Some(shape) {
-            return;
-        }
-        if let Some(device) = &self.wayland.cursor_shape_device {
-            device.set_shape(self.pointer_serial, shape);
-            self.current_cursor_shape = Some(shape);
-        }
-    }
-
-    /// Updates the hovered hyperlink and cursor shape based on current pointer coordinates.
-    pub fn update_hover_state(&mut self) {
-        let new_span = if !self.pointer_in_surface || self.mouse_pressed {
-            None
-        } else {
-            let (line, screen_row, col) =
-                self.cell_at_pointer(self.mouse_pos[0], self.mouse_pos[1]);
-            let row = self.terminal.grid.visible_line(screen_row);
-            if let Some(cell) = row.cells.get(col)
-                && let Some(id) = cell.hyperlink_id
-                && id > 0
-                && self.terminal.hyperlink_url(id).is_some()
-            {
-                let mut start_col = col;
-                while start_col > 0
-                    && row.cells.get(start_col - 1).and_then(|c| c.hyperlink_id) == Some(id)
-                {
-                    start_col -= 1;
-                }
-                let mut end_col = col;
-                while end_col + 1 < row.cells.len()
-                    && row.cells.get(end_col + 1).and_then(|c| c.hyperlink_id) == Some(id)
-                {
-                    end_col += 1;
-                }
-                Some(HoveredHyperlinkSpan {
-                    line,
-                    start_col,
-                    end_col,
-                })
-            } else {
-                None
-            }
-        };
-        if self.hovered_span != new_span {
-            self.hovered_span = new_span;
-            self.needs_redraw = true;
-            self.update_cursor_shape();
-        }
-    }
-
-    /// Returns the absolute `(line, screen_row, col)` grid coordinates under the surface-relative pointer position.
-    #[must_use]
-    pub fn cell_at_pointer(&self, surface_x: f64, surface_y: f64) -> (usize, usize, usize) {
-        let cw = f64::from(self.font_mgr.metrics.cell_width);
-        let ch = f64::from(self.font_mgr.metrics.cell_height);
-        let pad_x = f64::from(self.config.padding_x());
-        let pad_y = f64::from(self.config.padding_y());
-
-        let col = ((surface_x - pad_x) / cw).max(0.0) as usize;
-        let col = col.min(self.terminal.grid.cols.saturating_sub(1));
-
-        let screen_row = ((surface_y - pad_y) / ch).max(0.0) as usize;
-        let screen_row = screen_row.min(self.terminal.grid.rows.saturating_sub(1));
-
-        let abs_line =
-            self.terminal.grid.scrollback.len() + screen_row - self.terminal.grid.viewport_offset;
-        (abs_line, screen_row, col)
-    }
-
-    /// Encodes a pointer event for the application, or `None` when the event stays local.
-    ///
-    /// Mouse reports are suppressed while tracking is disabled and while Shift is held,
-    /// which is the conventional override that hands the pointer back to text selection.
-    fn mouse_report_bytes(&self, button: u8, pressed: bool, motion: bool) -> Option<Vec<u8>> {
-        if !self.terminal.mouse.is_reporting() {
-            return None;
-        }
-        let modifiers = self.keyboard.modifiers();
-        if modifiers.shift && pressed {
-            return None;
-        }
-        let (_, screen_row, col) = self.cell_at_pointer(self.mouse_pos[0], self.mouse_pos[1]);
-        encode_mouse_event(
-            self.terminal.mouse.encoding,
-            button,
-            col,
-            screen_row,
-            pressed,
-            motion,
-            MouseModifiers {
-                shift: modifiers.shift,
-                alt: modifiers.alt,
-                ctrl: modifiers.ctrl,
-            },
-        )
-    }
-
-    /// Forwards a pointer event to the PTY and reports whether the application consumed it.
-    pub(crate) fn report_mouse_event(&mut self, button: u8, pressed: bool, motion: bool) -> bool {
-        let Some(bytes) = self.mouse_report_bytes(button, pressed, motion) else {
-            return false;
-        };
-        self.write_pty_blocking(&bytes);
-        true
-    }
-
-    /// Sets the clipboard content internally and offers it through the Wayland data device.
-    pub fn set_clipboard_text(&mut self, text: String, qh: Option<&QueueHandle<Self>>) {
-        self.terminal.set_clipboard_content(Some(text.clone()));
-        self.clipboard_text = Some(text);
-
-        if let (Some(qh), Some(manager), Some(device)) = (
-            qh,
-            &self.wayland.data_device_manager,
-            &self.wayland.data_device,
-        ) {
-            let source = manager.create_data_source(qh, ());
-            source.offer("text/plain;charset=utf-8".to_string());
-            source.offer("text/plain".to_string());
-            source.offer("UTF8_STRING".to_string());
-            device.set_selection(Some(&source), self.last_serial);
-            self.wayland.data_source = Some(source);
-        }
-    }
-
-    /// Copies the currently selected text to the Wayland clipboard and internal buffer.
-    pub fn copy_selection(&mut self, qh: Option<&QueueHandle<Self>>) {
-        let text = self.selection.extract_text(&self.terminal.grid);
-        if text.is_empty() {
-            return;
-        }
-
-        self.set_clipboard_text(text, qh);
-    }
-
     /// Writes bytes to the non-blocking PTY master with a bounded readiness loop to prevent truncation.
     pub fn write_pty_blocking(&mut self, mut bytes: &[u8]) {
         let start = std::time::Instant::now();
@@ -365,116 +203,6 @@ impl AppState {
                 Err(_) => break,
             }
         }
-    }
-
-    /// Pastes text from the Wayland clipboard into the terminal PTY.
-    pub fn paste_clipboard(&mut self, conn: Option<&Connection>) {
-        let bracketed = self.terminal.bracketed_paste;
-        if let Some(offer_data) = &self.wayland.current_offer {
-            if let Some(mime) = best_text_mime(&offer_data.mime_types)
-                && let Ok((read_fd, write_fd)) = nix::unistd::pipe2(OFlag::O_CLOEXEC)
-            {
-                offer_data.offer.receive(mime.to_string(), write_fd.as_fd());
-                drop(write_fd);
-
-                if let Some(c) = conn {
-                    let _ = c.flush();
-                }
-
-                if let Ok(pty_fd) = self.pty.try_clone_master() {
-                    std::thread::spawn(move || {
-                        // Limit paste payload to at most 10 MiB to prevent memory exhaustion
-                        let mut reader = std::fs::File::from(read_fd).take(10 * 1024 * 1024);
-                        let mut bytes = Vec::new();
-                        if reader.read_to_end(&mut bytes).is_ok() && !bytes.is_empty() {
-                            let payload = if bracketed {
-                                let mut wrapped = Vec::with_capacity(bytes.len() + 12);
-                                wrapped.extend_from_slice(b"\x1b[200~");
-                                wrapped.extend_from_slice(&bytes);
-                                wrapped.extend_from_slice(b"\x1b[201~");
-                                wrapped
-                            } else {
-                                bytes
-                            };
-                            // PTY master is nonblocking: write with poll readiness loop to avoid truncation
-                            let mut to_write = &payload[..];
-                            let start = std::time::Instant::now();
-                            while !to_write.is_empty()
-                                && start.elapsed() < std::time::Duration::from_secs(5)
-                            {
-                                let mut fds = [PollFd::new(pty_fd.as_fd(), PollFlags::POLLOUT)];
-                                if !poll(&mut fds, 1000u16).is_ok_and(|ready| ready > 0) {
-                                    break;
-                                }
-                                match nix::unistd::write(&pty_fd, to_write) {
-                                    Ok(0) => break,
-                                    Ok(written) => to_write = &to_write[written..],
-                                    Err(Errno::EINTR | Errno::EAGAIN) => continue,
-                                    Err(_) => break,
-                                }
-                            }
-                        }
-                    });
-                    return;
-                }
-            }
-            return;
-        }
-
-        // Fallback to internal clipboard buffer if offer not available
-        let fallback_text = self.clipboard_text.clone();
-        if let Some(text) = fallback_text {
-            let payload = if bracketed {
-                let mut wrapped = Vec::with_capacity(text.len() + 12);
-                wrapped.extend_from_slice(b"\x1b[200~");
-                wrapped.extend_from_slice(text.as_bytes());
-                wrapped.extend_from_slice(b"\x1b[201~");
-                wrapped
-            } else {
-                text.into_bytes()
-            };
-
-            if payload.len() <= 4096 {
-                self.write_pty_blocking(&payload);
-            } else if let Ok(pty_fd) = self.pty.try_clone_master() {
-                std::thread::spawn(move || {
-                    let mut to_write = &payload[..];
-                    let start = std::time::Instant::now();
-                    while !to_write.is_empty()
-                        && start.elapsed() < std::time::Duration::from_secs(5)
-                    {
-                        let mut fds = [PollFd::new(pty_fd.as_fd(), PollFlags::POLLOUT)];
-                        if !poll(&mut fds, 1000u16).is_ok_and(|ready| ready > 0) {
-                            break;
-                        }
-                        match nix::unistd::write(&pty_fd, to_write) {
-                            Ok(0) => break,
-                            Ok(written) => to_write = &to_write[written..],
-                            Err(Errno::EINTR | Errno::EAGAIN) => continue,
-                            Err(_) => break,
-                        }
-                    }
-                });
-            } else {
-                // If cloning PTY master failed, do not block the main event loop with an oversized write;
-                // write bounded head chunk only.
-                self.write_pty_blocking(&payload[..4096]);
-            }
-        }
-    }
-
-    /// Updates the Wayland `text-input-v3` cursor bounding box so the IME popup window tracks the cursor.
-    pub fn update_ime_cursor_area(&self) {
-        let Some(text_input) = &self.wayland.text_input else {
-            return;
-        };
-        let (x, y, w, h) = crate::ime::calculate_cursor_rect(
-            &self.terminal.grid,
-            self.font_mgr.metrics,
-            [self.config.padding_x(), self.config.padding_y()],
-        );
-        text_input.set_cursor_rectangle(x, y, w, h);
-        text_input.commit();
     }
 
     /// Reloads the configuration file and dynamically updates palette, fonts, cursor, and metrics.
