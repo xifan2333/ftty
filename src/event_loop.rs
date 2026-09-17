@@ -683,7 +683,7 @@ impl AppState {
             .pending_size
             .take()
             .unwrap_or([self.wayland.width, self.wayland.height]);
-        if let Some(renderer) = &self.renderer {
+        if let Some(renderer) = &mut self.renderer {
             renderer.resize(size)?;
         } else {
             let surface = self
