@@ -569,6 +569,11 @@ impl AppState {
         self.terminal.grid.cursor.shape = new_config.cursor_shape();
         self.config = new_config;
 
+        self.terminal.grid.mark_all_dirty();
+        if let Some(renderer) = &mut self.renderer {
+            renderer.clear_cache();
+        }
+
         if let Some(new_font_mgr) = maybe_new_font {
             self.font_mgr = new_font_mgr;
             self.atlas.clear();
@@ -642,6 +647,10 @@ impl AppState {
     fn update_font_size(&mut self, new_size: f32) {
         if self.font_mgr.set_font_size(new_size) {
             self.atlas.clear();
+            self.terminal.grid.mark_all_dirty();
+            if let Some(renderer) = &mut self.renderer {
+                renderer.clear_cache();
+            }
             let _ = self.resize_terminal();
             self.needs_redraw = true;
         }

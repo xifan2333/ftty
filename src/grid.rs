@@ -723,7 +723,7 @@ impl Grid {
     }
 
     /// Marks all rows in the visible screen, alternate screen, and scrollback as dirty.
-    pub fn mark_all_dirty(&mut self) {
+    pub fn mark_all_dirty(&self) {
         for row in &self.lines {
             row.dirty.set(true);
         }
@@ -1010,6 +1010,7 @@ impl Grid {
                     for row in &mut self.lines[self.cursor.row + 1..] {
                         row.reset();
                     }
+                    self.lines[self.cursor.row].dirty.set(true);
                 }
             }
             ClearMode::Above => {
@@ -1021,12 +1022,14 @@ impl Grid {
                     for cell in &mut self.lines[self.cursor.row].cells[..col] {
                         cell.reset();
                     }
+                    self.lines[self.cursor.row].dirty.set(true);
                 }
             }
             ClearMode::All => {
                 for row in &mut self.lines {
                     row.reset();
                 }
+                self.mark_all_dirty();
             }
             ClearMode::Saved => {
                 let sb_len = self.scrollback.len();
@@ -1044,6 +1047,7 @@ impl Grid {
                         }
                     });
                 }
+                self.mark_all_dirty();
             }
         }
     }
@@ -1510,6 +1514,49 @@ mod tests {
         assert!(grid.scrollback.is_empty());
         // Must not panic on subsequent visible_line access
         assert_eq!(grid.visible_line(0).cells.len(), 10);
+    }
+
+    #[test]
+    fn test_clear_screen_marks_affected_rows_dirty() {
+        let mut grid = Grid::new(10, 5, 10);
+        // Clear all initial dirty flags
+        for row in &grid.lines {
+            row.dirty.set(false);
+        }
+
+        // 1. Clear Below at row 2
+        grid.cursor.row = 2;
+        grid.cursor.col = 3;
+        grid.clear_screen(ClearMode::Below);
+        assert!(!grid.lines[0].dirty.get());
+        assert!(!grid.lines[1].dirty.get());
+        assert!(grid.lines[2].dirty.get());
+        assert!(grid.lines[3].dirty.get());
+        assert!(grid.lines[4].dirty.get());
+
+        // Reset dirty flags
+        for row in &grid.lines {
+            row.dirty.set(false);
+        }
+
+        // 2. Clear Above at row 2
+        grid.clear_screen(ClearMode::Above);
+        assert!(grid.lines[0].dirty.get());
+        assert!(grid.lines[1].dirty.get());
+        assert!(grid.lines[2].dirty.get());
+        assert!(!grid.lines[3].dirty.get());
+        assert!(!grid.lines[4].dirty.get());
+
+        // Reset dirty flags
+        for row in &grid.lines {
+            row.dirty.set(false);
+        }
+
+        // 3. Clear Saved
+        grid.clear_screen(ClearMode::Saved);
+        for row in &grid.lines {
+            assert!(row.dirty.get());
+        }
     }
 
     #[test]

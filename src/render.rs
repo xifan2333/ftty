@@ -287,6 +287,9 @@ fn create_program(gl: &glow::Context) -> io::Result<glow::Program> {
 }
 
 /// Owns GL objects together with their EGL context, including on initialization failure.
+const MAX_RENDER_CACHE_ROWS: usize = 512;
+
+/// Owns GL objects together with their EGL context, including on initialization failure.
 pub struct Renderer {
     gl: glow::Context,
     program: Option<glow::Program>,
@@ -297,15 +300,26 @@ pub struct Renderer {
     image_mode: Option<glow::UniformLocation>,
     image_textures: HashMap<u32, (glow::Texture, u32, u32, u64)>,
     vertices: Vec<f32>,
-    row_vertices: Vec<Vec<f32>>,
+    row_bg: Vec<Vec<f32>>,
+    row_fg: Vec<Vec<f32>>,
+    row_valid: Vec<bool>,
     last_cursor: Option<(usize, usize, usize)>,
+    last_cursor_shape: Option<CursorShape>,
     last_selection: Option<Selection>,
     last_viewport_offset: usize,
     last_hovered_span: Option<HoveredHyperlinkSpan>,
+    last_padding: [u16; 2],
     egl: EglContext,
 }
 
 impl Renderer {
+    /// Clears cached per-row vertex geometry across all screens and styles.
+    pub fn clear_cache(&mut self) {
+        self.row_bg.clear();
+        self.row_fg.clear();
+        self.row_valid.clear();
+    }
+
     /// Creates a renderer after the first XDG surface configure has been acknowledged.
     ///
     /// # Errors
@@ -332,11 +346,15 @@ impl Renderer {
             image_mode: None,
             image_textures: HashMap::new(),
             vertices: Vec::with_capacity(8192),
-            row_vertices: Vec::new(),
+            row_bg: Vec::new(),
+            row_fg: Vec::new(),
+            row_valid: Vec::new(),
             last_cursor: None,
+            last_cursor_shape: None,
             last_selection: None,
             last_viewport_offset: 0,
             last_hovered_span: None,
+            last_padding: [0, 0],
             egl,
         };
         // SAFETY: the owned EGL context is current for all initialization calls.
@@ -377,7 +395,7 @@ impl Renderer {
     pub fn resize(&mut self, size: [u32; 2]) -> io::Result<()> {
         let [width, height] = native_size(size)?;
         self.egl.window.resize(width, height, 0, 0);
-        self.row_vertices.clear();
+        self.clear_cache();
         Ok(())
     }
 
@@ -396,7 +414,11 @@ impl Renderer {
     ) -> io::Result<()> {
         let [width, height] = native_size(size)?;
         self.egl.make_current()?;
-        prepare_atlas(grid, fonts, atlas, options.preedit);
+        let repacked = prepare_atlas(grid, fonts, atlas, options.preedit);
+        if repacked {
+            self.clear_cache();
+            grid.mark_all_dirty();
+        }
         self.build_incremental_vertices(grid, colors, fonts.metrics, fonts, atlas, options);
         self.sync_image_textures(grid);
 
@@ -845,7 +867,8 @@ fn prepare_atlas(
     fonts: &FontManager,
     atlas: &mut GlyphAtlas,
     preedit: Option<&Preedit>,
-) {
+) -> bool {
+    let mut repacked = false;
     for attempt in 0..2 {
         let mut full = false;
         // Pre-cache fallback glyph '?' so it is guaranteed available if the atlas fills.
@@ -862,7 +885,7 @@ fn prepare_atlas(
         }
         for row in 0..grid.rows {
             let line = grid.visible_line(row);
-            if !line.dirty.get() && attempt == 0 {
+            if !line.dirty.get() && attempt == 0 && !repacked {
                 continue;
             }
             for cell in line.cells.iter().filter(|cell| visible_glyph(cell)) {
@@ -877,7 +900,9 @@ fn prepare_atlas(
         }
         // Repack only at a frame boundary, before generating any vertices or uploading pixels.
         atlas.clear();
+        repacked = true;
     }
+    repacked
 }
 
 fn rgba(color: Rgb) -> [f32; 4] {
@@ -961,13 +986,11 @@ struct RenderContext<'a> {
     cursor: Option<(usize, usize, usize)>,
 }
 
-fn build_row_vertices(vertices: &mut Vec<f32>, row: usize, ctx: &RenderContext<'_>) {
+fn build_row_backgrounds(vertices: &mut Vec<f32>, row: usize, ctx: &RenderContext<'_>) {
     vertices.clear();
     let grid = ctx.grid;
     let colors = ctx.colors;
     let metrics = ctx.metrics;
-    let fonts = ctx.fonts;
-    let atlas = ctx.atlas;
     let options = ctx.options;
     let cursor = ctx.cursor;
 
@@ -1005,6 +1028,26 @@ fn build_row_vertices(vertices: &mut Vec<f32>, row: usize, ctx: &RenderContext<'
             rgba(colors.foreground),
         );
     }
+}
+
+fn build_row_foregrounds(vertices: &mut Vec<f32>, row: usize, ctx: &RenderContext<'_>) {
+    vertices.clear();
+    let grid = ctx.grid;
+    let colors = ctx.colors;
+    let metrics = ctx.metrics;
+    let fonts = ctx.fonts;
+    let atlas = ctx.atlas;
+    let options = ctx.options;
+    let cursor = ctx.cursor;
+
+    let cw = metrics.cell_width as f32;
+    let ch = metrics.cell_height as f32;
+    let pad_x = f32::from(options.padding[0]);
+    let pad_y = f32::from(options.padding[1]);
+
+    let abs_line = grid.scrollback.len() + row - grid.viewport_offset();
+    let line = grid.visible_line(row);
+    let y = pad_y + row as f32 * ch;
 
     // Draw text glyphs and underlines on this row
     for (col, cell) in line.cells.iter().enumerate() {
@@ -1285,13 +1328,23 @@ impl Renderer {
         let viewport_changed = self.last_viewport_offset != viewport_offset;
         self.last_viewport_offset = viewport_offset;
 
-        if self.row_vertices.len() != grid.rows {
-            self.row_vertices = vec![Vec::new(); grid.rows];
-        }
+        let padding_changed = self.last_padding != options.padding;
+        self.last_padding = options.padding;
+
+        let cursor_shape = Some(grid.cursor.shape);
+        let shape_changed = self.last_cursor_shape != cursor_shape;
+        self.last_cursor_shape = cursor_shape;
 
         let cursor_changed = self.last_cursor != cursor;
         let selection_changed = self.last_selection.as_ref() != options.selection;
         let hover_changed = self.last_hovered_span != options.hovered_span;
+
+        let rows = grid.rows.min(MAX_RENDER_CACHE_ROWS);
+        if self.row_valid.len() != rows || padding_changed {
+            self.row_bg = vec![Vec::new(); rows];
+            self.row_fg = vec![Vec::new(); rows];
+            self.row_valid = vec![false; rows];
+        }
 
         let ctx = RenderContext {
             grid,
@@ -1303,7 +1356,7 @@ impl Renderer {
             cursor,
         };
 
-        for r in 0..grid.rows {
+        for r in 0..rows {
             let line = grid.visible_line(r);
             let abs_line = grid.scrollback.len() + r - viewport_offset;
 
@@ -1321,24 +1374,32 @@ impl Renderer {
                 .last_hovered_span
                 .is_some_and(|span| span.line == abs_line);
 
-            let needs_regen = line.dirty.get()
-                || self.row_vertices[r].is_empty()
+            let needs_regen = !self.row_valid[r]
+                || line.dirty.get()
                 || viewport_changed
+                || shape_changed
                 || (cursor_changed && (row_has_cursor || row_had_cursor))
                 || (selection_changed && (row_has_sel || row_had_sel))
                 || (hover_changed && (row_has_hover || row_had_hover));
 
             if needs_regen {
-                build_row_vertices(&mut self.row_vertices[r], r, &ctx);
+                build_row_backgrounds(&mut self.row_bg[r], r, &ctx);
+                build_row_foregrounds(&mut self.row_fg[r], r, &ctx);
+                self.row_valid[r] = true;
                 line.dirty.set(false);
             }
         }
 
         self.vertices.clear();
-        for r in 0..grid.rows {
-            self.vertices.extend_from_slice(&self.row_vertices[r]);
+        // 1. All row backgrounds first (prevents lower row background from covering upper row descenders)
+        for r in 0..rows {
+            self.vertices.extend_from_slice(&self.row_bg[r]);
         }
-
+        // 2. All row foregrounds (glyphs, underlines, borders)
+        for r in 0..rows {
+            self.vertices.extend_from_slice(&self.row_fg[r]);
+        }
+        // 3. Dynamic overlays (cursor, preedit)
         build_dynamic_overlays(&mut self.vertices, &ctx);
 
         self.last_cursor = cursor;
@@ -1368,12 +1429,19 @@ fn build_vertices(
         options,
         cursor,
     };
-    let mut row_buf = Vec::new();
+    let mut bg_buf = Vec::new();
+    let mut fg_buf = Vec::new();
+    let mut bgs = Vec::new();
+    let mut fgs = Vec::new();
     for r in 0..grid.rows {
-        build_row_vertices(&mut row_buf, r, &ctx);
+        build_row_backgrounds(&mut bg_buf, r, &ctx);
+        build_row_foregrounds(&mut fg_buf, r, &ctx);
         grid.visible_line(r).dirty.set(false);
-        vertices.extend_from_slice(&row_buf);
+        bgs.extend_from_slice(&bg_buf);
+        fgs.extend_from_slice(&fg_buf);
     }
+    vertices.extend_from_slice(&bgs);
+    vertices.extend_from_slice(&fgs);
     build_dynamic_overlays(vertices, &ctx);
 }
 
@@ -1871,7 +1939,8 @@ mod tests {
         let palette = default_256_palette();
         let colors = ColorScheme::new(&palette, DEFAULT_FG, DEFAULT_BG);
 
-        let mut row_vertices = vec![Vec::new(); 5];
+        let mut row_bg = vec![Vec::new(); 5];
+        let mut row_fg = vec![Vec::new(); 5];
         let ctx = RenderContext {
             grid: &grid,
             colors,
@@ -1883,9 +1952,10 @@ mod tests {
         };
 
         // Initially, all rows generated and cleared
-        for (r, row_buf) in row_vertices.iter_mut().enumerate() {
+        for (r, (bg, fg)) in row_bg.iter_mut().zip(row_fg.iter_mut()).enumerate() {
             let line = grid.visible_line(r);
-            build_row_vertices(row_buf, r, &ctx);
+            build_row_backgrounds(bg, r, &ctx);
+            build_row_foregrounds(fg, r, &ctx);
             line.dirty.set(false);
         }
 
