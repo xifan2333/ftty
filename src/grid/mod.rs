@@ -509,7 +509,11 @@ impl Grid {
         underline_color: Color,
         hyperlink_id: Option<u32>,
     ) {
-        let width = c.width().unwrap_or(1);
+        let width = if c.is_ascii() && c >= ' ' {
+            1
+        } else {
+            c.width().unwrap_or(1)
+        };
         if width == 0 {
             // Combining character: decode Kitty Unicode placeholder diacritics
             if let Some(idx) = diacritic_to_index(c)

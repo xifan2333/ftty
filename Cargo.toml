@@ -21,6 +21,7 @@ fontdue = { version = "0.9", features = ["parallel"] }
 glow = "0.18"
 khronos-egl = { version = "6.0", features = ["1_5", "dynamic"] }
 libc = "0.2"
+memchr = "2.7"
 nix = { version = "0.31", default-features = false, features = [
   "term",
   "process",
