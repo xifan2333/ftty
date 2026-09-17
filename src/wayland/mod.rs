@@ -1,5 +1,14 @@
 //! Wayland client connection, globals binding, and XDG Shell window lifecycle.
 
+pub mod clipboard;
+pub mod init;
+pub mod seat;
+pub mod text_input;
+pub mod xdg;
+
+pub use clipboard::best_text_mime;
+pub use seat::x11_button_index;
+
 use wayland_client::QueueHandle;
 use wayland_client::protocol::{
     wl_compositor::WlCompositor, wl_data_device::WlDataDevice,
