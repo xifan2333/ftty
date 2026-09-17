@@ -272,17 +272,23 @@ impl Grid {
             return;
         }
         let max_offset = self.scrollback.len();
-        self.viewport_offset = self.viewport_offset.saturating_add(delta).min(max_offset);
-        self.mark_all_dirty();
+        let new_offset = self.viewport_offset.saturating_add(delta).min(max_offset);
+        if new_offset != self.viewport_offset {
+            self.viewport_offset = new_offset;
+            self.mark_all_dirty();
+        }
     }
 
     /// Scrolls the viewport down by `delta` lines toward the active screen.
     pub fn scroll_viewport_down(&mut self, delta: usize) {
-        if self.is_alt_screen() {
+        if self.is_alt_screen() || self.viewport_offset == 0 {
             return;
         }
-        self.viewport_offset = self.viewport_offset.saturating_sub(delta);
-        self.mark_all_dirty();
+        let new_offset = self.viewport_offset.saturating_sub(delta);
+        if new_offset != self.viewport_offset {
+            self.viewport_offset = new_offset;
+            self.mark_all_dirty();
+        }
     }
 
     /// Jumps the viewport to the earliest line in the scrollback history.
@@ -290,14 +296,19 @@ impl Grid {
         if self.is_alt_screen() {
             return;
         }
-        self.viewport_offset = self.scrollback.len();
-        self.mark_all_dirty();
+        let max_offset = self.scrollback.len();
+        if self.viewport_offset != max_offset {
+            self.viewport_offset = max_offset;
+            self.mark_all_dirty();
+        }
     }
 
     /// Resets the viewport offset to 0 (bottom of active screen).
     pub fn scroll_viewport_bottom(&mut self) {
-        self.viewport_offset = 0;
-        self.mark_all_dirty();
+        if self.viewport_offset != 0 {
+            self.viewport_offset = 0;
+            self.mark_all_dirty();
+        }
     }
 
     #[must_use]
