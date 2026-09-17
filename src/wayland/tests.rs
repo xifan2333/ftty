@@ -91,6 +91,15 @@ fn test_invalid_window_state_transitions_rejected() {
 }
 
 #[test]
+fn test_window_state_as_str() {
+    assert_eq!(WindowState::Unmapped.as_str(), "Unmapped");
+    assert_eq!(WindowState::Initializing.as_str(), "Initializing");
+    assert_eq!(WindowState::Configured.as_str(), "Configured");
+    assert_eq!(WindowState::Active.as_str(), "Active");
+    assert_eq!(WindowState::Closed.as_str(), "Closed");
+}
+
+#[test]
 fn test_stashed_floating_size_initialization() {
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).unwrap();
