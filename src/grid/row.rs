@@ -192,11 +192,11 @@ impl Row {
     }
 
     pub fn reset(&mut self) {
-        for cell in &mut self.cells {
-            cell.reset();
-        }
+        self.cells.fill(Cell::default());
         self.wrapped = false;
-        self.placeholders = None;
+        if let Some(coords) = &mut self.placeholders {
+            coords.clear();
+        }
         self.overflow.clear();
         self.overflow_placeholders.clear();
         self.dirty.set(true);

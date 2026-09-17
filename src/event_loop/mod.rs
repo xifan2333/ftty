@@ -240,7 +240,7 @@ pub fn run_event_loop(mut app_state: AppState) -> Result<(), FttyError> {
     event_loop
         .handle()
         .insert_source(pty_source, |_event, _fd, state: &mut AppState| {
-            let mut buf = [0u8; 16384];
+            let mut buf = [0u8; 65536];
             let mut total_read = 0;
             loop {
                 match state.pty.read(&mut buf) {
