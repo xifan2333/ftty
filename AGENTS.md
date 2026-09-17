@@ -47,9 +47,15 @@ mise run check:plan     # preview execution plan for modified files
 mise run check:changed  # run hk checks (rustfmt + clippy) across modified files (fast, < 2s)
 mise run fix            # auto-format modified files
 cargo test <owning_module_or_test_name> # run targeted unit tests (verify tests run > 0, fast, < 1s)
-# Note: Avoid running the full 170+ test suite (`mise run test`, > 2 min) locally on every micro-task.
-# Full regression on the default Linux target is offloaded to GitHub Actions CI.
 ```
+
+### Hardware Liberation Principle (解放本地硬件原则)
+
+> ⚡ **CRITICAL DIRECTIVE**: Local developer hardware must be liberated!
+> - **DO NOT run heavy release builds (`cargo build --release`) locally** unless the user explicitly requests benchmarking or actual manual testing.
+> - **DO NOT run full test suites (`mise run test` / `cargo test`) locally** across micro-tasks.
+> - Rely primarily on **GitHub Actions CI** for heavy compilation and full-suite testing.
+> - Keep local commands strictly to fast gates: `mise run fix && mise run check:changed` (< 2s) and targeted single-function unit tests when needed (< 1s).
 
 ---
 
