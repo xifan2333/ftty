@@ -155,7 +155,9 @@ fn styled_glyphs_have_separate_cache_entries() {
     ] {
         assert!(atlas.get_or_insert('A', flags, fonts()).is_some());
     }
-    assert_eq!(atlas.cache.len(), 4);
+    let styled_ascii_count = atlas.ascii_cache.iter().flatten().count();
+    assert_eq!(styled_ascii_count, 4);
+    assert_eq!(atlas.cache.len(), 0);
 }
 
 #[test]

@@ -188,8 +188,9 @@ impl GlyphAtlas {
         let glyph = self.insert_bitmap(metrics, &bitmap)?;
         if is_ascii {
             self.ascii_cache[ascii_idx] = Some(glyph);
+        } else {
+            self.cache.insert((c, style), glyph);
         }
-        self.cache.insert((c, style), glyph);
         Some(glyph)
     }
 }
