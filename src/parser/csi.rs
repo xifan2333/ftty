@@ -17,10 +17,17 @@ impl Terminal {
         action: char,
     ) {
         let is_private = intermediates.contains(&b'?');
-        let mut flat_params: Vec<u16> = Vec::new();
+        let mut flat_params_buf = [0u16; 32];
+        let mut flat_len = 0;
         for param in params.iter() {
-            flat_params.extend_from_slice(param);
+            for &val in param {
+                if flat_len < flat_params_buf.len() {
+                    flat_params_buf[flat_len] = val;
+                    flat_len += 1;
+                }
+            }
         }
+        let flat_params = &flat_params_buf[..flat_len];
 
         let first_param = flat_params.first().copied().unwrap_or(0);
         let param_or = |default: usize| -> usize {
@@ -40,7 +47,7 @@ impl Terminal {
             }
             if intermediates.contains(&b'$') && action == 'p' {
                 // DECRQM - Request DEC Private Mode
-                for mode in &flat_params {
+                for mode in flat_params {
                     let status = match *mode {
                         25 => {
                             if self.grid.cursor.visible {
@@ -100,7 +107,7 @@ impl Terminal {
             }
             if action == 'h' || action == 'l' {
                 let enabled = action == 'h';
-                for mode in &flat_params {
+                for mode in flat_params {
                     match *mode {
                         25 => self.grid.cursor.visible = enabled,
                         1049 => {
