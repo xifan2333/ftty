@@ -8,6 +8,7 @@ use wayland_protocols::xdg::shell::client::{
 };
 
 use crate::event_loop::AppState;
+use crate::wayland::WindowState;
 
 impl Dispatch<XdgWmBase, ()> for AppState {
     fn event(
@@ -35,7 +36,7 @@ impl Dispatch<XdgSurface, ()> for AppState {
     ) {
         if let xdg_surface::Event::Configure { serial } = event {
             proxy.ack_configure(serial);
-            state.wayland.configured = true;
+            let _ = state.wayland.transition_window_to(WindowState::Configured);
             // Defer the resize until the queue is drained: back-to-back configure pairs then
             // collapse into one size change instead of scrolling content on a transient size.
             state.configure_pending = true;
@@ -106,6 +107,7 @@ impl Dispatch<XdgToplevel, ()> for AppState {
             }
             xdg_toplevel::Event::Close => {
                 state.wayland.close_requested = true;
+                let _ = state.wayland.transition_window_to(WindowState::Closed);
                 state.running = false;
             }
             _ => {}

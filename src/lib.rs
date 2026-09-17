@@ -41,4 +41,4 @@ pub use kitty::{
 pub use parser::Terminal;
 pub use pty::Pty;
 pub use render::{ColorScheme, HoveredHyperlinkSpan, RenderOptions, Renderer};
-pub use wayland::{OfferData, WaylandState};
+pub use wayland::{OfferData, WaylandState, WindowState};

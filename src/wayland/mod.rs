@@ -4,6 +4,7 @@ pub mod clipboard;
 pub mod init;
 pub mod seat;
 pub mod text_input;
+pub mod window;
 pub mod xdg;
 
 #[cfg(test)]
@@ -11,6 +12,7 @@ mod tests;
 
 pub use clipboard::best_text_mime;
 pub use seat::x11_button_index;
+pub use window::WindowState;
 
 use wayland_client::QueueHandle;
 use wayland_client::protocol::{
@@ -60,6 +62,7 @@ pub struct WaylandState {
     pub width: u32,
     pub height: u32,
     pub configured: bool,
+    pub window_state: WindowState,
     pub close_requested: bool,
     pub stashed_floating_size: Option<[u32; 2]>,
 }
@@ -106,6 +109,23 @@ impl WaylandState {
         self.surface = Some(surface);
         self.xdg_surface = Some(xdg_surface);
         self.xdg_toplevel = Some(toplevel);
+        let _ = self.transition_window_to(WindowState::Initializing);
+    }
+
+    /// Transitions the window lifecycle state machine.
+    ///
+    /// # Errors
+    /// Returns [`crate::error::WaylandError::InvalidStateTransition`] if the transition violates the lifecycle model.
+    pub fn transition_window_to(
+        &mut self,
+        next: WindowState,
+    ) -> Result<(), crate::error::WaylandError> {
+        self.window_state.transition_to(next)?;
+        self.configured = matches!(
+            self.window_state,
+            WindowState::Configured | WindowState::Active
+        );
+        Ok(())
     }
 
     /// Creates and initializes the `zwp_text_input_v3` instance once the manager and seat are available.

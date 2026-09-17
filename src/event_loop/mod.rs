@@ -394,6 +394,9 @@ pub fn run_event_loop(mut app_state: AppState) -> Result<(), FttyError> {
                 app_state.frame_callback = Some(surface.frame(&qh, ()));
             }
             renderer.present()?;
+            let _ = app_state
+                .wayland
+                .transition_window_to(crate::wayland::WindowState::Active);
             app_state.update_ime_cursor_area();
             app_state.needs_redraw = false;
         }
