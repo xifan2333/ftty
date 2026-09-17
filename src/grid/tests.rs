@@ -786,3 +786,41 @@ fn test_saturated_row_recycling_rebases_image_placements() {
     let p2 = grid.placements.iter().find(|p| p.image_id == 2).unwrap();
     assert_eq!(p2.line, 2);
 }
+
+#[test]
+fn test_vectorized_clear_line_and_reset_clears_cells() {
+    let mut grid = Grid::new(20, 4, 10);
+    for r in 0..4 {
+        for c in 0..20 {
+            grid.cursor.row = r;
+            grid.cursor.col = c;
+            grid.write_char(
+                'Z',
+                Color::Indexed(1),
+                Color::Indexed(2),
+                CellFlags::BOLD | CellFlags::UNDERLINE,
+            );
+        }
+    }
+
+    // Clear Below on line 1 from col 5
+    grid.cursor.row = 1;
+    grid.cursor.col = 5;
+    grid.clear_line(ClearMode::Below);
+    assert_eq!(grid.lines[1].cells[4].c, 'Z');
+    assert_eq!(grid.lines[1].cells[5].c, ' ');
+    assert_eq!(grid.lines[1].cells[19].c, ' ');
+
+    // Clear Above on line 2 up to col 10
+    grid.cursor.row = 2;
+    grid.cursor.col = 10;
+    grid.clear_line(ClearMode::Above);
+    assert_eq!(grid.lines[2].cells[0].c, ' ');
+    assert_eq!(grid.lines[2].cells[10].c, ' ');
+    assert_eq!(grid.lines[2].cells[11].c, 'Z');
+
+    // Reset row 3
+    grid.lines[3].reset();
+    assert!(grid.lines[3].cells.iter().all(|c| c.c == ' '));
+    assert!(grid.lines[3].dirty.get());
+}
