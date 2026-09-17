@@ -59,7 +59,9 @@ pub struct GlyphAtlas {
     pub(crate) pixels: Vec<u8>,
     pub(crate) dirty: bool,
     shelf: Shelf,
-    // Fast O(1) cache directly keyed by (char, style_index).
+    // Fast L1 array cache for ASCII characters (0..127) across 4 styles (0..3).
+    pub(crate) ascii_cache: [Option<CachedGlyph>; 128 * 4],
+    // Fallback O(1) cache for non-ASCII characters directly keyed by (char, style_index).
     pub(crate) cache: HashMap<(char, u8), CachedGlyph>,
 }
 
@@ -74,6 +76,7 @@ impl GlyphAtlas {
             pixels: vec![0; (width * height) as usize],
             dirty: true,
             shelf: Shelf::default(),
+            ascii_cache: [None; 128 * 4],
             cache: HashMap::new(),
         }
     }
@@ -81,6 +84,7 @@ impl GlyphAtlas {
     pub(crate) fn clear(&mut self) {
         self.pixels.fill(0);
         self.cache.clear();
+        self.ascii_cache = [None; 128 * 4];
         self.shelf = Shelf::default();
         self.dirty = true;
     }
@@ -152,6 +156,12 @@ impl GlyphAtlas {
         _fonts: &FontManager,
     ) -> Option<CachedGlyph> {
         let style = style_index(flags) as u8;
+        if c.is_ascii() && (style as usize) < 4 {
+            let idx = (c as usize) | ((style as usize) << 7);
+            if let Some(glyph) = self.ascii_cache[idx] {
+                return Some(glyph);
+            }
+        }
         self.cache.get(&(c, style)).copied()
     }
 
@@ -163,12 +173,22 @@ impl GlyphAtlas {
         fonts: &FontManager,
     ) -> Option<CachedGlyph> {
         let style = style_index(flags) as u8;
-        if let Some(glyph) = self.cache.get(&(c, style)) {
+        let is_ascii = c.is_ascii() && (style as usize) < 4;
+        let ascii_idx = (c as usize) | ((style as usize) << 7);
+        if is_ascii {
+            if let Some(glyph) = self.ascii_cache[ascii_idx] {
+                return Some(glyph);
+            }
+        } else if let Some(glyph) = self.cache.get(&(c, style)) {
             return Some(*glyph);
         }
+
         let key = fonts.face_key(c, flags);
         let (metrics, bitmap) = fonts.rasterize(key);
         let glyph = self.insert_bitmap(metrics, &bitmap)?;
+        if is_ascii {
+            self.ascii_cache[ascii_idx] = Some(glyph);
+        }
         self.cache.insert((c, style), glyph);
         Some(glyph)
     }
