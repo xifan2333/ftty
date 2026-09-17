@@ -824,3 +824,43 @@ fn test_vectorized_clear_line_and_reset_clears_cells() {
     assert!(grid.lines[3].cells.iter().all(|c| c.c == ' '));
     assert!(grid.lines[3].dirty.get());
 }
+
+#[test]
+fn test_auto_scroll_viewport_bottom_bounds_dirty_marking() {
+    let mut grid = Grid::new(80, 24, 100);
+    // Initially at bottom (viewport_offset == 0)
+    for row in &grid.lines {
+        row.dirty.set(false);
+    }
+    // Calling scroll_viewport_bottom when already at bottom must be a no-op and preserve clean state
+    grid.scroll_viewport_bottom();
+    assert_eq!(grid.viewport_offset(), 0);
+    assert!(!grid.lines[0].dirty.get());
+
+    // Scroll up into history
+    grid.scrollback.push_back(Row::new(80));
+    grid.scroll_viewport_up(1);
+    assert_eq!(grid.viewport_offset(), 1);
+
+    // Resetting viewport to bottom marks lines dirty
+    grid.scroll_viewport_bottom();
+    assert_eq!(grid.viewport_offset(), 0);
+    assert!(grid.lines[0].dirty.get());
+}
+
+#[test]
+fn test_ascii_fast_path_writing_and_wrapping() {
+    let mut grid = Grid::new(10, 3, 10);
+    let s = "0123456789ABC";
+    for c in s.chars() {
+        grid.write_char(c, Color::Indexed(7), Color::Indexed(0), CellFlags::empty());
+    }
+    // "0123456789" fits on row 0, then "ABC" wraps to row 1
+    assert_eq!(grid.lines[0].cells[0].c, '0');
+    assert_eq!(grid.lines[0].cells[9].c, '9');
+    assert_eq!(grid.lines[1].cells[0].c, 'A');
+    assert_eq!(grid.lines[1].cells[1].c, 'B');
+    assert_eq!(grid.lines[1].cells[2].c, 'C');
+    assert_eq!(grid.cursor.row, 1);
+    assert_eq!(grid.cursor.col, 3);
+}
