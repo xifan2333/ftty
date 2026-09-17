@@ -60,6 +60,15 @@ impl FallbackCache {
             }
         }
 
+        // Fast path: if any already loaded fallback face covers `c` in another style,
+        // reuse it to avoid expensive Fontconfig matching and redundant disk/parsing overhead.
+        for (pos, face) in self.faces.iter().enumerate() {
+            let glyph = face.font.lookup_glyph_index(c);
+            if glyph != 0 {
+                return Some((pos as u16, glyph));
+            }
+        }
+
         let fc = fontconfig()?;
         let bold = (style & 1) != 0;
         let italic = (style & 2) != 0;
@@ -173,9 +182,17 @@ pub(crate) fn query_fontconfig_candidates(
         pattern.add_string(fontconfig::FC_FAMILY, &c_mono).ok()?;
     }
 
+    if let Ok(matched) = pattern.font_match()
+        && let Ok(filename) = matched.filename()
+        && let Ok(face_index) = matched.face_index()
+        && let Ok(index) = u32::try_from(face_index)
+    {
+        return Some(vec![(PathBuf::from(filename), index)]);
+    }
+
     if let Ok(font_set) = pattern.sort_fonts(fontconfig::UnicodeCoverage::Trim) {
         let mut candidates = Vec::new();
-        for p in font_set.iter().take(8) {
+        for p in font_set.iter().take(2) {
             if let Ok(filename) = p.filename()
                 && let Ok(face_index) = p.face_index()
                 && let Ok(index) = u32::try_from(face_index)
@@ -188,10 +205,7 @@ pub(crate) fn query_fontconfig_candidates(
         }
     }
 
-    let matched = pattern.font_match().ok()?;
-    let path = PathBuf::from(matched.filename().ok()?);
-    let index = u32::try_from(matched.face_index().ok()?).ok()?;
-    Some(vec![(path, index)])
+    None
 }
 
 pub(crate) fn load_font_bytes(bytes: &[u8], collection_index: u32) -> io::Result<fontdue::Font> {
