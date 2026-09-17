@@ -26,7 +26,7 @@
 | :--- | :--- | :--- |
 | `src/event_loop.rs` | Main event loop & orchestration | Calloop event loop, Wayland dispatch, PTY master reading, paste handling, clipboard synchronization. |
 | `src/wayland.rs` | Wayland protocol wrappers | Surface creation, XDG toplevel negotiation, clipboard `wl_data_device`, IME `zwp_text_input_v3`. |
-| `src/render/` | OpenGL & EGL rendering engine | EGL context initialization, GL shaders, vertex batching (`push_quad`), styled underlines, image placements, procedural box drawing. |
+| `src/render.rs` | OpenGL rendering engine | EGL context initialization, GL shaders, vertex batching (`push_quad`), styled underlines, image placements. |
 | `src/parser.rs` | VT/ANSI escape sequence parser | VTE state machine, SGR attributes, private modes (DECSET/DECRST), OSC commands (8, 52, 7, 133, 9;4). |
 | `src/grid.rs` | Cell grid & scrollback buffer | Terminal screen matrix, alternate screen buffer, cell flags, wide chars, Kitty diacritic placeholders, scrollback ring buffer. |
 | `src/kitty.rs` | Kitty Graphics Protocol parser | APC `\x1b_G` sequence decoding, PNG/RGB/RGBA loading, shared memory (`shm_open`) zero-copy, placement tracking. |
@@ -57,7 +57,7 @@ undocumented_unsafe_blocks = "deny"
 
 ### Safety Rules:
 1. **Unsafe Isolation**:
-   - `unsafe` blocks are strictly forbidden in all modules except audited FFI boundaries (`src/render/` for OpenGL/EGL FFI, `src/pty.rs` for POSIX PTY FFI).
+   - `unsafe` blocks are strictly forbidden in all modules except audited FFI boundaries (`src/render.rs` for OpenGL FFI, `src/pty.rs` for POSIX PTY FFI).
    - Every `unsafe` block must be accompanied by an audited safety justification comment (`// SAFETY: ...`).
 2. **No Unwraps / Panics in Production**:
    - `unwrap()` and `expect()` are denied by Clippy across production code (explicitly permitted only in `#[cfg(test)]` modules via `src/lib.rs`).
