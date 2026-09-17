@@ -92,7 +92,10 @@ impl Selection {
         }
         let max_col = cols.saturating_sub(1);
         let start_col = if line == start.line && self.kind != SelectionType::Line {
-            start.col.min(max_col)
+            if start.col > max_col {
+                return None;
+            }
+            start.col
         } else {
             0
         };
@@ -320,5 +323,14 @@ mod tests {
             SelectionType::Simple,
         );
         assert_eq!(empty.line_span(1, 80), None);
+
+        // Start column beyond grid width (e.g. after shrink) yields None on start line
+        let shrunk = Selection::new(
+            SelectionPoint::new(1, 100),
+            SelectionPoint::new(2, 20),
+            SelectionType::Simple,
+        );
+        assert_eq!(shrunk.line_span(1, 80), None);
+        assert_eq!(shrunk.line_span(2, 80), Some((0, 20)));
     }
 }
