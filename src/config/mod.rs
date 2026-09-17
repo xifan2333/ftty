@@ -48,7 +48,7 @@ pub struct FontConfig {
     pub size: Option<f32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub struct WindowConfig {
     pub columns: Option<u16>,
     pub rows: Option<u16>,
@@ -56,12 +56,12 @@ pub struct WindowConfig {
     pub padding_y: Option<u16>,
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub struct CursorConfig {
     pub shape: Option<CursorShape>,
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub struct PaletteConfig {
     pub black: Option<Rgb>,
     pub red: Option<Rgb>,
@@ -81,7 +81,7 @@ pub struct PaletteConfig {
     pub bright_white: Option<Rgb>,
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub struct ColorsConfig {
     pub foreground: Option<Rgb>,
     pub background: Option<Rgb>,
@@ -89,7 +89,7 @@ pub struct ColorsConfig {
     pub indexed: Option<HashMap<u8, Rgb>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize, Default)]
 pub struct ScrollbackConfig {
     pub lines: Option<u32>,
     pub multiplier: Option<f32>,
@@ -124,7 +124,7 @@ impl KeyCombos {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub struct KeybindingsConfig {
     pub scrollback_up_page: Option<KeyCombos>,
     pub scrollback_down_page: Option<KeyCombos>,
