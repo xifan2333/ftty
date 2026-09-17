@@ -522,6 +522,29 @@ impl Grid {
         underline_color: Color,
         hyperlink_id: Option<u32>,
     ) {
+        if c.is_ascii() && c >= ' ' {
+            let col = self.cursor.col;
+            let row = self.cursor.row;
+            if col < self.cols && row < self.rows {
+                self.lines[row].cells[col] = Cell {
+                    c,
+                    fg,
+                    bg,
+                    underline_color,
+                    flags,
+                    hyperlink_id,
+                };
+                if !self.lines[row].dirty.get() {
+                    self.lines[row].dirty.set(true);
+                }
+                if let Some(coords) = &mut self.lines[row].placeholders {
+                    coords.remove(&col);
+                }
+                self.cursor.col += 1;
+                return;
+            }
+        }
+
         let width = if c.is_ascii() && c >= ' ' {
             1
         } else {
