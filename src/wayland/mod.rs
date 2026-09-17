@@ -3,6 +3,7 @@
 pub mod clipboard;
 pub mod init;
 pub mod seat;
+pub mod text_input;
 pub mod xdg;
 
 pub use clipboard::best_text_mime;
