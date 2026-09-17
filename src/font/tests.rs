@@ -155,7 +155,9 @@ fn styled_glyphs_have_separate_cache_entries() {
     ] {
         assert!(atlas.get_or_insert('A', flags, fonts()).is_some());
     }
-    assert_eq!(atlas.cache.len(), 4);
+    let styled_ascii_count = atlas.ascii_cache.iter().flatten().count();
+    assert_eq!(styled_ascii_count, 4);
+    assert_eq!(atlas.cache.len(), 0);
 }
 
 #[test]
@@ -297,4 +299,25 @@ fn test_cross_style_fallback_glyph_reuse() {
         assert_eq!(cache.resolved.len(), 2);
         assert!(bold.is_some());
     }
+}
+
+#[test]
+fn test_ascii_direct_cache_consistency() {
+    let fonts = fonts();
+    let mut atlas = GlyphAtlas::new(256, 256);
+    for flags in [
+        CellFlags::empty(),
+        CellFlags::BOLD,
+        CellFlags::ITALIC,
+        CellFlags::BOLD | CellFlags::ITALIC,
+    ] {
+        for c in ['A', 'z', '0', '$', ' '] {
+            let inserted = atlas.get_or_insert(c, flags, fonts).expect("fit ascii");
+            let retrieved = atlas.get(c, flags, fonts).expect("cached ascii");
+            assert_eq!(inserted, retrieved);
+        }
+    }
+    // Atlas clear invalidates ASCII cache
+    atlas.clear();
+    assert_eq!(atlas.get('A', CellFlags::empty(), fonts), None);
 }

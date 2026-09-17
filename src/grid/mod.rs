@@ -409,9 +409,7 @@ impl Grid {
             ClearMode::Below => {
                 if self.cursor.row < self.rows {
                     let col = self.cursor.col;
-                    for cell in &mut self.lines[self.cursor.row].cells[col..] {
-                        cell.reset();
-                    }
+                    self.lines[self.cursor.row].cells[col..].fill(Cell::default());
                     for row in &mut self.lines[self.cursor.row + 1..] {
                         row.reset();
                     }
@@ -424,9 +422,7 @@ impl Grid {
                         row.reset();
                     }
                     let col = (self.cursor.col + 1).min(self.cols);
-                    for cell in &mut self.lines[self.cursor.row].cells[..col] {
-                        cell.reset();
-                    }
+                    self.lines[self.cursor.row].cells[..col].fill(Cell::default());
                     self.lines[self.cursor.row].dirty.set(true);
                 }
             }
@@ -487,15 +483,11 @@ impl Grid {
         match mode {
             ClearMode::Below => {
                 let start = self.cursor.col.min(self.cols);
-                for cell in &mut row.cells[start..] {
-                    cell.reset();
-                }
+                row.cells[start..].fill(Cell::default());
             }
             ClearMode::Above => {
                 let end = (self.cursor.col + 1).min(self.cols);
-                for cell in &mut row.cells[..end] {
-                    cell.reset();
-                }
+                row.cells[..end].fill(Cell::default());
             }
             ClearMode::All | ClearMode::Saved => {
                 row.reset();
