@@ -2,13 +2,19 @@ use crate::color::{Color, default_256_palette};
 use crate::font::{FontManager, GlyphAtlas};
 use crate::grid::{Cell, CellFlags, Grid};
 use crate::ime::Preedit;
-use crate::render::egl::native_size;
-use crate::render::shader::FRAGMENT_SHADER;
 use crate::render::text::{
-    KITTY_PLACEHOLDER, build_row_backgrounds, build_row_foregrounds, build_vertices, cell_colors,
-    cursor_cell, prepare_atlas,
+    KITTY_PLACEHOLDER, SELECTION_BG, build_row_backgrounds, build_row_foregrounds, build_vertices,
+    cell_colors, cursor_cell, prepare_atlas,
 };
-use crate::render::{ColorScheme, DEFAULT_BG, DEFAULT_FG, HoveredHyperlinkSpan, RenderOptions};
+use crate::render::{
+    ColorScheme, DEFAULT_BG, DEFAULT_FG, FRAGMENT_SHADER, HoveredHyperlinkSpan, RenderOptions,
+    native_size,
+};
+
+#[test]
+fn test_selection_background_color_constant() {
+    assert_eq!(SELECTION_BG, [0.35, 0.45, 0.70, 0.5]);
+}
 
 fn frame(grid: &Grid) -> (Vec<f32>, GlyphAtlas) {
     let fonts = FontManager::load(14.0).expect("system monospace font");

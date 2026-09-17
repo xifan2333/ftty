@@ -1,5 +1,7 @@
 //! Text grid vertex generation, font atlas integration, and dynamic overlay rendering.
 
+#![forbid(unsafe_code)]
+
 use crate::color::{Color, Rgb};
 use crate::font::{CellMetrics, FontManager, GlyphAtlas};
 use crate::grid::{Cell, CellFlags, CursorShape, Grid};
