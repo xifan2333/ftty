@@ -740,3 +740,49 @@ fn test_high_volume_scrolling_recycles_rows_and_bounds_dirty_scan() {
     assert_eq!(grid.scrollback.len(), 100);
     assert_eq!(grid.lines.len(), 24);
 }
+
+#[test]
+fn test_saturated_row_recycling_rebases_image_placements() {
+    let mut grid = Grid::new(80, 2, 5);
+    // Fill screen and scrollback to capacity (5 scrollback lines)
+    for _ in 0..7 {
+        grid.newline();
+    }
+    assert_eq!(grid.scrollback.len(), 5);
+
+    // Add placement at line 0 (oldest line, should be evicted on next scroll)
+    grid.add_placement(ImagePlacement {
+        image_id: 1,
+        placement_id: 0,
+        line: 0,
+        col: 0,
+        cols: 1,
+        rows: 1,
+        offset_x: 0,
+        offset_y: 0,
+        z_index: 0,
+    });
+
+    // Add placement at line 3 (should be decremented to line 2 on next scroll)
+    grid.add_placement(ImagePlacement {
+        image_id: 2,
+        placement_id: 0,
+        line: 3,
+        col: 0,
+        cols: 1,
+        rows: 1,
+        offset_x: 0,
+        offset_y: 0,
+        z_index: 0,
+    });
+
+    // Trigger saturated row recycling
+    grid.scroll_up(1);
+
+    // Placement 1 on line 0 must be evicted
+    assert!(!grid.placements.iter().any(|p| p.image_id == 1));
+
+    // Placement 2 originally on line 3 must be decremented to line 2
+    let p2 = grid.placements.iter().find(|p| p.image_id == 2).unwrap();
+    assert_eq!(p2.line, 2);
+}
