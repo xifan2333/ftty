@@ -1,0 +1,216 @@
+use xkbcommon::xkb::{self, KEYMAP_FORMAT_TEXT_V1, Keymap, keysyms};
+
+use crate::config::KeybindingsConfig;
+use crate::input::{KeyAction, KeyboardHandler, KittyKeyboardFlags, parse_key_combo};
+
+#[test]
+fn keymap_fd_loads_the_advertised_bytes_and_strips_the_trailing_nul() {
+    use nix::sys::memfd::{MFdFlags, memfd_create};
+    use std::io::{Seek, Write};
+
+    let mut handler = KeyboardHandler::new();
+    let keymap = Keymap::new_from_names(
+        &handler.context,
+        "",
+        "",
+        "de",
+        "",
+        None,
+        xkb::KEYMAP_COMPILE_NO_FLAGS,
+    )
+    .unwrap();
+    let mut bytes = keymap.get_as_string(KEYMAP_FORMAT_TEXT_V1).into_bytes();
+    bytes.push(0);
+    let size = bytes.len();
+    bytes.extend_from_slice(b"ignored bytes after the advertised keymap");
+
+    let fd = memfd_create(c"ftty-keymap-test", MFdFlags::MFD_CLOEXEC).unwrap();
+    let mut file = std::fs::File::from(fd);
+    file.write_all(&bytes).unwrap();
+    file.rewind().unwrap();
+    handler.set_keymap_from_fd(file.into(), size);
+
+    // The German layout maps the physical Y key to Z.
+    assert_eq!(handler.handle_key(21), Some(b"z".to_vec()));
+}
+
+#[test]
+fn test_keyboard_handler_initialization() {
+    let handler = KeyboardHandler::new();
+    assert!(handler.keymap.is_some());
+    assert!(handler.state.is_some());
+}
+
+#[test]
+fn test_keyboard_keymap_and_translation() {
+    let mut handler = KeyboardHandler::new();
+
+    // Test Enter key (evdev code 28)
+    let enter = handler.handle_key(28);
+    assert_eq!(enter, Some(b"\r".to_vec()));
+
+    // Test Backspace key (evdev code 14)
+    let bs = handler.handle_key(14);
+    assert_eq!(bs, Some(b"\x7f".to_vec()));
+
+    // Test Tab key (evdev code 15)
+    let tab = handler.handle_key(15);
+    assert_eq!(tab, Some(b"\t".to_vec()));
+
+    // Test Escape key (evdev code 1)
+    let esc = handler.handle_key(1);
+    assert_eq!(esc, Some(b"\x1b".to_vec()));
+
+    // Test Arrow Up (evdev code 103)
+    let up = handler.handle_key(103);
+    assert_eq!(up, Some(b"\x1b[A".to_vec()));
+
+    // Test Arrow Down (evdev code 108)
+    let down = handler.handle_key(108);
+    assert_eq!(down, Some(b"\x1b[B".to_vec()));
+}
+
+#[test]
+fn test_parse_key_combo() {
+    let (mods, sym) = parse_key_combo("Shift+PageUp").unwrap();
+    assert!(mods.shift);
+    assert!(!mods.ctrl);
+    assert_eq!(sym, xkb::Keysym::new(keysyms::KEY_Page_Up));
+
+    let (mods, sym) = parse_key_combo("Ctrl+Shift+c").unwrap();
+    assert!(mods.ctrl);
+    assert!(mods.shift);
+    assert_eq!(sym, xkb::Keysym::new(keysyms::KEY_c));
+
+    let (mods, sym) = parse_key_combo("Control+Plus").unwrap();
+    assert!(mods.ctrl);
+    assert_eq!(sym, xkb::Keysym::new(keysyms::KEY_plus));
+
+    assert!(parse_key_combo("none").is_none());
+    assert!(parse_key_combo("").is_none());
+}
+
+#[test]
+fn test_check_action_default_bindings() {
+    let mut handler = KeyboardHandler::new();
+    let config = KeybindingsConfig::default();
+
+    // With no modifiers active, PageUp (evdev 104) is NOT an action
+    assert!(handler.check_action(104, &config).is_none());
+
+    // Shift active (mask 1): PageUp (evdev 104) triggers ScrollbackUpPage
+    handler.update_modifiers(1, 0, 0, 0);
+    assert_eq!(
+        handler.check_action(104, &config),
+        Some(KeyAction::ScrollbackUpPage)
+    );
+    // Shift active: PageDown (evdev 109) triggers ScrollbackDownPage
+    assert_eq!(
+        handler.check_action(109, &config),
+        Some(KeyAction::ScrollbackDownPage)
+    );
+
+    // Ctrl + Shift active (mask 4 | 1 = 5):
+    handler.update_modifiers(5, 0, 0, 0);
+    // 'C' key (evdev 46) triggers ClipboardCopy
+    assert_eq!(
+        handler.check_action(46, &config),
+        Some(KeyAction::ClipboardCopy)
+    );
+    // 'V' key (evdev 47) triggers ClipboardPaste
+    assert_eq!(
+        handler.check_action(47, &config),
+        Some(KeyAction::ClipboardPaste)
+    );
+
+    // Ctrl active (mask 4):
+    handler.update_modifiers(4, 0, 0, 0);
+    // '=' key (evdev 13) triggers FontIncrease
+    assert_eq!(
+        handler.check_action(13, &config),
+        Some(KeyAction::FontIncrease)
+    );
+    // '-' key (evdev 12) triggers FontDecrease
+    assert_eq!(
+        handler.check_action(12, &config),
+        Some(KeyAction::FontDecrease)
+    );
+    // '0' key (evdev 11) triggers FontReset
+    assert_eq!(
+        handler.check_action(11, &config),
+        Some(KeyAction::FontReset)
+    );
+
+    // User override: disabling clipboard_paste with "none" keeps primary_paste (Shift+Insert)
+    let custom_paste_config = KeybindingsConfig {
+        clipboard_paste: Some(crate::config::KeyCombos::Single("none".to_string())),
+        ..Default::default()
+    };
+    handler.update_modifiers(5, 0, 0, 0);
+    assert_eq!(handler.check_action(47, &custom_paste_config), None);
+    // Shift active: Insert key (evdev 110) still triggers PrimaryPaste
+    handler.update_modifiers(1, 0, 0, 0);
+    assert_eq!(
+        handler.check_action(110, &custom_paste_config),
+        Some(KeyAction::PrimaryPaste)
+    );
+
+    // User override: disabling primary_paste with "none" disables Shift+Insert
+    let custom_primary_config = KeybindingsConfig {
+        primary_paste: Some(crate::config::KeyCombos::Single("none".to_string())),
+        ..Default::default()
+    };
+    assert_eq!(handler.check_action(110, &custom_primary_config), None);
+
+    // User override: disabling clipboard_copy with "none"
+    let custom_config = KeybindingsConfig {
+        clipboard_copy: Some(crate::config::KeyCombos::Single("none".to_string())),
+        ..Default::default()
+    };
+    handler.update_modifiers(5, 0, 0, 0);
+    assert_eq!(handler.check_action(46, &custom_config), None);
+}
+
+#[test]
+fn test_kitty_keyboard_encoding() {
+    let mut handler = KeyboardHandler::new();
+
+    // Default flags = 0: ordinary VT output
+    let enter = handler.handle_key_event(28, true, false);
+    assert_eq!(enter, Some(b"\r".to_vec()));
+
+    // Release event ignored when REPORT_EVENT_TYPES is off
+    let release = handler.handle_key_event(28, false, false);
+    assert_eq!(release, None);
+
+    // Enable DISAMBIGUATE (1)
+    handler.set_kitty_mode(KittyKeyboardFlags::DISAMBIGUATE, 1);
+    let disambiguated_enter = handler.handle_key_event(28, true, false);
+    assert_eq!(disambiguated_enter, Some(b"\x1b[13u".to_vec()));
+
+    // Enable REPORT_EVENT_TYPES (2) via union (mode 2)
+    handler.set_kitty_mode(KittyKeyboardFlags::REPORT_EVENT_TYPES, 2);
+    assert_eq!(
+        handler.kitty_flags,
+        KittyKeyboardFlags::DISAMBIGUATE | KittyKeyboardFlags::REPORT_EVENT_TYPES
+    );
+
+    let press_enter = handler.handle_key_event(28, true, false);
+    assert_eq!(press_enter, Some(b"\x1b[13u".to_vec()));
+
+    let release_enter = handler.handle_key_event(28, false, false);
+    assert_eq!(release_enter, Some(b"\x1b[13;1:3u".to_vec()));
+
+    // Push and Pop stack
+    handler.push_kitty_flags(0);
+    assert_eq!(handler.kitty_flags, 0);
+    handler.pop_kitty_flags(1);
+    assert_eq!(
+        handler.kitty_flags,
+        KittyKeyboardFlags::DISAMBIGUATE | KittyKeyboardFlags::REPORT_EVENT_TYPES
+    );
+
+    // Popping empty stack resets to 0
+    handler.pop_kitty_flags(5);
+    assert_eq!(handler.kitty_flags, 0);
+}
