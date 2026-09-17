@@ -228,6 +228,7 @@ impl Terminal {
 }
 
 impl Perform for Terminal {
+    #[inline]
     fn print(&mut self, c: char) {
         self.grid.write_char_styled(
             c,
