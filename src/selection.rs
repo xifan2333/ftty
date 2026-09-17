@@ -70,6 +70,16 @@ impl Selection {
         }
     }
 
+    /// Returns true if this selection spans across the given line.
+    #[must_use]
+    pub fn spans_line(&self, line: usize) -> bool {
+        if self.is_empty() {
+            return false;
+        }
+        let (start, end) = self.normalized();
+        line >= start.line && line <= end.line
+    }
+
     /// Extracts clean UTF-8 text from the grid within this selection range.
     ///
     /// Respects wrapped lines (omits newline) and trims trailing spaces from rows.

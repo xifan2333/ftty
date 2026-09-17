@@ -287,6 +287,9 @@ fn create_program(gl: &glow::Context) -> io::Result<glow::Program> {
 }
 
 /// Owns GL objects together with their EGL context, including on initialization failure.
+const MAX_RENDER_CACHE_ROWS: usize = 512;
+
+/// Owns GL objects together with their EGL context, including on initialization failure.
 pub struct Renderer {
     gl: glow::Context,
     program: Option<glow::Program>,
@@ -297,10 +300,26 @@ pub struct Renderer {
     image_mode: Option<glow::UniformLocation>,
     image_textures: HashMap<u32, (glow::Texture, u32, u32, u64)>,
     vertices: Vec<f32>,
+    row_bg: Vec<Vec<f32>>,
+    row_fg: Vec<Vec<f32>>,
+    row_valid: Vec<bool>,
+    last_cursor: Option<(usize, usize, usize)>,
+    last_cursor_shape: Option<CursorShape>,
+    last_selection: Option<Selection>,
+    last_viewport_offset: usize,
+    last_hovered_span: Option<HoveredHyperlinkSpan>,
+    last_padding: [u16; 2],
     egl: EglContext,
 }
 
 impl Renderer {
+    /// Clears cached per-row vertex geometry across all screens and styles.
+    pub fn clear_cache(&mut self) {
+        self.row_bg.clear();
+        self.row_fg.clear();
+        self.row_valid.clear();
+    }
+
     /// Creates a renderer after the first XDG surface configure has been acknowledged.
     ///
     /// # Errors
@@ -327,6 +346,15 @@ impl Renderer {
             image_mode: None,
             image_textures: HashMap::new(),
             vertices: Vec::with_capacity(8192),
+            row_bg: Vec::new(),
+            row_fg: Vec::new(),
+            row_valid: Vec::new(),
+            last_cursor: None,
+            last_cursor_shape: None,
+            last_selection: None,
+            last_viewport_offset: 0,
+            last_hovered_span: None,
+            last_padding: [0, 0],
             egl,
         };
         // SAFETY: the owned EGL context is current for all initialization calls.
@@ -364,9 +392,10 @@ impl Renderer {
     ///
     /// # Errors
     /// Returns an error for zero or unrepresentable dimensions.
-    pub fn resize(&self, size: [u32; 2]) -> io::Result<()> {
+    pub fn resize(&mut self, size: [u32; 2]) -> io::Result<()> {
         let [width, height] = native_size(size)?;
         self.egl.window.resize(width, height, 0, 0);
+        self.clear_cache();
         Ok(())
     }
 
@@ -385,16 +414,12 @@ impl Renderer {
     ) -> io::Result<()> {
         let [width, height] = native_size(size)?;
         self.egl.make_current()?;
-        prepare_atlas(grid, fonts, atlas, options.preedit);
-        build_vertices(
-            &mut self.vertices,
-            grid,
-            colors,
-            fonts.metrics,
-            fonts,
-            atlas,
-            options,
-        );
+        let repacked = prepare_atlas(grid, fonts, atlas, options.preedit);
+        if repacked {
+            self.clear_cache();
+            grid.mark_all_dirty();
+        }
+        self.build_incremental_vertices(grid, colors, fonts.metrics, fonts, atlas, options);
         self.sync_image_textures(grid);
 
         // SAFETY: this renderer owns the current context and all referenced GL objects.
@@ -842,7 +867,8 @@ fn prepare_atlas(
     fonts: &FontManager,
     atlas: &mut GlyphAtlas,
     preedit: Option<&Preedit>,
-) {
+) -> bool {
+    let mut repacked = false;
     for attempt in 0..2 {
         let mut full = false;
         // Pre-cache fallback glyph '?' so it is guaranteed available if the atlas fills.
@@ -859,6 +885,9 @@ fn prepare_atlas(
         }
         for row in 0..grid.rows {
             let line = grid.visible_line(row);
+            if !line.dirty.get() && attempt == 0 && !repacked {
+                continue;
+            }
             for cell in line.cells.iter().filter(|cell| visible_glyph(cell)) {
                 if crate::box_drawing::is_procedural_glyph(cell.c) {
                     continue;
@@ -871,7 +900,9 @@ fn prepare_atlas(
         }
         // Repack only at a frame boundary, before generating any vertices or uploading pixels.
         atlas.clear();
+        repacked = true;
     }
+    repacked
 }
 
 fn rgba(color: Rgb) -> [f32; 4] {
@@ -945,43 +976,51 @@ fn cursor_cell(grid: &Grid) -> Option<(usize, usize, usize)> {
     Some((row, col, width))
 }
 
-fn build_vertices(
-    vertices: &mut Vec<f32>,
-    grid: &Grid,
-    colors: ColorScheme<'_>,
+struct RenderContext<'a> {
+    grid: &'a Grid,
+    colors: ColorScheme<'a>,
     metrics: CellMetrics,
-    fonts: &FontManager,
-    atlas: &GlyphAtlas,
-    options: RenderOptions<'_>,
-) {
+    fonts: &'a FontManager,
+    atlas: &'a GlyphAtlas,
+    options: RenderOptions<'a>,
+    cursor: Option<(usize, usize, usize)>,
+}
+
+fn build_row_backgrounds(vertices: &mut Vec<f32>, row: usize, ctx: &RenderContext<'_>) {
     vertices.clear();
+    let grid = ctx.grid;
+    let colors = ctx.colors;
+    let metrics = ctx.metrics;
+    let options = ctx.options;
+    let cursor = ctx.cursor;
+
     let cw = metrics.cell_width as f32;
     let ch = metrics.cell_height as f32;
     let pad_x = f32::from(options.padding[0]);
     let pad_y = f32::from(options.padding[1]);
-    let cursor = cursor_cell(grid);
 
-    // Draw every background first so spacer cells cannot cover wide or overhanging glyphs.
-    for row in 0..grid.rows {
-        let abs_line = grid.scrollback.len() + row - grid.viewport_offset;
-        let line = grid.visible_line(row);
-        for (col, cell) in line.cells.iter().enumerate() {
-            let (_, bg) = cell_colors(cell, colors);
-            let x = pad_x + col as f32 * cw;
-            let y = pad_y + row as f32 * ch;
-            if bg != colors.background {
-                push_quad(vertices, [x, y, x + cw, y + ch], SOLID_UV, rgba(bg));
-            }
-            if options.selection.is_some_and(|s| s.contains(abs_line, col)) {
-                push_quad(vertices, [x, y, x + cw, y + ch], SOLID_UV, SELECTION_BG);
-            }
+    let abs_line = grid.scrollback.len() + row - grid.viewport_offset();
+    let line = grid.visible_line(row);
+    let y = pad_y + row as f32 * ch;
+
+    // Draw background and selection on this row
+    for (col, cell) in line.cells.iter().enumerate() {
+        let (_, bg) = cell_colors(cell, colors);
+        let x = pad_x + col as f32 * cw;
+        if bg != colors.background {
+            push_quad(vertices, [x, y, x + cw, y + ch], SOLID_UV, rgba(bg));
+        }
+        if options.selection.is_some_and(|s| s.contains(abs_line, col)) {
+            push_quad(vertices, [x, y, x + cw, y + ch], SOLID_UV, SELECTION_BG);
         }
     }
-    if let Some((row, col, width)) = cursor
+
+    // Draw block cursor on this row if present
+    if let Some((r, col, width)) = cursor
+        && r == row
         && grid.cursor.shape == CursorShape::Block
     {
         let x = pad_x + col as f32 * cw;
-        let y = pad_y + row as f32 * ch;
         push_quad(
             vertices,
             [x, y, x + width as f32 * cw, y + ch],
@@ -989,182 +1028,209 @@ fn build_vertices(
             rgba(colors.foreground),
         );
     }
+}
 
-    for row in 0..grid.rows {
-        let abs_line = grid.scrollback.len() + row - grid.viewport_offset;
-        let line = grid.visible_line(row);
-        for (col, cell) in line.cells.iter().enumerate() {
-            if cell
-                .flags
-                .intersects(CellFlags::HIDDEN | CellFlags::WIDE_CHAR_SPACER)
+fn build_row_foregrounds(vertices: &mut Vec<f32>, row: usize, ctx: &RenderContext<'_>) {
+    vertices.clear();
+    let grid = ctx.grid;
+    let colors = ctx.colors;
+    let metrics = ctx.metrics;
+    let fonts = ctx.fonts;
+    let atlas = ctx.atlas;
+    let options = ctx.options;
+    let cursor = ctx.cursor;
+
+    let cw = metrics.cell_width as f32;
+    let ch = metrics.cell_height as f32;
+    let pad_x = f32::from(options.padding[0]);
+    let pad_y = f32::from(options.padding[1]);
+
+    let abs_line = grid.scrollback.len() + row - grid.viewport_offset();
+    let line = grid.visible_line(row);
+    let y = pad_y + row as f32 * ch;
+
+    // Draw text glyphs and underlines on this row
+    for (col, cell) in line.cells.iter().enumerate() {
+        if cell
+            .flags
+            .intersects(CellFlags::HIDDEN | CellFlags::WIDE_CHAR_SPACER)
+        {
+            continue;
+        }
+        let x = pad_x + col as f32 * cw;
+        let (fg, _) = cell_colors(cell, colors);
+        let under_block = grid.cursor.shape == CursorShape::Block
+            && cursor.is_some_and(|(r, c, width)| row == r && col >= c && col < c + width);
+        let mut color = rgba(if under_block { colors.background } else { fg });
+        if cell.flags.contains(CellFlags::DIM) {
+            color[3] = 0.6;
+        }
+        let width = if cell.flags.contains(CellFlags::WIDE_CHAR) {
+            2.0 * cw
+        } else {
+            cw
+        };
+        if visible_glyph(cell) {
+            if crate::box_drawing::render_procedural_glyph(vertices, cell.c, x, y, width, ch, color)
             {
-                continue;
-            }
-            let x = pad_x + col as f32 * cw;
-            let y = pad_y + row as f32 * ch;
-            let (fg, _) = cell_colors(cell, colors);
-            let under_block = grid.cursor.shape == CursorShape::Block
-                && cursor.is_some_and(|(r, c, width)| row == r && col >= c && col < c + width);
-            let mut color = rgba(if under_block { colors.background } else { fg });
-            if cell.flags.contains(CellFlags::DIM) {
-                color[3] = 0.6;
-            }
-            let width = if cell.flags.contains(CellFlags::WIDE_CHAR) {
-                2.0 * cw
+                // Procedural box drawing and block elements glyph
+            } else if let Some(glyph) = atlas.get(cell.c, cell.flags, fonts) {
+                if glyph.width > 0 && glyph.height > 0 {
+                    let gx = x + glyph.offset_x as f32;
+                    let gy =
+                        y + metrics.ascent as f32 - glyph.offset_y as f32 - glyph.height as f32;
+                    let [u, v] = glyph.position.map(|value| value as f32);
+                    let w = glyph.width as f32;
+                    let h = glyph.height as f32;
+                    push_quad(
+                        vertices,
+                        [gx, gy, gx + w, gy + h],
+                        [[u, v], [u + w, v + h]],
+                        color,
+                    );
+                }
+            } else if let Some(fallback) = atlas.get('?', CellFlags::empty(), fonts) {
+                // Fallback to '?' when the primary character does not fit in the atlas.
+                if fallback.width > 0 && fallback.height > 0 {
+                    let gx = x + fallback.offset_x as f32;
+                    let gy = y + metrics.ascent as f32
+                        - fallback.offset_y as f32
+                        - fallback.height as f32;
+                    let [u, v] = fallback.position.map(|value| value as f32);
+                    let w = fallback.width as f32;
+                    let h = fallback.height as f32;
+                    push_quad(
+                        vertices,
+                        [gx, gy, gx + w, gy + h],
+                        [[u, v], [u + w, v + h]],
+                        color,
+                    );
+                }
             } else {
-                cw
-            };
-            if visible_glyph(cell) {
-                if crate::box_drawing::render_procedural_glyph(
-                    vertices, cell.c, x, y, width, ch, color,
-                ) {
-                    // Procedural box drawing and block elements glyph
-                } else if let Some(glyph) = atlas.get(cell.c, cell.flags, fonts) {
-                    if glyph.width > 0 && glyph.height > 0 {
-                        let gx = x + glyph.offset_x as f32;
-                        let gy =
-                            y + metrics.ascent as f32 - glyph.offset_y as f32 - glyph.height as f32;
-                        let [u, v] = glyph.position.map(|value| value as f32);
-                        let w = glyph.width as f32;
-                        let h = glyph.height as f32;
-                        push_quad(
-                            vertices,
-                            [gx, gy, gx + w, gy + h],
-                            [[u, v], [u + w, v + h]],
-                            color,
-                        );
-                    }
-                } else if let Some(fallback) = atlas.get('?', CellFlags::empty(), fonts) {
-                    // Fallback to '?' when the primary character does not fit in the atlas.
-                    if fallback.width > 0 && fallback.height > 0 {
-                        let gx = x + fallback.offset_x as f32;
-                        let gy = y + metrics.ascent as f32
-                            - fallback.offset_y as f32
-                            - fallback.height as f32;
-                        let [u, v] = fallback.position.map(|value| value as f32);
-                        let w = fallback.width as f32;
-                        let h = fallback.height as f32;
-                        push_quad(
-                            vertices,
-                            [gx, gy, gx + w, gy + h],
-                            [[u, v], [u + w, v + h]],
-                            color,
-                        );
-                    }
-                } else {
-                    // Solid placeholder quad if the atlas is entirely exhausted.
-                    let box_top = y + 2.0;
-                    let box_bot = y + ch - 2.0;
-                    if box_bot > box_top {
-                        push_quad(
-                            vertices,
-                            [x + 1.0, box_top, x + cw - 1.0, box_bot],
-                            SOLID_UV,
-                            [color[0], color[1], color[2], color[3] * 0.5],
-                        );
-                    }
-                }
-            }
-            let has_explicit_underline = cell.flags.contains(CellFlags::UNDERLINE);
-            let has_hover_underline = cell.hyperlink_id.is_some()
-                && options.hovered_span.is_some_and(|span| {
-                    span.line == abs_line && col >= span.start_col && col <= span.end_col
-                });
-            if has_explicit_underline || has_hover_underline {
-                let ul_color = if cell.underline_color != Color::DefaultForeground {
-                    let resolved = cell.underline_color.to_rgb(
-                        colors.palette,
-                        colors.foreground,
-                        colors.background,
-                    );
-                    rgba(resolved)
-                } else {
-                    color
-                };
-                let base_top = y + (metrics.ascent as f32 + 1.0).min(ch - 1.0);
-
-                if cell.flags.contains(CellFlags::UNDERLINE_DOUBLE) {
-                    let top1 = y + (metrics.ascent as f32).min(ch - 3.0);
-                    let top2 = top1 + 2.0;
+                // Solid placeholder quad if the atlas is entirely exhausted.
+                let box_top = y + 2.0;
+                let box_bot = y + ch - 2.0;
+                if box_bot > box_top {
                     push_quad(
                         vertices,
-                        [x, top1, x + width, top1 + 1.0],
+                        [x + 1.0, box_top, x + cw - 1.0, box_bot],
                         SOLID_UV,
-                        ul_color,
-                    );
-                    push_quad(
-                        vertices,
-                        [x, top2, x + width, top2 + 1.0],
-                        SOLID_UV,
-                        ul_color,
-                    );
-                } else if cell.flags.contains(CellFlags::UNDERLINE_CURLY) {
-                    let steps = (width * 2.0).round().max(4.0) as usize;
-                    let step_w = width / steps as f32;
-                    let amplitude = 1.5_f32;
-                    let period = cw.max(4.0);
-                    for step in 0..steps {
-                        let seg_x = x + step as f32 * step_w;
-                        let wave = ((seg_x - x) / period * std::f32::consts::TAU).sin() * amplitude;
-                        let seg_y = (base_top + wave).clamp(y, y + ch - 1.0);
-                        push_quad(
-                            vertices,
-                            [seg_x, seg_y, seg_x + step_w, seg_y + 1.0],
-                            SOLID_UV,
-                            ul_color,
-                        );
-                    }
-                } else if cell.flags.contains(CellFlags::UNDERLINE_DOTTED) {
-                    let dot_size = 2.0_f32;
-                    let mut dot_x = x;
-                    while dot_x < x + width {
-                        let cur_w = dot_size.min(x + width - dot_x);
-                        push_quad(
-                            vertices,
-                            [dot_x, base_top, dot_x + cur_w, base_top + 1.0],
-                            SOLID_UV,
-                            ul_color,
-                        );
-                        dot_x += dot_size * 2.0;
-                    }
-                } else if cell.flags.contains(CellFlags::UNDERLINE_DASHED) {
-                    let dash_len = 4.0_f32;
-                    let gap = 3.0_f32;
-                    let mut dash_x = x;
-                    while dash_x < x + width {
-                        let cur_w = dash_len.min(x + width - dash_x);
-                        push_quad(
-                            vertices,
-                            [dash_x, base_top, dash_x + cur_w, base_top + 1.0],
-                            SOLID_UV,
-                            ul_color,
-                        );
-                        dash_x += dash_len + gap;
-                    }
-                } else {
-                    push_quad(
-                        vertices,
-                        [x, base_top, x + width, base_top + 1.0],
-                        SOLID_UV,
-                        ul_color,
+                        [color[0], color[1], color[2], color[3] * 0.5],
                     );
                 }
-            }
-            if cell.flags.contains(CellFlags::STRIKETHROUGH) {
-                let top = y + (metrics.ascent as f32 * 0.65).floor();
-                push_quad(vertices, [x, top, x + width, top + 1.0], SOLID_UV, color);
             }
         }
+        let has_explicit_underline = cell.flags.contains(CellFlags::UNDERLINE);
+        let has_hover_underline = cell.hyperlink_id.is_some()
+            && options.hovered_span.is_some_and(|span| {
+                span.line == abs_line && col >= span.start_col && col <= span.end_col
+            });
+        if has_explicit_underline || has_hover_underline {
+            let ul_color = if cell.underline_color != Color::DefaultForeground {
+                let resolved = cell.underline_color.to_rgb(
+                    colors.palette,
+                    colors.foreground,
+                    colors.background,
+                );
+                rgba(resolved)
+            } else {
+                color
+            };
+            let base_top = y + (metrics.ascent as f32 + 1.0).min(ch - 1.0);
+
+            if cell.flags.contains(CellFlags::UNDERLINE_DOUBLE) {
+                let top1 = y + (metrics.ascent as f32).min(ch - 3.0);
+                let top2 = top1 + 2.0;
+                push_quad(
+                    vertices,
+                    [x, top1, x + width, top1 + 1.0],
+                    SOLID_UV,
+                    ul_color,
+                );
+                push_quad(
+                    vertices,
+                    [x, top2, x + width, top2 + 1.0],
+                    SOLID_UV,
+                    ul_color,
+                );
+            } else if cell.flags.contains(CellFlags::UNDERLINE_CURLY) {
+                let steps = (width * 2.0).round().max(4.0) as usize;
+                let step_w = width / steps as f32;
+                let amplitude = 1.5_f32;
+                let period = cw.max(4.0);
+                for step in 0..steps {
+                    let seg_x = x + step as f32 * step_w;
+                    let wave = ((seg_x - x) / period * std::f32::consts::TAU).sin() * amplitude;
+                    let seg_y = (base_top + wave).clamp(y, y + ch - 1.0);
+                    push_quad(
+                        vertices,
+                        [seg_x, seg_y, seg_x + step_w, seg_y + 1.0],
+                        SOLID_UV,
+                        ul_color,
+                    );
+                }
+            } else if cell.flags.contains(CellFlags::UNDERLINE_DOTTED) {
+                let dot_size = 2.0_f32;
+                let mut dot_x = x;
+                while dot_x < x + width {
+                    let cur_w = dot_size.min(x + width - dot_x);
+                    push_quad(
+                        vertices,
+                        [dot_x, base_top, dot_x + cur_w, base_top + 1.0],
+                        SOLID_UV,
+                        ul_color,
+                    );
+                    dot_x += dot_size * 2.0;
+                }
+            } else if cell.flags.contains(CellFlags::UNDERLINE_DASHED) {
+                let dash_len = 4.0_f32;
+                let gap = 3.0_f32;
+                let mut dash_x = x;
+                while dash_x < x + width {
+                    let cur_w = dash_len.min(x + width - dash_x);
+                    push_quad(
+                        vertices,
+                        [dash_x, base_top, dash_x + cur_w, base_top + 1.0],
+                        SOLID_UV,
+                        ul_color,
+                    );
+                    dash_x += dash_len + gap;
+                }
+            } else {
+                push_quad(
+                    vertices,
+                    [x, base_top, x + width, base_top + 1.0],
+                    SOLID_UV,
+                    ul_color,
+                );
+            }
+        }
+        if cell.flags.contains(CellFlags::STRIKETHROUGH) {
+            let top = y + (metrics.ascent as f32 * 0.65).floor();
+            push_quad(vertices, [x, top, x + width, top + 1.0], SOLID_UV, color);
+        }
     }
+}
+
+fn build_dynamic_overlays(vertices: &mut Vec<f32>, ctx: &RenderContext<'_>) {
+    let grid = ctx.grid;
+    let colors = ctx.colors;
+    let metrics = ctx.metrics;
+    let fonts = ctx.fonts;
+    let atlas = ctx.atlas;
+    let options = ctx.options;
+    let cursor = ctx.cursor;
+
+    let cw = metrics.cell_width as f32;
+    let ch = metrics.cell_height as f32;
+    let pad_x = f32::from(options.padding[0]);
+    let pad_y = f32::from(options.padding[1]);
 
     if let Some((row, col, width)) = cursor {
         let x = pad_x + col as f32 * cw;
         let y = pad_y + row as f32 * ch;
         let rect = match grid.cursor.shape {
-            CursorShape::Block => {
-                // If preedit is active, don't early return so preedit can be drawn on top of the block
-                [x, y, x + width as f32 * cw, y + ch]
-            }
+            CursorShape::Block => [x, y, x + width as f32 * cw, y + ch],
             CursorShape::Beam => [x, y, x + 2.0_f32.min(cw), y + ch],
             CursorShape::Underline => [x, y + (ch - 2.0).max(0.0), x + width as f32 * cw, y + ch],
         };
@@ -1198,8 +1264,7 @@ fn build_vertices(
                 [0.2, 0.25, 0.35, 0.95],
             );
 
-            // Draw preedit glyph, clipped to the cells that fit on this row so a wide
-            // fallback glyph cannot bleed past the right edge of the terminal.
+            // Draw preedit glyph
             let span_right = px + span_w;
             if crate::box_drawing::render_procedural_glyph(
                 vertices,
@@ -1246,6 +1311,138 @@ fn build_vertices(
             cur_col += char_width;
         }
     }
+}
+
+impl Renderer {
+    fn build_incremental_vertices(
+        &mut self,
+        grid: &Grid,
+        colors: ColorScheme<'_>,
+        metrics: CellMetrics,
+        fonts: &FontManager,
+        atlas: &GlyphAtlas,
+        options: RenderOptions<'_>,
+    ) {
+        let cursor = cursor_cell(grid);
+        let viewport_offset = grid.viewport_offset();
+        let viewport_changed = self.last_viewport_offset != viewport_offset;
+        self.last_viewport_offset = viewport_offset;
+
+        let padding_changed = self.last_padding != options.padding;
+        self.last_padding = options.padding;
+
+        let cursor_shape = Some(grid.cursor.shape);
+        let shape_changed = self.last_cursor_shape != cursor_shape;
+        self.last_cursor_shape = cursor_shape;
+
+        let cursor_changed = self.last_cursor != cursor;
+        let selection_changed = self.last_selection.as_ref() != options.selection;
+        let hover_changed = self.last_hovered_span != options.hovered_span;
+
+        let rows = grid.rows.min(MAX_RENDER_CACHE_ROWS);
+        if self.row_valid.len() != rows || padding_changed {
+            self.row_bg = vec![Vec::new(); rows];
+            self.row_fg = vec![Vec::new(); rows];
+            self.row_valid = vec![false; rows];
+        }
+
+        let ctx = RenderContext {
+            grid,
+            colors,
+            metrics,
+            fonts,
+            atlas,
+            options,
+            cursor,
+        };
+
+        for r in 0..rows {
+            let line = grid.visible_line(r);
+            let abs_line = grid.scrollback.len() + r - viewport_offset;
+
+            let row_has_cursor = cursor.is_some_and(|(cr, _, _)| cr == r);
+            let row_had_cursor = self.last_cursor.is_some_and(|(cr, _, _)| cr == r);
+            let row_has_sel = options.selection.is_some_and(|s| s.spans_line(abs_line));
+            let row_had_sel = self
+                .last_selection
+                .as_ref()
+                .is_some_and(|s| s.spans_line(abs_line));
+            let row_has_hover = options
+                .hovered_span
+                .is_some_and(|span| span.line == abs_line);
+            let row_had_hover = self
+                .last_hovered_span
+                .is_some_and(|span| span.line == abs_line);
+
+            let needs_regen = !self.row_valid[r]
+                || line.dirty.get()
+                || viewport_changed
+                || shape_changed
+                || (cursor_changed && (row_has_cursor || row_had_cursor))
+                || (selection_changed && (row_has_sel || row_had_sel))
+                || (hover_changed && (row_has_hover || row_had_hover));
+
+            if needs_regen {
+                build_row_backgrounds(&mut self.row_bg[r], r, &ctx);
+                build_row_foregrounds(&mut self.row_fg[r], r, &ctx);
+                self.row_valid[r] = true;
+                line.dirty.set(false);
+            }
+        }
+
+        self.vertices.clear();
+        // 1. All row backgrounds first (prevents lower row background from covering upper row descenders)
+        for r in 0..rows {
+            self.vertices.extend_from_slice(&self.row_bg[r]);
+        }
+        // 2. All row foregrounds (glyphs, underlines, borders)
+        for r in 0..rows {
+            self.vertices.extend_from_slice(&self.row_fg[r]);
+        }
+        // 3. Dynamic overlays (cursor, preedit)
+        build_dynamic_overlays(&mut self.vertices, &ctx);
+
+        self.last_cursor = cursor;
+        self.last_selection = options.selection.cloned();
+        self.last_hovered_span = options.hovered_span;
+    }
+}
+
+#[cfg(test)]
+fn build_vertices(
+    vertices: &mut Vec<f32>,
+    grid: &Grid,
+    colors: ColorScheme<'_>,
+    metrics: CellMetrics,
+    fonts: &FontManager,
+    atlas: &GlyphAtlas,
+    options: RenderOptions<'_>,
+) {
+    vertices.clear();
+    let cursor = cursor_cell(grid);
+    let ctx = RenderContext {
+        grid,
+        colors,
+        metrics,
+        fonts,
+        atlas,
+        options,
+        cursor,
+    };
+    let mut bg_buf = Vec::new();
+    let mut fg_buf = Vec::new();
+    let mut bgs = Vec::new();
+    let mut fgs = Vec::new();
+    for r in 0..grid.rows {
+        build_row_backgrounds(&mut bg_buf, r, &ctx);
+        build_row_foregrounds(&mut fg_buf, r, &ctx);
+        grid.visible_line(r).dirty.set(false);
+        bgs.extend_from_slice(&bg_buf);
+        fgs.extend_from_slice(&fg_buf);
+    }
+    vertices.extend_from_slice(&bgs);
+    vertices.extend_from_slice(&fgs);
+    build_dynamic_overlays(vertices, &ctx);
 }
 
 #[cfg(test)]
@@ -1721,5 +1918,66 @@ mod tests {
         let cell3_left = vertices[3 * 48]; // x0 of cell 3
         assert_eq!(cell2_right, cell3_left);
         assert_eq!(cell2_right, 3.0 * cw);
+    }
+
+    #[test]
+    fn test_incremental_dirty_tracking_only_regenerates_modified_row() {
+        let fonts = FontManager::load(14.0).expect("system monospace font");
+        let mut grid = Grid::new(10, 5, 0);
+        grid.cursor.visible = false;
+
+        // Write to row 1
+        grid.cursor.row = 1;
+        grid.write_char(
+            'A',
+            Color::DefaultForeground,
+            Color::DefaultBackground,
+            CellFlags::empty(),
+        );
+
+        let atlas = GlyphAtlas::new(32, 32);
+        let palette = default_256_palette();
+        let colors = ColorScheme::new(&palette, DEFAULT_FG, DEFAULT_BG);
+
+        let mut row_bg = vec![Vec::new(); 5];
+        let mut row_fg = vec![Vec::new(); 5];
+        let ctx = RenderContext {
+            grid: &grid,
+            colors,
+            metrics: fonts.metrics,
+            fonts: &fonts,
+            atlas: &atlas,
+            options: RenderOptions::default(),
+            cursor: None,
+        };
+
+        // Initially, all rows generated and cleared
+        for (r, (bg, fg)) in row_bg.iter_mut().zip(row_fg.iter_mut()).enumerate() {
+            let line = grid.visible_line(r);
+            build_row_backgrounds(bg, r, &ctx);
+            build_row_foregrounds(fg, r, &ctx);
+            line.dirty.set(false);
+        }
+
+        // All rows now have dirty == false
+        for r in 0..5 {
+            assert!(!grid.visible_line(r).dirty.get());
+        }
+
+        // Modify ONLY row 3
+        grid.cursor.row = 3;
+        grid.write_char(
+            'B',
+            Color::DefaultForeground,
+            Color::DefaultBackground,
+            CellFlags::empty(),
+        );
+
+        // Assert ONLY row 3 became dirty!
+        assert!(!grid.visible_line(0).dirty.get());
+        assert!(!grid.visible_line(1).dirty.get());
+        assert!(!grid.visible_line(2).dirty.get());
+        assert!(grid.visible_line(3).dirty.get());
+        assert!(!grid.visible_line(4).dirty.get());
     }
 }

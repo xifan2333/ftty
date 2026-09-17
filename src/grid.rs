@@ -1,5 +1,6 @@
 //! Terminal cell grid, cursor management, and scrollback ring buffer.
 
+use std::cell::Cell as DirtyCell;
 use std::collections::{HashMap, VecDeque};
 use unicode_width::UnicodeWidthChar;
 
@@ -420,6 +421,7 @@ pub struct Row {
     pub placeholders: Option<HashMap<usize, (u16, u16, u8)>>,
     pub overflow: Vec<Cell>,
     pub overflow_placeholders: Vec<(usize, (u16, u16, u8))>,
+    pub dirty: DirtyCell<bool>,
 }
 
 impl Row {
@@ -431,6 +433,7 @@ impl Row {
             placeholders: None,
             overflow: Vec::new(),
             overflow_placeholders: Vec::new(),
+            dirty: DirtyCell::new(true),
         }
     }
 
@@ -467,6 +470,7 @@ impl Row {
                 self.overflow_placeholders
                     .retain(|&(offset, _)| offset < MAX_ROW_OVERFLOW);
             }
+            self.dirty.set(true);
         } else if new_cols > self.cells.len() {
             let current_len = self.cells.len();
             let needed = new_cols - current_len;
@@ -492,6 +496,7 @@ impl Row {
             if self.cells.len() < new_cols {
                 self.cells.resize(new_cols, Cell::default());
             }
+            self.dirty.set(true);
         }
     }
 
@@ -503,6 +508,7 @@ impl Row {
         self.placeholders = None;
         self.overflow.clear();
         self.overflow_placeholders.clear();
+        self.dirty.set(true);
     }
 }
 
@@ -712,6 +718,22 @@ impl Grid {
             }
             self.placements = std::mem::take(&mut self.alt_placements);
             self.viewport_offset = 0;
+            self.mark_all_dirty();
+        }
+    }
+
+    /// Marks all rows in the visible screen, alternate screen, and scrollback as dirty.
+    pub fn mark_all_dirty(&self) {
+        for row in &self.lines {
+            row.dirty.set(true);
+        }
+        if let Some(alt) = &self.alt_lines {
+            for row in alt {
+                row.dirty.set(true);
+            }
+        }
+        for row in &self.scrollback {
+            row.dirty.set(true);
         }
     }
 
@@ -818,6 +840,7 @@ impl Grid {
         self.rows = new_rows;
         self.scroll_region_top = 0;
         self.scroll_region_bottom = new_rows.saturating_sub(1);
+        self.mark_all_dirty();
         let max_row = new_rows.saturating_sub(1);
         let max_col = new_cols.saturating_sub(1);
         let clamp = |cursor: &mut Cursor| {
@@ -855,6 +878,7 @@ impl Grid {
         if self.viewport_offset > 0 {
             self.viewport_offset = (self.viewport_offset + 1).min(self.scrollback.len());
         }
+        self.mark_all_dirty();
     }
 
     /// Scrolls the viewport up by `delta` lines to view older history.
@@ -864,6 +888,7 @@ impl Grid {
         }
         let max_offset = self.scrollback.len();
         self.viewport_offset = self.viewport_offset.saturating_add(delta).min(max_offset);
+        self.mark_all_dirty();
     }
 
     /// Scrolls the viewport down by `delta` lines toward the active screen.
@@ -872,6 +897,7 @@ impl Grid {
             return;
         }
         self.viewport_offset = self.viewport_offset.saturating_sub(delta);
+        self.mark_all_dirty();
     }
 
     /// Jumps the viewport to the earliest line in the scrollback history.
@@ -880,11 +906,13 @@ impl Grid {
             return;
         }
         self.viewport_offset = self.scrollback.len();
+        self.mark_all_dirty();
     }
 
     /// Resets the viewport offset to 0 (bottom of active screen).
     pub fn scroll_viewport_bottom(&mut self) {
         self.viewport_offset = 0;
+        self.mark_all_dirty();
     }
 
     #[must_use]
@@ -949,6 +977,7 @@ impl Grid {
         {
             row.reset();
         }
+        self.mark_all_dirty();
     }
 
     /// Scrolls lines inside the active scroll region downward.
@@ -966,6 +995,7 @@ impl Grid {
         for row in &mut self.lines[self.scroll_region_top..self.scroll_region_top + count] {
             row.reset();
         }
+        self.mark_all_dirty();
     }
 
     /// Clears part or all of the active display screen.
@@ -980,6 +1010,7 @@ impl Grid {
                     for row in &mut self.lines[self.cursor.row + 1..] {
                         row.reset();
                     }
+                    self.lines[self.cursor.row].dirty.set(true);
                 }
             }
             ClearMode::Above => {
@@ -991,12 +1022,14 @@ impl Grid {
                     for cell in &mut self.lines[self.cursor.row].cells[..col] {
                         cell.reset();
                     }
+                    self.lines[self.cursor.row].dirty.set(true);
                 }
             }
             ClearMode::All => {
                 for row in &mut self.lines {
                     row.reset();
                 }
+                self.mark_all_dirty();
             }
             ClearMode::Saved => {
                 let sb_len = self.scrollback.len();
@@ -1014,6 +1047,7 @@ impl Grid {
                         }
                     });
                 }
+                self.mark_all_dirty();
             }
         }
     }
@@ -1062,6 +1096,7 @@ impl Grid {
                 row.reset();
             }
         }
+        row.dirty.set(true);
     }
 
     /// Writes a character with the given styling attributes at the current cursor position.
@@ -1129,6 +1164,7 @@ impl Grid {
             flags: cell_flags,
             hyperlink_id,
         };
+        self.lines[row].dirty.set(true);
 
         if c == KITTY_PLACEHOLDER {
             let (img_row, img_col) = if col > 0
@@ -1206,6 +1242,7 @@ impl Grid {
         for cell in &mut row.cells[col..col + count] {
             cell.reset();
         }
+        row.dirty.set(true);
     }
 
     /// Deletes characters at cursor, shifting remaining characters left.
@@ -1223,6 +1260,7 @@ impl Grid {
         for cell in &mut row.cells[self.cols - count..] {
             cell.reset();
         }
+        row.dirty.set(true);
     }
 
     /// Inserts lines at cursor row, shifting lines down.
@@ -1235,6 +1273,7 @@ impl Grid {
             self.lines.remove(self.scroll_region_bottom);
             self.lines.insert(self.cursor.row, Row::new(self.cols));
         }
+        self.mark_all_dirty();
     }
 
     /// Deletes lines at cursor row, shifting lines up.
@@ -1248,6 +1287,7 @@ impl Grid {
             self.lines
                 .insert(self.scroll_region_bottom, Row::new(self.cols));
         }
+        self.mark_all_dirty();
     }
 
     pub fn save_cursor(&mut self) {
@@ -1474,6 +1514,49 @@ mod tests {
         assert!(grid.scrollback.is_empty());
         // Must not panic on subsequent visible_line access
         assert_eq!(grid.visible_line(0).cells.len(), 10);
+    }
+
+    #[test]
+    fn test_clear_screen_marks_affected_rows_dirty() {
+        let mut grid = Grid::new(10, 5, 10);
+        // Clear all initial dirty flags
+        for row in &grid.lines {
+            row.dirty.set(false);
+        }
+
+        // 1. Clear Below at row 2
+        grid.cursor.row = 2;
+        grid.cursor.col = 3;
+        grid.clear_screen(ClearMode::Below);
+        assert!(!grid.lines[0].dirty.get());
+        assert!(!grid.lines[1].dirty.get());
+        assert!(grid.lines[2].dirty.get());
+        assert!(grid.lines[3].dirty.get());
+        assert!(grid.lines[4].dirty.get());
+
+        // Reset dirty flags
+        for row in &grid.lines {
+            row.dirty.set(false);
+        }
+
+        // 2. Clear Above at row 2
+        grid.clear_screen(ClearMode::Above);
+        assert!(grid.lines[0].dirty.get());
+        assert!(grid.lines[1].dirty.get());
+        assert!(grid.lines[2].dirty.get());
+        assert!(!grid.lines[3].dirty.get());
+        assert!(!grid.lines[4].dirty.get());
+
+        // Reset dirty flags
+        for row in &grid.lines {
+            row.dirty.set(false);
+        }
+
+        // 3. Clear Saved
+        grid.clear_screen(ClearMode::Saved);
+        for row in &grid.lines {
+            assert!(row.dirty.get());
+        }
     }
 
     #[test]
