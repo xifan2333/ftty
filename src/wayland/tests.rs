@@ -101,21 +101,38 @@ fn test_window_state_as_str() {
 
 #[test]
 fn test_xdg_toplevel_configure_sizing_behavior() {
+    use crate::wayland::xdg::handle_toplevel_configure_size;
+
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).unwrap();
-    let mut app = AppState::new(term, pty).unwrap();
+    let app = AppState::new(term, pty).unwrap();
 
-    let initial_w = app.wayland.width;
-    let initial_h = app.wayland.height;
-    assert!(initial_w >= 720);
-    assert!(initial_h >= 400);
+    let live_w = app.wayland.width;
+    let live_h = app.wayland.height;
+    assert!(live_w >= 720);
+    assert!(live_h >= 400);
 
     // Initial pending_size is None
     assert!(app.pending_size.is_none());
 
-    // Positive dimensions schedule resize
-    app.pending_size = Some([1351, 735]);
-    assert_eq!(app.pending_size, Some([1351, 735]));
+    // 1. Positive dimensions schedule new size
+    assert_eq!(
+        handle_toplevel_configure_size(1351, 735, live_w, live_h),
+        [1351, 735]
+    );
+
+    // 2. Zero dimensions preserve live dimensions (never reset to 80x24 defaults)
+    assert_eq!(handle_toplevel_configure_size(0, 0, 1351, 735), [1351, 735]);
+
+    // 3. Incomplete zero width/height preserves live dimensions and supersedes earlier sizes
+    assert_eq!(
+        handle_toplevel_configure_size(0, 735, 1351, 735),
+        [1351, 735]
+    );
+    assert_eq!(
+        handle_toplevel_configure_size(1351, 0, 1351, 735),
+        [1351, 735]
+    );
 }
 
 #[test]

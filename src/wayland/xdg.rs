@@ -44,6 +44,25 @@ impl Dispatch<XdgSurface, ()> for AppState {
     }
 }
 
+/// Resolves new window dimensions for an `xdg_toplevel.configure` event.
+///
+/// When the compositor sends positive dimensions, they are scheduled as the new size.
+/// If either dimension is zero, the client decides its own dimensions (matching WezTerm
+/// and Foot): active live dimensions are preserved, superseding any stale queued sizes.
+#[must_use]
+pub(crate) fn handle_toplevel_configure_size(
+    width: i32,
+    height: i32,
+    live_width: u32,
+    live_height: u32,
+) -> [u32; 2] {
+    if width > 0 && height > 0 {
+        [width as u32, height as u32]
+    } else {
+        [live_width, live_height]
+    }
+}
+
 impl Dispatch<XdgToplevel, ()> for AppState {
     fn event(
         state: &mut Self,
@@ -59,12 +78,12 @@ impl Dispatch<XdgToplevel, ()> for AppState {
                 height,
                 states: _,
             } => {
-                // If the compositor supplies positive dimensions (tiling, fullscreen, or resize),
-                // schedule the new size. If zero, the client decides its own dimensions (matching
-                // WezTerm and Foot): preserve the active window size without resetting to defaults.
-                if width > 0 && height > 0 {
-                    state.pending_size = Some([width as u32, height as u32]);
-                }
+                state.pending_size = Some(handle_toplevel_configure_size(
+                    width,
+                    height,
+                    state.wayland.width,
+                    state.wayland.height,
+                ));
             }
             xdg_toplevel::Event::Close => {
                 state.wayland.close_requested = true;
