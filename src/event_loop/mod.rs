@@ -82,6 +82,7 @@ pub struct AppState {
     pub(crate) last_activity: std::time::Instant,
     pub(crate) last_trim: std::time::Instant,
     pub(crate) pending_trim: bool,
+    pub logical_font_size: f32,
 }
 
 impl AppState {
@@ -136,6 +137,7 @@ impl AppState {
         config_path: Option<PathBuf>,
     ) -> Result<Self, FttyError> {
         let atlas = GlyphAtlas::default();
+        let initial_font_size = config.font_size();
         let palette = config.build_palette();
         let default_fg = config.foreground();
         let default_bg = config.background();
@@ -221,6 +223,7 @@ impl AppState {
             last_activity: std::time::Instant::now(),
             last_trim: std::time::Instant::now(),
             pending_trim: false,
+            logical_font_size: initial_font_size,
         })
     }
 
@@ -427,18 +430,29 @@ pub fn run_event_loop_with_connection(
                 app_state.default_fg,
                 app_state.default_bg,
             );
+            let factor = if app_state.wayland.is_fractional_scale_active() {
+                app_state.wayland.scale_factor
+            } else {
+                1.0
+            };
+            let pad_x = (f64::from(app_state.config.padding_x()) * factor).round() as u16;
+            let pad_y = (f64::from(app_state.config.padding_y()) * factor).round() as u16;
             let options = RenderOptions::new(
-                [app_state.config.padding_x(), app_state.config.padding_y()],
+                [pad_x, pad_y],
                 app_state.ime.preedit.as_ref(),
                 Some(&app_state.selection),
             )
             .with_hovered_span(app_state.hovered_span);
+            let physical_size = [
+                (app_state.wayland.width as f64 * factor).round().max(1.0) as u32,
+                (app_state.wayland.height as f64 * factor).round().max(1.0) as u32,
+            ];
             renderer.render_grid(
                 &app_state.terminal.grid,
                 colors,
                 &app_state.font_mgr,
                 &mut app_state.atlas,
-                [app_state.wayland.width, app_state.wayland.height],
+                physical_size,
                 options,
             )?;
             if let Some(surface) = &app_state.wayland.surface {
@@ -446,6 +460,12 @@ pub fn run_event_loop_with_connection(
                     xdg_surface.set_window_geometry(
                         0,
                         0,
+                        app_state.wayland.width as i32,
+                        app_state.wayland.height as i32,
+                    );
+                }
+                if let Some(viewport) = &app_state.wayland.viewport {
+                    viewport.set_destination(
                         app_state.wayland.width as i32,
                         app_state.wayland.height as i32,
                     );

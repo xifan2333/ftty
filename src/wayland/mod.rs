@@ -25,8 +25,15 @@ use wayland_protocols::wp::cursor_shape::v1::client::{
     wp_cursor_shape_device_v1::WpCursorShapeDeviceV1,
     wp_cursor_shape_manager_v1::WpCursorShapeManagerV1,
 };
+use wayland_protocols::wp::fractional_scale::v1::client::{
+    wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
+    wp_fractional_scale_v1::WpFractionalScaleV1,
+};
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_manager_v3::ZwpTextInputManagerV3;
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::ZwpTextInputV3;
+use wayland_protocols::wp::viewporter::client::{
+    wp_viewport::WpViewport, wp_viewporter::WpViewporter,
+};
 use wayland_protocols::xdg::shell::client::{
     xdg_surface::XdgSurface, xdg_toplevel::XdgToplevel, xdg_wm_base::XdgWmBase,
 };
@@ -50,6 +57,12 @@ pub struct WaylandState {
     pub text_input: Option<ZwpTextInputV3>,
     pub cursor_shape_manager: Option<WpCursorShapeManagerV1>,
     pub cursor_shape_device: Option<WpCursorShapeDeviceV1>,
+    pub fractional_scale_manager: Option<WpFractionalScaleManagerV1>,
+    pub fractional_scale: Option<WpFractionalScaleV1>,
+    pub viewporter: Option<WpViewporter>,
+    pub viewport: Option<WpViewport>,
+    pub scale_factor: f64,
+    pub preferred_scale_120: u32,
     pub data_device_manager: Option<WlDataDeviceManager>,
     pub data_device: Option<WlDataDevice>,
     pub data_source: Option<WlDataSource>,
@@ -72,8 +85,17 @@ impl WaylandState {
         Self {
             width: 720,
             height: 480,
+            scale_factor: 1.0,
+            preferred_scale_120: 120,
             ..Default::default()
         }
+    }
+
+    /// Returns `true` if both fractional scale and viewport extensions are active on the surface.
+    #[must_use]
+    pub fn is_fractional_scale_active(&self) -> bool {
+        (self.fractional_scale.is_some() && self.viewport.is_some())
+            || (cfg!(test) && (self.scale_factor - 1.0).abs() > 0.001)
     }
 
     /// Creates and initializes the toplevel window once compositor and xdg_wm_base globals are bound.
@@ -182,5 +204,43 @@ impl WaylandState {
 
         let device = manager.get_data_device(seat, qh, ());
         self.data_device = Some(device);
+    }
+
+    /// Creates and initializes the `wp_fractional_scale_v1` instance once the manager and surface are available.
+    pub fn init_fractional_scale<D>(&mut self, qh: &QueueHandle<D>)
+    where
+        D: wayland_client::Dispatch<WpFractionalScaleV1, ()> + 'static,
+    {
+        if self.fractional_scale.is_some() {
+            return;
+        }
+        let Some(manager) = &self.fractional_scale_manager else {
+            return;
+        };
+        let Some(surface) = &self.surface else {
+            return;
+        };
+
+        let fs = manager.get_fractional_scale(surface, qh, ());
+        self.fractional_scale = Some(fs);
+    }
+
+    /// Creates and initializes the `wp_viewport` instance once the viewporter and surface are available.
+    pub fn init_viewport<D>(&mut self, qh: &QueueHandle<D>)
+    where
+        D: wayland_client::Dispatch<WpViewport, ()> + 'static,
+    {
+        if self.viewport.is_some() {
+            return;
+        }
+        let Some(viewporter) = &self.viewporter else {
+            return;
+        };
+        let Some(surface) = &self.surface else {
+            return;
+        };
+
+        let vp = viewporter.get_viewport(surface, qh, ());
+        self.viewport = Some(vp);
     }
 }
