@@ -137,12 +137,7 @@ fn main() {
 
     // Step 4: Pre-warm EGL display, OpenGL context, and shader compilation immediately
     // after window surface creation so the first configure only needs a sub-millisecond resize.
-    if let Some(surface) = &app_state.wayland.surface {
-        let size = [app_state.wayland.width, app_state.wayland.height];
-        if let Ok(renderer) = ftty::render::Renderer::new(surface, &conn, size) {
-            app_state.renderer = Some(renderer);
-        }
-    }
+    app_state.prewarm_renderer(&conn);
 
     if let Err(e) = run_event_loop_with_connection(app_state, conn, event_queue) {
         eprintln!("ftty error: {e}");

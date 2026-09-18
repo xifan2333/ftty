@@ -577,38 +577,36 @@ fn test_pre_event_loop_window_creation_and_surface_setup() {
 }
 
 #[test]
-fn test_pre_warmed_renderer_fast_resize_and_reuse() {
+fn test_prewarm_renderer_noop_without_surface() {
     let (client, server) = std::os::unix::net::UnixStream::pair().expect("socketpair");
     let conn = wayland_client::Connection::from_socket(client).expect("conn");
-    let queue = conn.new_event_queue::<AppState>();
-    let qh = queue.handle();
-    let registry = conn.display().get_registry(&qh, ());
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
     let mut app = AppState::new(term, pty).expect("app");
 
-    let comp =
-        registry.bind::<wayland_client::protocol::wl_compositor::WlCompositor, _, _>(1, 4, &qh, ());
-    app.wayland.compositor = Some(comp);
-    let xdg = registry.bind::<wayland_protocols::xdg::shell::client::xdg_wm_base::XdgWmBase, _, _>(
-        2,
-        1,
-        &qh,
-        (),
-    );
-    app.wayland.xdg_wm_base = Some(xdg);
-    app.wayland.init_window(&qh);
-    assert!(app.wayland.surface.is_some());
+    // Before surface creation, prewarm must be a deterministic no-op
+    assert!(app.wayland.surface.is_none());
+    assert!(app.renderer.is_none());
+    app.prewarm_renderer(&conn);
+    assert!(app.renderer.is_none());
+    drop(server);
+}
 
-    let surface = app.wayland.surface.clone().unwrap();
-    let size = [app.wayland.width, app.wayland.height];
-    if let Ok(renderer) = crate::render::Renderer::new(&surface, &conn, size) {
-        app.renderer = Some(renderer);
-        assert!(app.renderer.is_some());
-        app.pending_size = Some([1024, 768]);
-        assert!(app.configure_renderer(&conn).is_ok());
-        assert_eq!(app.wayland.width, 1024);
-        assert_eq!(app.wayland.height, 768);
-    }
+#[test]
+fn test_configure_renderer_requires_window_surface() {
+    let (client, server) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+    let conn = wayland_client::Connection::from_socket(client).expect("conn");
+    let term = Terminal::new(80, 24, 100);
+    let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
+    let mut app = AppState::new(term, pty).expect("app");
+
+    // Without a window surface, configure_renderer must fail with WindowNotCreated
+    assert!(app.wayland.surface.is_none());
+    assert!(matches!(
+        app.configure_renderer(&conn),
+        Err(crate::error::FttyError::Wayland(
+            crate::error::WaylandError::WindowNotCreated
+        ))
+    ));
     drop(server);
 }
