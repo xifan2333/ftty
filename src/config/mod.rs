@@ -193,6 +193,9 @@ impl Config {
         if let Some(size) = other.font.size {
             self.font.size = Some(size);
         }
+        if let Some(subpixel) = other.font.subpixel {
+            self.font.subpixel = Some(subpixel);
+        }
 
         if let Some(cols) = other.window.columns {
             self.window.columns = Some(cols);

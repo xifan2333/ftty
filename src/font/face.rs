@@ -204,41 +204,73 @@ impl Font {
         }
         let slot = face.glyph();
         let bmp = slot.bitmap();
-        let width = bmp.width().max(0) as u32;
+        let raw_width = bmp.width().max(0) as u32;
         let height = bmp.rows().max(0) as u32;
-        if width == 0 || height == 0 {
+        if raw_width == 0 || height == 0 {
             return RasterizedGlyph::empty();
         }
         let offset_x = slot.bitmap_left();
         let offset_y = slot.bitmap_top() - height as i32;
         let pitch = bmp.pitch();
         let abs_pitch = pitch.unsigned_abs() as usize;
-        let row_bytes = width as usize;
-        let mut pixels = vec![0u8; (width * height) as usize];
         let buffer = bmp.buffer();
 
-        // Normalize scanlines to always be top-to-bottom, handling negative pitch properly
-        for y in 0..height {
-            let src_y = if pitch < 0 {
-                (height - 1 - y) as usize
-            } else {
-                y as usize
-            };
-            let src_offset = src_y * abs_pitch;
-            let dst_offset = (y as usize) * (width as usize);
-            if src_offset + row_bytes <= buffer.len() {
-                pixels[dst_offset..dst_offset + row_bytes]
-                    .copy_from_slice(&buffer[src_offset..src_offset + row_bytes]);
+        if subpixel && bmp.pixel_mode() == Ok(freetype::bitmap::PixelMode::Lcd) {
+            // FreeType LCD bitmaps produce 3 horizontal subpixel coverage bytes per logical pixel.
+            // Downsample the 3 subpixel samples (R, G, B) into a smoothed 1-byte per logical pixel alpha mask.
+            let logical_width = (raw_width / 3).max(1);
+            let mut pixels = vec![0u8; (logical_width * height) as usize];
+            for y in 0..height {
+                let src_y = if pitch < 0 {
+                    (height - 1 - y) as usize
+                } else {
+                    y as usize
+                };
+                let src_row = src_y * abs_pitch;
+                let dst_row = (y as usize) * (logical_width as usize);
+                for x in 0..logical_width {
+                    let src_idx = src_row + (x as usize) * 3;
+                    if src_idx + 2 < buffer.len() {
+                        let r = buffer[src_idx] as u32;
+                        let g = buffer[src_idx + 1] as u32;
+                        let b = buffer[src_idx + 2] as u32;
+                        let filtered = ((r + (g << 1) + b) >> 2) as u8;
+                        pixels[dst_row + x as usize] = filtered;
+                    }
+                }
             }
-        }
-
-        RasterizedGlyph {
-            width,
-            height,
-            offset_x,
-            offset_y,
-            pitch: width as usize,
-            pixels,
+            RasterizedGlyph {
+                width: logical_width,
+                height,
+                offset_x,
+                offset_y,
+                pitch: logical_width as usize,
+                pixels,
+            }
+        } else {
+            let row_bytes = raw_width as usize;
+            let mut pixels = vec![0u8; (raw_width * height) as usize];
+            for y in 0..height {
+                let src_y = if pitch < 0 {
+                    (height - 1 - y) as usize
+                } else {
+                    y as usize
+                };
+                let src_offset = src_y * abs_pitch;
+                let dst_offset = (y as usize) * (raw_width as usize);
+                if src_offset + row_bytes <= buffer.len() {
+                    pixels[dst_offset..dst_offset + row_bytes]
+                        .copy_from_slice(&buffer[src_offset..src_offset + row_bytes]);
+                }
+            }
+            RasterizedGlyph {
+                width: raw_width,
+                height,
+                offset_x,
+                offset_y,
+                pitch: raw_width as usize,
+                pixels,
+            }
         }
     }
 }

@@ -42,6 +42,7 @@ impl AppState {
         };
 
         let families_changed = self.config.font_families() != new_config.font_families();
+        let subpixel_changed = self.config.font_subpixel() != new_config.font_subpixel();
         let new_font_size = new_config.font_size();
         let size_changed = (self.config.font_size() - new_font_size).abs() > f32::EPSILON;
 
@@ -54,10 +55,11 @@ impl AppState {
             return;
         }
 
-        let maybe_new_font = if families_changed {
-            match FontManager::load_with_families(
+        let maybe_new_font = if families_changed || subpixel_changed {
+            match FontManager::load_with_families_and_subpixel(
                 &new_config.font_families(),
                 new_config.font_size(),
+                new_config.font_subpixel(),
             ) {
                 Ok(mgr) => Some(mgr),
                 Err(e) => {

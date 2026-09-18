@@ -177,4 +177,10 @@ fn test_parse_subpixel_antialiasing_config() {
     "#;
     let config_subpixel: Config = toml::from_str(toml_enabled).unwrap();
     assert!(config_subpixel.font_subpixel());
+
+    let mut base = Config::default();
+    let mut inc = Config::default();
+    inc.font.subpixel = Some(true);
+    base.merge(inc);
+    assert!(base.font_subpixel());
 }
