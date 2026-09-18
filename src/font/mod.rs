@@ -7,8 +7,8 @@ pub(crate) mod fallback;
 #[cfg(test)]
 mod tests;
 
+use std::cell::RefCell;
 use std::io;
-use std::sync::{Arc, Mutex, OnceLock};
 
 use fontconfig::Fontconfig;
 
@@ -91,6 +91,7 @@ pub(crate) struct FaceKey {
 }
 
 /// An immutable chain of font faces for a single style (Regular, Bold, Italic, or BoldItalic).
+#[derive(Clone)]
 struct StyleChain {
     primary: Font,
     fallbacks: Vec<Font>,
@@ -110,34 +111,35 @@ pub(crate) fn style_index(flags: CellFlags) -> usize {
 pub struct FontManager {
     regular: StyleChain,
     regular_slots: Vec<Option<Font>>,
-    bold: OnceLock<StyleChain>,
-    italic: OnceLock<StyleChain>,
-    bold_italic: OnceLock<StyleChain>,
-    fallbacks: Arc<Mutex<FallbackCache>>,
+    chains: RefCell<[Option<StyleChain>; 4]>,
+    fallbacks: RefCell<FallbackCache>,
     families: Vec<String>,
     font_size: f32,
     pub metrics: CellMetrics,
 }
 
 impl FontManager {
-    fn chain_for_style(&self, style: u8) -> &StyleChain {
-        match style {
-            0 => &self.regular,
-            1 => self.bold.get_or_init(|| {
-                let fc = fontconfig();
-                self.load_styled_chain(fc, true, false, &self.regular.primary)
-            }),
-            2 => self.italic.get_or_init(|| {
-                let fc = fontconfig();
-                self.load_styled_chain(fc, false, true, &self.regular.primary)
-            }),
-            3 => self.bold_italic.get_or_init(|| {
-                let fc = fontconfig();
-                let bold_chain = self.chain_for_style(1);
-                self.load_styled_chain(fc, true, true, &bold_chain.primary)
-            }),
-            _ => &self.regular,
+    fn ensure_chain(&self, style: u8) {
+        let idx = (style as usize).min(3);
+        if self.chains.borrow()[idx].is_some() {
+            return;
         }
+        let fc = fontconfig();
+        let chain = match style {
+            1 => self.load_styled_chain(fc, true, false, &self.regular.primary),
+            2 => self.load_styled_chain(fc, false, true, &self.regular.primary),
+            3 => {
+                self.ensure_chain(1);
+                let binding = self.chains.borrow();
+                let bold_primary = binding[1]
+                    .as_ref()
+                    .map(|c| &c.primary)
+                    .unwrap_or(&self.regular.primary);
+                self.load_styled_chain(fc, true, true, bold_primary)
+            }
+            _ => return,
+        };
+        self.chains.borrow_mut()[idx] = Some(chain);
     }
 
     fn load_styled_chain(
@@ -233,12 +235,10 @@ impl FontManager {
         };
 
         Ok(Self {
-            regular,
+            regular: regular.clone(),
             regular_slots,
-            bold: OnceLock::new(),
-            italic: OnceLock::new(),
-            bold_italic: OnceLock::new(),
-            fallbacks: Arc::new(Mutex::new(FallbackCache::default())),
+            chains: RefCell::new([Some(regular), None, None, None]),
+            fallbacks: RefCell::new(FallbackCache::default()),
             families: valid_families,
             font_size,
             metrics: CellMetrics {
@@ -327,28 +327,28 @@ impl FontManager {
 
     /// Falls back to the regular face if a styled face cannot be loaded.
     #[must_use]
-    pub fn font_for_style(&self, flags: CellFlags) -> &Font {
-        let style = style_index(flags) as u8;
-        &self.chain_for_style(style).primary
+    pub fn font_for_style(&self, flags: CellFlags) -> Font {
+        let style = (style_index(flags) as u8).min(3);
+        self.ensure_chain(style);
+        self.chains.borrow()[style as usize]
+            .as_ref()
+            .map(|c| c.primary.clone())
+            .unwrap_or_else(|| self.regular.primary.clone())
     }
 
     #[cfg(test)]
-    pub(crate) fn regular(&self) -> &Font {
-        &self.regular.primary
-    }
-
-    fn lock_fallbacks(&self) -> std::sync::MutexGuard<'_, FallbackCache> {
-        self.fallbacks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    pub(crate) fn regular(&self) -> Font {
+        self.regular.primary.clone()
     }
 
     /// Resolves a character to the face that can actually render it.
     ///
     /// Glyph index `0` is `.notdef`, so a zero index means "no face has this glyph".
     pub(crate) fn face_key(&self, c: char, flags: CellFlags) -> FaceKey {
-        let style = style_index(flags) as u8;
-        let chain = self.chain_for_style(style);
+        let style = (style_index(flags) as u8).min(3);
+        self.ensure_chain(style);
+        let binding = self.chains.borrow();
+        let chain = binding[style as usize].as_ref().unwrap_or(&self.regular);
 
         // Tier 1: Primary font for this style
         let glyph = chain.primary.lookup_glyph_index(c);
@@ -372,9 +372,11 @@ impl FontManager {
             }
         }
 
-        // Tier 3: Dynamic system fallback discovery
         let num_configured = (1 + chain.fallbacks.len()) as u16;
-        let mut fallbacks = self.lock_fallbacks();
+        drop(binding);
+
+        // Tier 3: Dynamic system fallback discovery
+        let mut fallbacks = self.fallbacks.borrow_mut();
         let preferred = self.family();
 
         match fallbacks.resolve(c, style, preferred) {
@@ -396,7 +398,10 @@ impl FontManager {
         if key.glyph == 0 {
             return RasterizedGlyph::empty();
         }
-        let chain = self.chain_for_style(key.style);
+        let style = key.style.min(3);
+        self.ensure_chain(style);
+        let binding = self.chains.borrow();
+        let chain = binding[style as usize].as_ref().unwrap_or(&self.regular);
         let num_configured = (1 + chain.fallbacks.len()) as u16;
 
         if key.face == 0 {
@@ -408,10 +413,11 @@ impl FontManager {
         }
 
         let fallback_idx = (key.face - num_configured) as usize;
-        let fallbacks = self.lock_fallbacks();
+        drop(binding);
+        let fallbacks = self.fallbacks.borrow();
         match fallbacks.faces.get(fallback_idx) {
             Some(face) => face.font.rasterize_indexed(key.glyph, self.font_size),
-            None => chain.primary.rasterize_indexed(0, self.font_size),
+            None => self.regular.primary.rasterize_indexed(0, self.font_size),
         }
     }
 }

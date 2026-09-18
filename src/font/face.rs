@@ -1,24 +1,16 @@
 //! Lazy FreeType font face handle and on-demand glyph rasterization.
 
+use std::cell::RefCell;
 use std::io;
 use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::rc::Rc;
+use std::sync::OnceLock;
 
 use freetype::face::LoadFlag;
 
-fn ft_global_lock() -> MutexGuard<'static, ()> {
-    static FT_LOCK: Mutex<()> = Mutex::new(());
-    FT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
 fn ft_library() -> io::Result<&'static freetype::Library> {
     static LIB: OnceLock<Result<freetype::Library, String>> = OnceLock::new();
-    let res = LIB.get_or_init(|| {
-        let _guard = ft_global_lock();
-        freetype::Library::init().map_err(|e| format!("{e:?}"))
-    });
+    let res = LIB.get_or_init(|| freetype::Library::init().map_err(|e| format!("{e:?}")));
     match res {
         Ok(lib) => Ok(lib),
         Err(e) => Err(io::Error::other(format!(
@@ -34,7 +26,7 @@ pub struct LineMetrics {
     pub ascent: f32,
 }
 
-/// Output of a lazily rasterized glyph bitmap.
+/// Output of a lazily rasterized glyph bitmap with normalized top-to-bottom scanlines.
 #[derive(Debug, Clone)]
 pub struct RasterizedGlyph {
     pub width: u32,
@@ -59,30 +51,10 @@ impl RasterizedGlyph {
     }
 }
 
-struct FtFaceWrapper {
-    face: Option<freetype::Face>,
-}
-
-impl Drop for FtFaceWrapper {
-    fn drop(&mut self) {
-        // SAFETY: FreeType FT_Done_Face and FT_Done_Library are not thread-safe.
-        // We acquire the global FreeType lock before letting Face drop.
-        let _guard = ft_global_lock();
-        self.face.take();
-    }
-}
-
-// SAFETY: FreeType `FT_Face` handles are uniquely owned and exclusively
-// mutated behind `Mutex<FtFaceWrapper>` synchronization across all threads.
-unsafe impl Send for FtFaceWrapper {}
-
-// SAFETY: External synchronization is enforced through `Mutex<FtFaceWrapper>`.
-unsafe impl Sync for FtFaceWrapper {}
-
-/// Thread-safe handle to a FreeType face with lazy outline rasterization.
+/// Thread-local handle to a FreeType face with lazy outline rasterization.
 #[derive(Clone)]
 pub struct Font {
-    inner: Arc<Mutex<FtFaceWrapper>>,
+    face: Rc<RefCell<freetype::Face>>,
 }
 
 impl Font {
@@ -91,7 +63,6 @@ impl Font {
     /// # Errors
     /// Returns [`std::io::Error`] if the file cannot be opened or FreeType fails to parse headers.
     pub fn from_file(path: &Path, collection_index: u32) -> io::Result<Self> {
-        let _guard = ft_global_lock();
         let face = ft_library()?
             .new_face(path, collection_index as isize)
             .map_err(|e| {
@@ -101,7 +72,7 @@ impl Font {
                 )
             })?;
         Ok(Self {
-            inner: Arc::new(Mutex::new(FtFaceWrapper { face: Some(face) })),
+            face: Rc::new(RefCell::new(face)),
         })
     }
 
@@ -110,7 +81,6 @@ impl Font {
     /// # Errors
     /// Returns [`std::io::Error`] if FreeType fails to parse font tables from the bytes.
     pub fn from_bytes(bytes: &[u8], collection_index: u32) -> io::Result<Self> {
-        let _guard = ft_global_lock();
         let face = ft_library()?
             .new_memory_face(bytes.to_vec(), collection_index as isize)
             .map_err(|e| {
@@ -120,7 +90,7 @@ impl Font {
                 )
             })?;
         Ok(Self {
-            inner: Arc::new(Mutex::new(FtFaceWrapper { face: Some(face) })),
+            face: Rc::new(RefCell::new(face)),
         })
     }
 
@@ -129,32 +99,21 @@ impl Font {
     /// Returns `0` if the character is not mapped (.notdef).
     #[must_use]
     pub fn lookup_glyph_index(&self, c: char) -> u16 {
-        let guard = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard
-            .face
-            .as_ref()
-            .and_then(|f| f.get_char_index(c as usize))
-            .unwrap_or(0) as u16
+        self.face.borrow().get_char_index(c as usize).unwrap_or(0) as u16
     }
 
-    /// Sets the active character pixel height on the face.
+    /// Sets the active character size on the face using 26.6 fractional units for sub-pixel precision.
     fn set_font_size(face: &freetype::Face, font_size: f32) {
-        let px = font_size.round().max(1.0) as u32;
-        let _ = face.set_pixel_sizes(0, px);
+        let size_in_26_6 = (font_size * 64.0).round().max(64.0) as isize;
+        // 72 DPI ensures 1 point == 1 pixel, allowing exact fractional pixel sizing
+        let _ = face.set_char_size(0, size_in_26_6, 72, 72);
     }
 
     /// Retrieves line height and baseline ascent metrics.
     #[must_use]
     pub fn horizontal_line_metrics(&self, font_size: f32) -> Option<LineMetrics> {
-        let guard = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let face = guard.face.as_ref()?;
-        Self::set_font_size(face, font_size);
+        let face = self.face.borrow();
+        Self::set_font_size(&face, font_size);
         let metrics = face.size_metrics()?;
         let ascent = (metrics.ascender as f32) / 64.0;
         let descent = (metrics.descender as f32) / 64.0;
@@ -173,34 +132,23 @@ impl Font {
     /// Retrieves advance width for a character.
     #[must_use]
     pub fn glyph_advance_width(&self, c: char, font_size: f32) -> f32 {
-        let guard = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(face) = &guard.face {
-            Self::set_font_size(face, font_size);
-            let glyph_idx = face.get_char_index(c as usize).unwrap_or(0);
-            if face.load_glyph(glyph_idx, LoadFlag::DEFAULT).is_ok() {
-                let advance = face.glyph().advance().x;
-                if advance > 0 {
-                    return (advance as f32) / 64.0;
-                }
+        let face = self.face.borrow();
+        Self::set_font_size(&face, font_size);
+        let glyph_idx = face.get_char_index(c as usize).unwrap_or(0);
+        if face.load_glyph(glyph_idx, LoadFlag::DEFAULT).is_ok() {
+            let advance = face.glyph().advance().x;
+            if advance > 0 {
+                return (advance as f32) / 64.0;
             }
         }
         (font_size * 0.6).ceil().max(1.0)
     }
 
-    /// Rasterizes an indexed glyph on-demand into an 8-bit alpha mask.
+    /// Rasterizes an indexed glyph on-demand into an 8-bit alpha mask, normalizing pitch to top-to-bottom.
     #[must_use]
     pub fn rasterize_indexed(&self, glyph_index: u16, font_size: f32) -> RasterizedGlyph {
-        let guard = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(face) = &guard.face else {
-            return RasterizedGlyph::empty();
-        };
-        Self::set_font_size(face, font_size);
+        let face = self.face.borrow();
+        Self::set_font_size(&face, font_size);
         let flags = LoadFlag::RENDER | LoadFlag::TARGET_LIGHT;
         if face.load_glyph(glyph_index as u32, flags).is_err() {
             return RasterizedGlyph::empty();
@@ -214,14 +162,34 @@ impl Font {
         }
         let offset_x = slot.bitmap_left();
         let offset_y = slot.bitmap_top() - height as i32;
-        let pitch = bmp.pitch().unsigned_abs() as usize;
+        let pitch = bmp.pitch();
+        let abs_pitch = pitch.unsigned_abs() as usize;
+        let row_bytes = width as usize;
+        let mut pixels = vec![0u8; (width * height) as usize];
+        let buffer = bmp.buffer();
+
+        // Normalize scanlines to always be top-to-bottom, handling negative pitch properly
+        for y in 0..height {
+            let src_y = if pitch < 0 {
+                (height - 1 - y) as usize
+            } else {
+                y as usize
+            };
+            let src_offset = src_y * abs_pitch;
+            let dst_offset = (y as usize) * (width as usize);
+            if src_offset + row_bytes <= buffer.len() {
+                pixels[dst_offset..dst_offset + row_bytes]
+                    .copy_from_slice(&buffer[src_offset..src_offset + row_bytes]);
+            }
+        }
+
         RasterizedGlyph {
             width,
             height,
             offset_x,
             offset_y,
-            pitch,
-            pixels: bmp.buffer().to_vec(),
+            pitch: width as usize,
+            pixels,
         }
     }
 }

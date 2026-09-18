@@ -8,13 +8,12 @@ pub mod color;
 pub mod config;
 pub mod error;
 pub mod event_loop;
-// Audited FFI boundaries: FreeType C bindings, EGL/OpenGL, and the PTY ioctl wrappers.
-#[allow(unsafe_code)]
 pub mod font;
 pub mod grid;
 pub mod input;
 pub mod kitty;
 pub mod parser;
+// Audited FFI boundaries: EGL/OpenGL and the PTY ioctl wrappers.
 #[allow(unsafe_code)]
 pub mod pty;
 #[allow(unsafe_code)]

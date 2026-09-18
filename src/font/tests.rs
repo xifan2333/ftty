@@ -1,6 +1,5 @@
 use std::fs;
 use std::io;
-use std::sync::OnceLock;
 
 use crate::font::FontManager;
 use crate::font::atlas::{GlyphAtlas, Shelf};
@@ -11,8 +10,12 @@ use crate::font::{parse_cell_metrics_from_bytes, parse_cell_metrics_from_file};
 use crate::grid::CellFlags;
 
 fn fonts() -> &'static FontManager {
-    static FONTS: OnceLock<FontManager> = OnceLock::new();
-    FONTS.get_or_init(|| FontManager::load(14.0).expect("system monospace font"))
+    thread_local! {
+        static CACHED: &'static FontManager = Box::leak(Box::new(
+            FontManager::load(14.0).expect("system monospace font")
+        ));
+    }
+    CACHED.with(|&f| f)
 }
 
 #[test]
