@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use fontconfig::Fontconfig;
 
 use crate::font::fallback::{
-    FallbackCache, FallbackFace, MAX_FALLBACK_FACES, fontconfig, load_font_file, match_family,
+    FallbackCache, FallbackFace, fontconfig, load_font_file, match_family,
     query_fontconfig_candidates,
 };
 use crate::grid::CellFlags;
@@ -63,9 +63,9 @@ pub(crate) fn style_index(flags: CellFlags) -> usize {
 pub struct FontManager {
     regular: StyleChain,
     regular_slots: Vec<Option<fontdue::Font>>,
-    bold: Arc<OnceLock<StyleChain>>,
-    italic: Arc<OnceLock<StyleChain>>,
-    bold_italic: Arc<OnceLock<StyleChain>>,
+    bold: OnceLock<StyleChain>,
+    italic: OnceLock<StyleChain>,
+    bold_italic: OnceLock<StyleChain>,
     fallbacks: Arc<Mutex<FallbackCache>>,
     families: Vec<String>,
     font_size: f32,
@@ -86,42 +86,11 @@ impl FontManager {
             }),
             3 => self.bold_italic.get_or_init(|| {
                 let fc = fontconfig();
-                let fallback = self
-                    .bold
-                    .get()
-                    .map(|b| &b.primary)
-                    .unwrap_or(&self.regular.primary);
-                self.load_styled_chain(fc, true, true, fallback)
+                let bold_chain = self.chain_for_style(1);
+                self.load_styled_chain(fc, true, true, &bold_chain.primary)
             }),
             _ => &self.regular,
         }
-    }
-
-    fn load_styled_chain_raw(
-        fc: Option<&Fontconfig>,
-        primary_name: &str,
-        fallback_names: &[String],
-        regular_slots: &[Option<fontdue::Font>],
-        bold: bool,
-        italic: bool,
-        fallback_primary: &fontdue::Font,
-    ) -> StyleChain {
-        let primary = fc
-            .and_then(|fc| match_family(fc, primary_name, bold, italic))
-            .and_then(|(path, index)| load_font_file(&path, index).ok())
-            .unwrap_or_else(|| fallback_primary.clone());
-
-        let fallbacks = fallback_names
-            .iter()
-            .enumerate()
-            .filter_map(|(i, name)| {
-                fc.and_then(|fc| match_family(fc, name, bold, italic))
-                    .and_then(|(path, index)| load_font_file(&path, index).ok())
-                    .or_else(|| regular_slots.get(i).and_then(|opt| opt.clone()))
-            })
-            .collect();
-
-        StyleChain { primary, fallbacks }
     }
 
     fn load_styled_chain(
@@ -133,15 +102,23 @@ impl FontManager {
     ) -> StyleChain {
         let primary_name = &self.families[0];
         let fallback_names = &self.families[1..];
-        Self::load_styled_chain_raw(
-            fc,
-            primary_name,
-            fallback_names,
-            &self.regular_slots,
-            bold,
-            italic,
-            fallback_primary,
-        )
+
+        let primary = fc
+            .and_then(|fc| match_family(fc, primary_name, bold, italic))
+            .and_then(|(path, index)| load_font_file(&path, index).ok())
+            .unwrap_or_else(|| fallback_primary.clone());
+
+        let fallbacks = fallback_names
+            .iter()
+            .enumerate()
+            .filter_map(|(i, name)| {
+                fc.and_then(|fc| match_family(fc, name, bold, italic))
+                    .and_then(|(path, index)| load_font_file(&path, index).ok())
+                    .or_else(|| self.regular_slots.get(i).and_then(|opt| opt.clone()))
+            })
+            .collect();
+
+        StyleChain { primary, fallbacks }
     }
 
     /// Discovers and loads an ordered list of font families at a size in pixels per em.
@@ -206,7 +183,7 @@ impl FontManager {
             regular_slots.iter().flatten().cloned().collect();
 
         let regular = StyleChain {
-            primary: primary_regular.clone(),
+            primary: primary_regular,
             fallbacks: regular_fallbacks,
         };
 
@@ -229,18 +206,12 @@ impl FontManager {
                                 let mut cache = fallbacks_prewarm
                                     .lock()
                                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                                if cache.faces.len() < MAX_FALLBACK_FACES
-                                    && !cache.faces.iter().any(|f| {
-                                        f.path == path && f.index == index && f.style == style
-                                    })
-                                {
-                                    cache.faces.push(FallbackFace {
-                                        path,
-                                        index,
-                                        style,
-                                        font,
-                                    });
-                                }
+                                cache.insert_face(FallbackFace {
+                                    path,
+                                    index,
+                                    style,
+                                    font,
+                                });
                             }
                         }
                     }
@@ -248,52 +219,12 @@ impl FontManager {
             })
             .ok();
 
-        let bold = Arc::new(OnceLock::new());
-        let italic = Arc::new(OnceLock::new());
-        let bold_italic = Arc::new(OnceLock::new());
-
-        let bold_warm = Arc::clone(&bold);
-        let italic_warm = Arc::clone(&italic);
-        let primary_name_clone = primary_name.clone();
-        let fallback_names_clone = fallback_names.to_vec();
-        let regular_primary_clone = primary_regular.clone();
-        let regular_slots_clone = regular_slots.clone();
-
-        std::thread::Builder::new()
-            .name("font-style-warm".to_string())
-            .spawn(move || {
-                let fc = fontconfig();
-                bold_warm.get_or_init(|| {
-                    Self::load_styled_chain_raw(
-                        fc,
-                        &primary_name_clone,
-                        &fallback_names_clone,
-                        &regular_slots_clone,
-                        true,
-                        false,
-                        &regular_primary_clone,
-                    )
-                });
-                italic_warm.get_or_init(|| {
-                    Self::load_styled_chain_raw(
-                        fc,
-                        &primary_name_clone,
-                        &fallback_names_clone,
-                        &regular_slots_clone,
-                        false,
-                        true,
-                        &regular_primary_clone,
-                    )
-                });
-            })
-            .ok();
-
         Ok(Self {
             regular,
             regular_slots,
-            bold,
-            italic,
-            bold_italic,
+            bold: OnceLock::new(),
+            italic: OnceLock::new(),
+            bold_italic: OnceLock::new(),
             fallbacks,
             families: valid_families,
             font_size,
