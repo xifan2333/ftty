@@ -218,17 +218,6 @@ impl AppState {
             pty_registered: false,
         })
     }
-
-    /// Pre-warms EGL display, OpenGL context, and shader compilation immediately
-    /// following window surface creation so the first configure only needs a sub-millisecond resize.
-    pub fn prewarm_renderer(&mut self, connection: &Connection) {
-        if let Some(surface) = &self.wayland.surface {
-            let size = [self.wayland.width, self.wayland.height];
-            if let Ok(renderer) = Renderer::new(surface, connection, size) {
-                self.renderer = Some(renderer);
-            }
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -252,8 +241,6 @@ pub fn run_event_loop(mut app_state: AppState) -> Result<(), FttyError> {
         .map_err(|e| WaylandError::Dispatch(e.to_string()))?;
     conn.flush()
         .map_err(|e| WaylandError::Dispatch(e.to_string()))?;
-
-    app_state.prewarm_renderer(&conn);
 
     run_event_loop_with_connection(app_state, conn, event_queue)
 }
@@ -337,7 +324,7 @@ pub fn run_event_loop_with_connection(
 
         // Register PTY read source exactly once after initial configure establishes
         // final tiling dimensions and creates the renderer, preventing busy-looping and SIGWINCH restarts.
-        if !app_state.pty_registered && app_state.renderer.is_some() {
+        if !app_state.pty_registered && app_state.wayland.configured {
             app_state.pty_registered = true;
             let pty_master = app_state.pty.try_clone_master()?;
             let pty_source = Generic::new(pty_master, Interest::READ, Mode::Level);

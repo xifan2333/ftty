@@ -577,19 +577,14 @@ fn test_pre_event_loop_window_creation_and_surface_setup() {
 }
 
 #[test]
-fn test_prewarm_renderer_noop_without_surface() {
-    let (client, server) = std::os::unix::net::UnixStream::pair().expect("socketpair");
-    let conn = wayland_client::Connection::from_socket(client).expect("conn");
+fn test_pty_registration_guarded_by_wayland_configured() {
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
-    let mut app = AppState::new(term, pty).expect("app");
+    let app = AppState::new(term, pty).expect("app");
 
-    // Before surface creation, prewarm must be a deterministic no-op
-    assert!(app.wayland.surface.is_none());
-    assert!(app.renderer.is_none());
-    app.prewarm_renderer(&conn);
-    assert!(app.renderer.is_none());
-    drop(server);
+    // Unconfigured state must never register PTY reading
+    assert!(!app.wayland.configured);
+    assert!(!app.pty_registered);
 }
 
 #[test]
