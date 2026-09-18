@@ -21,8 +21,7 @@ use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::
 use crate::color::Rgb;
 use crate::config::Config;
 use crate::error::{FttyError, WaylandError};
-use crate::font::{CellMetrics, FontManager, FontWorkerHandle, GlyphAtlas, MetricsReceiver};
-use crate::grid::CellFlags;
+use crate::font::{FontManager, GlyphAtlas};
 use crate::input::KeyboardHandler;
 use crate::input::ime::ImeState;
 use crate::input::selection::{Selection, SelectionPoint, SelectionType};
@@ -41,7 +40,6 @@ pub struct AppState {
     pub keyboard: KeyboardHandler,
     pub wayland: WaylandState,
     pub font_mgr: FontManager,
-    pub(crate) font_worker: Option<FontWorkerHandle>,
     pub atlas: GlyphAtlas,
     pub ime: ImeState,
     pub kitty_parser: KittyParser,
@@ -131,10 +129,7 @@ impl AppState {
         config: Config,
         config_path: Option<PathBuf>,
     ) -> Result<Self, FttyError> {
-        let mut atlas = GlyphAtlas::new(1024, 1024);
-        for c in ' '..='~' {
-            let _ = atlas.get_or_insert(c, CellFlags::empty(), &font_mgr);
-        }
+        let atlas = GlyphAtlas::new(1024, 1024);
         let palette = config.build_palette();
         let default_fg = config.foreground();
         let default_bg = config.background();
@@ -218,55 +213,7 @@ impl AppState {
             sync_output_start: None,
             last_sync_gen: 0,
             pty_registered: false,
-            font_worker: None,
         })
-    }
-
-    /// Creates a new `AppState` with an asynchronous font loader worker handle,
-    /// deferring font synchronization until renderer configuration.
-    ///
-    /// # Errors
-    /// Returns [`FttyError`] if PTY initialization fails.
-    pub fn with_font_worker(
-        terminal: Terminal,
-        pty: Pty,
-        font_worker: FontWorkerHandle,
-        metrics_rx: MetricsReceiver,
-        config: Config,
-        config_path: Option<PathBuf>,
-    ) -> Result<Self, FttyError> {
-        let metrics = metrics_rx
-            .recv()
-            .ok()
-            .and_then(Result::ok)
-            .unwrap_or_else(|| {
-                let font_size = config.font_size();
-                CellMetrics {
-                    cell_width: (font_size * 0.6).ceil().max(1.0) as u32,
-                    cell_height: (font_size * 1.2).ceil().max(1.0) as u32,
-                    ascent: (font_size * 0.8).ceil() as i32,
-                }
-            });
-        let uninit_font = FontManager::uninitialized_with_metrics(
-            &config.font_families(),
-            config.font_size(),
-            metrics,
-        );
-        let mut state =
-            Self::with_font_and_config(terminal, pty, uninit_font, config, config_path)?;
-        state.font_worker = Some(font_worker);
-        Ok(state)
-    }
-
-    pub(crate) fn ensure_font_loaded(&mut self) -> Result<(), FttyError> {
-        if let Some(worker) = self.font_worker.take() {
-            let loaded = worker
-                .join()
-                .map_err(|_| WaylandError::Dispatch("font worker panicked".to_string()))?
-                .map_err(FttyError::from)?;
-            self.font_mgr = loaded;
-        }
-        Ok(())
     }
 }
 

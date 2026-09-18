@@ -90,12 +90,12 @@ fn main() {
     conn.display().get_registry(&qh, ());
     let _ = conn.flush();
 
-    // Step 2: Spawn font loader worker which publishes exact metrics in ~2ms, then parses outlines
-    let (metrics_rx, font_worker) =
-        match ftty::FontManager::spawn_worker(&config.font_families(), config.font_size()) {
-            Ok(res) => res,
+    // Step 2: Load font manager synchronously with 100% fidelity
+    let font_mgr =
+        match ftty::FontManager::load_with_families(&config.font_families(), config.font_size()) {
+            Ok(fm) => fm,
             Err(e) => {
-                eprintln!("ftty: failed to spawn font loader thread: {e}");
+                eprintln!("ftty: failed to load fonts: {e}");
                 std::process::exit(1);
             }
         };
@@ -115,14 +115,13 @@ fn main() {
         }
     };
 
-    let app_state =
-        match AppState::with_font_worker(term, pty, font_worker, metrics_rx, config, config_path) {
-            Ok(state) => state,
-            Err(e) => {
-                eprintln!("ftty: failed to initialize state: {e}");
-                std::process::exit(1);
-            }
-        };
+    let app_state = match AppState::with_font_and_config(term, pty, font_mgr, config, config_path) {
+        Ok(state) => state,
+        Err(e) => {
+            eprintln!("ftty: failed to initialize state: {e}");
+            std::process::exit(1);
+        }
+    };
 
     if let Err(e) = run_event_loop_with_connection(app_state, conn, event_queue) {
         eprintln!("ftty error: {e}");
