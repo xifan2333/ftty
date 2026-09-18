@@ -626,3 +626,45 @@ fn test_configure_renderer_requires_window_surface() {
     ));
     drop(server);
 }
+
+#[test]
+fn test_plaintext_url_hover_with_ctrl() {
+    let term = Terminal::new(80, 24, 100);
+    let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
+    let mut app = AppState::new(term, pty).expect("AppState new");
+
+    let url = "https://github.com/xifan2333/ftty";
+    for (i, c) in format!("Open {url} now!").chars().enumerate() {
+        app.terminal.grid.lines[0].cells[i].c = c;
+    }
+
+    let cw = f64::from(app.font_mgr.metrics.cell_width);
+    let ch = f64::from(app.font_mgr.metrics.cell_height);
+
+    app.pointer_in_surface = true;
+    // Over the URL (col 10)
+    app.mouse_pos = [cw * 10.5, ch * 0.5];
+
+    // Without Ctrl: no hover span
+    app.update_hover_state();
+    assert_eq!(app.hovered_span, None);
+
+    // With Ctrl held: hover span detected!
+    app.keyboard.update_modifiers(4, 0, 0, 0);
+    assert!(app.keyboard.modifiers().ctrl);
+    app.update_hover_state();
+    assert_eq!(
+        app.hovered_span,
+        Some(HoveredHyperlinkSpan {
+            line: 0,
+            start_col: 5,
+            end_col: 37,
+        })
+    );
+
+    // Release Ctrl: hover span cleared
+    app.keyboard.update_modifiers(0, 0, 0, 0);
+    assert!(!app.keyboard.modifiers().ctrl);
+    app.update_hover_state();
+    assert_eq!(app.hovered_span, None);
+}

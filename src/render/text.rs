@@ -295,7 +295,7 @@ pub(crate) fn build_row_foregrounds(vertices: &mut Vec<f32>, row: usize, ctx: &R
             }
         }
         let has_explicit_underline = cell.flags.contains(CellFlags::UNDERLINE);
-        let has_hover_underline = cell.hyperlink_id.is_some()
+        let has_hover_underline = (cell.hyperlink_id.is_some() || cell.c != ' ')
             && options.hovered_span.is_some_and(|span| {
                 span.line == abs_line && col >= span.start_col && col <= span.end_col
             });
