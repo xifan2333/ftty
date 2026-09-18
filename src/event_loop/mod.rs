@@ -21,7 +21,7 @@ use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::
 use crate::color::Rgb;
 use crate::config::Config;
 use crate::error::{FttyError, WaylandError};
-use crate::font::{FontManager, GlyphAtlas};
+use crate::font::{CellMetrics, FontManager, FontWorkerHandle, GlyphAtlas, MetricsReceiver};
 use crate::grid::CellFlags;
 use crate::input::KeyboardHandler;
 use crate::input::ime::ImeState;
@@ -41,7 +41,7 @@ pub struct AppState {
     pub keyboard: KeyboardHandler,
     pub wayland: WaylandState,
     pub font_mgr: FontManager,
-    pub(crate) font_worker: Option<std::thread::JoinHandle<io::Result<FontManager>>>,
+    pub(crate) font_worker: Option<FontWorkerHandle>,
     pub atlas: GlyphAtlas,
     pub ime: ImeState,
     pub kitty_parser: KittyParser,
@@ -230,12 +230,30 @@ impl AppState {
     pub fn with_font_worker(
         terminal: Terminal,
         pty: Pty,
-        font_worker: std::thread::JoinHandle<io::Result<FontManager>>,
+        font_worker: FontWorkerHandle,
+        metrics_rx: MetricsReceiver,
         config: Config,
         config_path: Option<PathBuf>,
     ) -> Result<Self, FttyError> {
-        let fast_font = FontManager::fast_init(&config.font_families(), config.font_size());
-        let mut state = Self::with_font_and_config(terminal, pty, fast_font, config, config_path)?;
+        let metrics = metrics_rx
+            .recv()
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_else(|| {
+                let font_size = config.font_size();
+                CellMetrics {
+                    cell_width: (font_size * 0.6).ceil().max(1.0) as u32,
+                    cell_height: (font_size * 1.2).ceil().max(1.0) as u32,
+                    ascent: (font_size * 0.8).ceil() as i32,
+                }
+            });
+        let uninit_font = FontManager::uninitialized_with_metrics(
+            &config.font_families(),
+            config.font_size(),
+            metrics,
+        );
+        let mut state =
+            Self::with_font_and_config(terminal, pty, uninit_font, config, config_path)?;
         state.font_worker = Some(font_worker);
         Ok(state)
     }

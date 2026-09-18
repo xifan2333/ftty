@@ -522,13 +522,11 @@ fn test_app_state_with_font_worker_pipelining() {
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
     let config = crate::config::Config::default();
-    let families = config.font_families();
-    let font_size = config.font_size();
-    let worker = std::thread::spawn(move || {
-        crate::font::FontManager::load_with_families(&families, font_size)
-    });
-    let mut app =
-        AppState::with_font_worker(term, pty, worker, config, None).expect("with_font_worker");
+    let (metrics_rx, worker) =
+        crate::font::FontManager::spawn_worker(&config.font_families(), config.font_size())
+            .expect("spawn font worker");
+    let mut app = AppState::with_font_worker(term, pty, worker, metrics_rx, config, None)
+        .expect("with_font_worker");
     assert!(app.font_worker.is_some());
     // Ensure font loaded joins the worker and initializes font_mgr
     app.ensure_font_loaded().expect("ensure_font_loaded");

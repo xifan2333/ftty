@@ -27,6 +27,12 @@ pub struct CellMetrics {
     pub ascent: i32,
 }
 
+/// Receiver channel yielding quickly extracted font cell metrics.
+pub type MetricsReceiver = std::sync::mpsc::Receiver<std::io::Result<CellMetrics>>;
+
+/// Background thread handle parsing full vector font outlines.
+pub type FontWorkerHandle = std::thread::JoinHandle<std::io::Result<FontManager>>;
+
 /// Extracts cell dimensions (width, height, ascent) from raw TrueType/OpenType font bytes in sub-milliseconds.
 #[must_use]
 pub fn parse_cell_metrics_from_bytes(
@@ -34,6 +40,9 @@ pub fn parse_cell_metrics_from_bytes(
     collection_index: u32,
     font_size: f32,
 ) -> Option<CellMetrics> {
+    if !font_size.is_finite() || font_size < MIN_FONT_SIZE || font_size > MAX_FONT_SIZE {
+        return None;
+    }
     let face = ttf_parser::Face::parse(bytes, collection_index).ok()?;
     let units_per_em = face.units_per_em() as f32;
     if units_per_em <= 0.0 {
@@ -292,35 +301,18 @@ impl FontManager {
         })
     }
 
-    /// Quickly discovers the primary font and reads its exact `CellMetrics` via zero-copy TTF parsing
-    /// in sub-milliseconds without parsing vector glyph outlines.
+    /// Constructs an uninitialized `FontManager` with explicit metrics before full font parsing completes.
     #[must_use]
-    pub fn fast_init(families: &[String], font_size: f32) -> Self {
+    pub fn uninitialized_with_metrics(
+        families: &[String],
+        font_size: f32,
+        metrics: CellMetrics,
+    ) -> Self {
         let valid_families = if families.is_empty() {
             vec!["monospace".to_string()]
         } else {
             families.to_vec()
         };
-        let primary_name = &valid_families[0];
-        let fc = fontconfig();
-        let exact_metrics = fc
-            .and_then(|fc| {
-                match_family(fc, primary_name, false, false)
-                    .or_else(|| match_family(fc, "monospace", false, false))
-            })
-            .and_then(|(path, index)| parse_cell_metrics_from_file(&path, index, font_size).ok());
-
-        let metrics = exact_metrics.unwrap_or_else(|| {
-            let cw = (font_size * 0.6).ceil().max(1.0) as u32;
-            let ch = (font_size * 1.2).ceil().max(1.0) as u32;
-            let ascent = (font_size * 0.8).ceil() as i32;
-            CellMetrics {
-                cell_width: cw,
-                cell_height: ch,
-                ascent,
-            }
-        });
-
         Self {
             regular: None,
             regular_slots: Vec::new(),
@@ -334,10 +326,46 @@ impl FontManager {
         }
     }
 
-    /// Constructs an uninitialized `FontManager` with approximate metrics before font parsing completes.
-    #[must_use]
-    pub fn uninitialized(families: &[String], font_size: f32) -> Self {
-        Self::fast_init(families, font_size)
+    /// Spawns a background font worker that quickly publishes cell metrics over a channel
+    /// after reading the font file once, then proceeds to parse full fontdue vector outlines.
+    ///
+    /// # Errors
+    /// Returns [`std::io::Error`] if the thread cannot be spawned.
+    pub fn spawn_worker(
+        families: &[String],
+        font_size: f32,
+    ) -> std::io::Result<(MetricsReceiver, FontWorkerHandle)> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let families_clone = families.to_vec();
+        let handle = std::thread::Builder::new()
+            .name("font-loader".to_string())
+            .spawn(move || {
+                let fc = fontconfig().ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::NotFound, "fontconfig not available")
+                })?;
+                let valid = if families_clone.is_empty() {
+                    vec!["monospace".to_string()]
+                } else {
+                    families_clone
+                };
+                let primary_name = &valid[0];
+                let (path, index) = match_family(fc, primary_name, false, false)
+                    .or_else(|| match_family(fc, "monospace", false, false))
+                    .ok_or_else(|| {
+                        std::io::Error::new(std::io::ErrorKind::NotFound, "no monospace font found")
+                    })?;
+                let bytes = std::fs::read(&path)?;
+                if let Some(metrics) = parse_cell_metrics_from_bytes(&bytes, index, font_size) {
+                    let _ = tx.send(Ok(metrics));
+                } else {
+                    let _ = tx.send(Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "invalid font metrics",
+                    )));
+                }
+                Self::load_with_families(&valid, font_size)
+            })?;
+        Ok((rx, handle))
     }
 
     /// Returns `true` if the primary font face has been loaded and initialized.
