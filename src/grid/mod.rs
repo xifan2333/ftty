@@ -365,8 +365,7 @@ impl Grid {
         if is_full_screen && self.max_scrollback > 0 {
             for i in 0..count {
                 if self.scrollback.len() >= self.max_scrollback {
-                    if let Some(mut recycled) = self.evict_oldest_scrollback_row() {
-                        recycled.reset();
+                    if let Some(recycled) = self.evict_oldest_scrollback_row() {
                         let old = std::mem::replace(&mut self.lines[i], recycled);
                         self.scrollback.push_back(old);
                         if self.viewport_offset > 0 {
@@ -510,6 +509,59 @@ impl Grid {
     /// Writes a character with the given styling attributes at the current cursor position.
     pub fn write_char(&mut self, c: char, fg: Color, bg: Color, flags: CellFlags) {
         self.write_char_styled(c, fg, bg, flags, Color::DefaultForeground, None);
+    }
+
+    /// Bulk writes a run of printable ASCII bytes with given styling attributes.
+    pub fn write_ascii_run(
+        &mut self,
+        text: &[u8],
+        fg: Color,
+        bg: Color,
+        flags: CellFlags,
+        underline_color: Color,
+        hyperlink_id: Option<u32>,
+    ) {
+        let mut rest = text;
+        while !rest.is_empty() {
+            if self.cursor.col >= self.cols {
+                self.lines[self.cursor.row].wrapped = true;
+                self.newline();
+                self.cursor.col = 0;
+            }
+
+            let row = self.cursor.row;
+            if row >= self.rows {
+                break;
+            }
+
+            let col = self.cursor.col;
+            let available = self.cols.saturating_sub(col);
+            if available == 0 {
+                continue;
+            }
+            let take = rest.len().min(available);
+            let chunk = &rest[..take];
+            rest = &rest[take..];
+
+            let row_line = &mut self.lines[row];
+            for (idx, &byte) in chunk.iter().enumerate() {
+                row_line.cells[col + idx] = Cell {
+                    c: byte as char,
+                    fg,
+                    bg,
+                    underline_color,
+                    flags,
+                    hyperlink_id,
+                };
+            }
+            if let Some(coords) = &mut row_line.placeholders {
+                for c in col..col + take {
+                    coords.remove(&c);
+                }
+            }
+            row_line.dirty.set(true);
+            self.cursor.col += take;
+        }
     }
 
     /// Writes a character with extended styling attributes including underline color and hyperlink id.
