@@ -57,65 +57,14 @@ impl Dispatch<XdgToplevel, ()> for AppState {
             xdg_toplevel::Event::Configure {
                 width,
                 height,
-                states,
+                states: _,
             } => {
-                let mut is_tiled = false;
-                let mut is_maximized = false;
-                let mut is_fullscreen = false;
-
-                for chunk in states.as_chunks::<4>().0 {
-                    let val = u32::from_ne_bytes(*chunk);
-                    match xdg_toplevel::State::try_from(val) {
-                        Ok(xdg_toplevel::State::Maximized) => is_maximized = true,
-                        Ok(xdg_toplevel::State::Fullscreen) => is_fullscreen = true,
-                        Ok(
-                            xdg_toplevel::State::TiledLeft
-                            | xdg_toplevel::State::TiledRight
-                            | xdg_toplevel::State::TiledTop
-                            | xdg_toplevel::State::TiledBottom,
-                        ) => is_tiled = true,
-                        _ => {}
-                    }
+                // If the compositor supplies positive dimensions (tiling, fullscreen, or resize),
+                // schedule the new size. If zero, the client decides its own dimensions (matching
+                // WezTerm and Foot): preserve the active window size without resetting to defaults.
+                if width > 0 && height > 0 {
+                    state.pending_size = Some([width as u32, height as u32]);
                 }
-
-                let is_floating = !is_tiled && !is_maximized && !is_fullscreen;
-
-                if is_floating && width > 0 && height > 0 {
-                    state.wayland.stashed_floating_size = Some([width as u32, height as u32]);
-                }
-
-                let default_w = (state.config.columns() as u32)
-                    .saturating_mul(state.font_mgr.metrics.cell_width)
-                    .saturating_add(u32::from(state.config.padding_x()) * 2);
-                let default_h = (state.config.rows() as u32)
-                    .saturating_mul(state.font_mgr.metrics.cell_height)
-                    .saturating_add(u32::from(state.config.padding_y()) * 2);
-
-                let stashed = state
-                    .wayland
-                    .stashed_floating_size
-                    .unwrap_or([default_w, default_h]);
-
-                let target_w = if width > 0 {
-                    width as u32
-                } else if is_floating {
-                    stashed[0]
-                } else if state.wayland.width > 0 {
-                    state.wayland.width
-                } else {
-                    default_w
-                };
-                let target_h = if height > 0 {
-                    height as u32
-                } else if is_floating {
-                    stashed[1]
-                } else if state.wayland.height > 0 {
-                    state.wayland.height
-                } else {
-                    default_h
-                };
-
-                state.pending_size = Some([target_w, target_h]);
             }
             xdg_toplevel::Event::Close => {
                 state.wayland.close_requested = true;

@@ -151,7 +151,6 @@ impl AppState {
             .saturating_mul(font_mgr.metrics.cell_height)
             .saturating_add(pad_y * 2)
             .clamp(100, i32::MAX as u32);
-        wayland.stashed_floating_size = Some([wayland.width, wayland.height]);
 
         // Publish the pixel geometry before the first frame so image clients can size
         // themselves without waiting for a window resize.

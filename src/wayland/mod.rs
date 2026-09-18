@@ -64,7 +64,6 @@ pub struct WaylandState {
     pub configured: bool,
     pub window_state: WindowState,
     pub close_requested: bool,
-    pub stashed_floating_size: Option<[u32; 2]>,
 }
 
 impl WaylandState {

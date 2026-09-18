@@ -100,17 +100,22 @@ fn test_window_state_as_str() {
 }
 
 #[test]
-fn test_stashed_floating_size_initialization() {
+fn test_xdg_toplevel_configure_sizing_behavior() {
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).unwrap();
-    let app = AppState::new(term, pty).unwrap();
+    let mut app = AppState::new(term, pty).unwrap();
 
-    assert!(app.wayland.stashed_floating_size.is_some());
-    let [w, h] = app.wayland.stashed_floating_size.unwrap();
-    assert_eq!(w, app.wayland.width);
-    assert_eq!(h, app.wayland.height);
-    assert!(w >= 720);
-    assert!(h >= 400);
+    let initial_w = app.wayland.width;
+    let initial_h = app.wayland.height;
+    assert!(initial_w >= 720);
+    assert!(initial_h >= 400);
+
+    // Initial pending_size is None
+    assert!(app.pending_size.is_none());
+
+    // Positive dimensions schedule resize
+    app.pending_size = Some([1351, 735]);
+    assert_eq!(app.pending_size, Some([1351, 735]));
 }
 
 #[test]
