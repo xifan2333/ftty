@@ -345,6 +345,14 @@ fn test_mode_2048_window_size_notifications() {
         vec![b"\x1b[48;24;80;768;1024t".to_vec()]
     );
 
+    // Grid dimension change (e.g. font zoom) with constant viewport pixels emits updated character counts
+    term.grid.resize(100, 30);
+    term.set_geometry([8, 16], [1024, 768]);
+    assert_eq!(
+        term.take_responses(),
+        vec![b"\x1b[48;30;100;768;1024t".to_vec()]
+    );
+
     term.advance_bytes(b"\x1b[?2048l");
     assert!(!term.report_window_size);
 }

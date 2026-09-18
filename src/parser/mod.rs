@@ -71,6 +71,7 @@ pub struct Terminal {
     pub report_color_scheme: bool,
     /// Whether window size notifications (DECSET 2048) are enabled.
     pub report_window_size: bool,
+    pub(crate) last_reported_window_size: Option<([usize; 2], [u16; 2])>,
     /// Progress bar status reported through OSC 9;4.
     pub progress: Option<ProgressState>,
     /// Currently active hyperlink ID for incoming text.
@@ -111,6 +112,7 @@ impl Terminal {
             shell_integration: None,
             report_color_scheme: false,
             report_window_size: false,
+            last_reported_window_size: None,
             progress: None,
             active_hyperlink: None,
             next_hyperlink_id: 1,
@@ -151,20 +153,26 @@ impl Terminal {
 
     /// Records the current pixel geometry so clients can size images for this terminal.
     pub fn set_geometry(&mut self, cell_pixels: [u16; 2], viewport_pixels: [u16; 2]) {
-        let old_viewport = self.viewport_pixels;
         self.cell_pixels = [cell_pixels[0].max(1), cell_pixels[1].max(1)];
         self.viewport_pixels = viewport_pixels;
-        if self.report_window_size && old_viewport != viewport_pixels {
-            self.responses.push(
-                format!(
-                    "\x1b[48;{};{};{};{}t",
-                    self.grid.rows,
-                    self.grid.cols,
-                    self.viewport_pixels[1],
-                    self.viewport_pixels[0]
-                )
-                .into_bytes(),
+        if self.report_window_size {
+            let current_size = (
+                [self.grid.rows, self.grid.cols],
+                [self.viewport_pixels[1], self.viewport_pixels[0]],
             );
+            if self.last_reported_window_size != Some(current_size) {
+                self.last_reported_window_size = Some(current_size);
+                self.responses.push(
+                    format!(
+                        "\x1b[48;{};{};{};{}t",
+                        self.grid.rows,
+                        self.grid.cols,
+                        self.viewport_pixels[1],
+                        self.viewport_pixels[0]
+                    )
+                    .into_bytes(),
+                );
+            }
         }
     }
 
