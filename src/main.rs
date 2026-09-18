@@ -64,6 +64,12 @@ fn main() {
         }
     };
 
+    let font_families = config.font_families();
+    let font_size = config.font_size();
+    let font_thread = std::thread::Builder::new()
+        .name("font-loader".to_string())
+        .spawn(move || ftty::FontManager::load_with_families(&font_families, font_size));
+
     let cols = config.columns();
     let rows = config.rows();
 
@@ -79,10 +85,22 @@ fn main() {
         }
     };
 
-    let app_state = match AppState::with_loaded_config(term, pty, config, config_path) {
+    let font_mgr = match font_thread.map(|h| h.join()) {
+        Ok(Ok(Ok(mgr))) => mgr,
+        Ok(Ok(Err(e))) => {
+            eprintln!("ftty: failed to initialize font: {e}");
+            std::process::exit(1);
+        }
+        _ => {
+            eprintln!("ftty: font loader thread failed");
+            std::process::exit(1);
+        }
+    };
+
+    let app_state = match AppState::with_font_and_config(term, pty, font_mgr, config, config_path) {
         Ok(state) => state,
         Err(e) => {
-            eprintln!("ftty: failed to initialize font or state: {e}");
+            eprintln!("ftty: failed to initialize state: {e}");
             std::process::exit(1);
         }
     };

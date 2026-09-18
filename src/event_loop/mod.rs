@@ -108,13 +108,27 @@ impl AppState {
     /// # Errors
     /// Returns [`FttyError`] if font discovery fails.
     pub fn with_loaded_config(
-        mut terminal: Terminal,
+        terminal: Terminal,
         pty: Pty,
         config: Config,
         config_path: Option<PathBuf>,
     ) -> Result<Self, FttyError> {
         let font_mgr =
             FontManager::load_with_families(&config.font_families(), config.font_size())?;
+        Self::with_font_and_config(terminal, pty, font_mgr, config, config_path)
+    }
+
+    /// Creates a new `AppState` with terminal, PTY, pre-loaded font manager, configuration, and optional configuration path.
+    ///
+    /// # Errors
+    /// Returns [`FttyError`] if PTY resizing fails.
+    pub fn with_font_and_config(
+        mut terminal: Terminal,
+        pty: Pty,
+        font_mgr: FontManager,
+        config: Config,
+        config_path: Option<PathBuf>,
+    ) -> Result<Self, FttyError> {
         let mut atlas = GlyphAtlas::new(1024, 1024);
         for c in ' '..='~' {
             let _ = atlas.get_or_insert(c, CellFlags::empty(), &font_mgr);
