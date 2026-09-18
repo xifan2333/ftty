@@ -170,12 +170,11 @@ impl Renderer {
             gl.uniform_1_i32(self.image_mode.as_ref(), 1);
             gl.uniform_2_f32(self.atlas_size.as_ref(), img_w, img_h);
 
-            gl.bind_buffer(glow::ARRAY_BUFFER, self.vbo);
             let bytes = std::slice::from_raw_parts(
                 vertices.as_ptr().cast::<u8>(),
                 std::mem::size_of_val(vertices),
             );
-            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::STREAM_DRAW);
+            crate::render::Renderer::upload_vbo(gl, self.vbo, &mut self.vbo_capacity, bytes);
 
             let stride = 8 * std::mem::size_of::<f32>() as i32;
             for (index, count, offset) in [(0, 2, 0), (1, 2, 8), (2, 4, 16)] {

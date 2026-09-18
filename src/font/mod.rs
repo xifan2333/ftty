@@ -210,7 +210,10 @@ impl FontManager {
             let regular_slots: Vec<Option<Font>> = cached
                 .fallbacks
                 .iter()
-                .map(|f| load_font_file(&f.path, f.index).ok())
+                .map(|opt| {
+                    opt.as_ref()
+                        .and_then(|f| load_font_file(&f.path, f.index).ok())
+                })
                 .collect();
             let regular_fallbacks: Vec<Font> = regular_slots.iter().flatten().cloned().collect();
             let regular = StyleChain {
@@ -272,9 +275,9 @@ impl FontManager {
         let regular_slots: Vec<Option<Font>> = fallback_names
             .iter()
             .map(|name| {
-                let (path, index) = match_family(fc, name, false, false)?;
-                fallback_entries.push((path.clone(), index));
-                load_font_file(&path, index).ok()
+                let matched = match_family(fc, name, false, false);
+                fallback_entries.push(matched.clone());
+                matched.and_then(|(path, index)| load_font_file(&path, index).ok())
             })
             .collect();
 

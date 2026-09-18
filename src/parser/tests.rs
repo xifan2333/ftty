@@ -572,3 +572,15 @@ fn test_simd_ascii_scanning_and_batch_wrap() {
     term.advance_bytes("你好\n".as_bytes());
     assert_eq!(term.grid.lines[3].cells[0].c, '你');
 }
+
+#[test]
+fn test_c1_control_split_sequence() {
+    let mut term = Terminal::new(10, 5, 100);
+    // Split CSI sequence across chunks
+    term.advance_bytes(b"\x1b[");
+    assert!(term.parser_in_escape);
+    term.advance_bytes(b"31mX");
+    assert!(!term.parser_in_escape);
+    assert_eq!(term.grid.lines[0].cells[0].c, 'X');
+    assert_eq!(term.grid.lines[0].cells[0].fg, Color::Indexed(1));
+}

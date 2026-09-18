@@ -263,9 +263,12 @@ impl Terminal {
         while idx < bytes.len() {
             if self.parser_in_escape {
                 let mut parser = self.parser.take().unwrap_or_default();
-                parser.advance(self, &bytes[idx..]);
+                while idx < bytes.len() && self.parser_in_escape {
+                    parser.advance(self, &bytes[idx..=idx]);
+                    idx += 1;
+                }
                 self.parser = Some(parser);
-                break;
+                continue;
             }
 
             let remaining = &bytes[idx..];
@@ -287,6 +290,10 @@ impl Terminal {
                     continue;
                 }
 
+                let byte = remaining[0];
+                if (0x90..=0x9F).contains(&byte) {
+                    self.parser_in_escape = true;
+                }
                 let mut parser = self.parser.take().unwrap_or_default();
                 parser.advance(self, &remaining[..1]);
                 self.parser = Some(parser);
@@ -318,11 +325,14 @@ impl Terminal {
                 b'\x1b' => {
                     self.parser_in_escape = true;
                     let mut parser = self.parser.take().unwrap_or_default();
-                    parser.advance(self, remaining);
+                    parser.advance(self, &remaining[..1]);
                     self.parser = Some(parser);
-                    break;
+                    idx += 1;
                 }
-                _ => {
+                byte => {
+                    if (0x90..=0x9F).contains(&byte) {
+                        self.parser_in_escape = true;
+                    }
                     let mut parser = self.parser.take().unwrap_or_default();
                     parser.advance(self, &remaining[..1]);
                     self.parser = Some(parser);
@@ -336,6 +346,7 @@ impl Terminal {
 impl Perform for Terminal {
     #[inline]
     fn print(&mut self, c: char) {
+        self.parser_in_escape = false;
         self.grid.write_char_styled(
             c,
             self.active_fg,
@@ -347,6 +358,7 @@ impl Perform for Terminal {
     }
 
     fn execute(&mut self, byte: u8) {
+        self.parser_in_escape = false;
         match byte {
             b'\n' | 0x0B | 0x0C => {
                 self.grid.newline();

@@ -301,21 +301,12 @@ impl Renderer {
                 atlas.width as f32,
                 atlas.height as f32,
             );
-            gl.bind_buffer(glow::ARRAY_BUFFER, self.vbo);
             // f32 has no padding, and the slice covers exactly the initialized vertex data.
             let bytes = std::slice::from_raw_parts(
                 self.vertices.as_ptr().cast::<u8>(),
                 std::mem::size_of_val(self.vertices.as_slice()),
             );
-            if bytes.len() > self.vbo_capacity {
-                let new_cap = bytes
-                    .len()
-                    .max(self.vbo_capacity.saturating_mul(2))
-                    .max(16384);
-                gl.buffer_data_size(glow::ARRAY_BUFFER, new_cap as i32, glow::DYNAMIC_DRAW);
-                self.vbo_capacity = new_cap;
-            }
-            gl.buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, 0, bytes);
+            Self::upload_vbo(gl, self.vbo, &mut self.vbo_capacity, bytes);
             let stride = 8 * std::mem::size_of::<f32>() as i32;
             for (index, count, offset) in [(0, 2, 0), (1, 2, 8), (2, 4, 16)] {
                 gl.enable_vertex_attrib_array(index);
@@ -328,6 +319,24 @@ impl Renderer {
         self.render_image_placements(grid, false, fonts.metrics, options);
         self.render_unicode_placeholders(grid, fonts.metrics, options);
         Ok(())
+    }
+
+    pub(crate) unsafe fn upload_vbo(
+        gl: &glow::Context,
+        vbo: Option<glow::Buffer>,
+        vbo_capacity: &mut usize,
+        bytes: &[u8],
+    ) {
+        // SAFETY: caller ensures an EGL context is current, owns vbo, and bytes contains valid vertex data.
+        unsafe {
+            gl.bind_buffer(glow::ARRAY_BUFFER, vbo);
+            if bytes.len() > *vbo_capacity {
+                let new_cap = bytes.len().max(vbo_capacity.saturating_mul(2)).max(16384);
+                gl.buffer_data_size(glow::ARRAY_BUFFER, new_cap as i32, glow::DYNAMIC_DRAW);
+                *vbo_capacity = new_cap;
+            }
+            gl.buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, 0, bytes);
+        }
     }
 
     /// Presents the frame after the caller requests a Wayland frame callback.

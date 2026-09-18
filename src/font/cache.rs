@@ -1,13 +1,20 @@
 //! Persistent font resolution and cell metrics cache to bypass Fontconfig initialization on startup.
 
+use std::hash::Hasher;
 use std::io::{self, Cursor, Read};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::font::CellMetrics;
+use crate::font::{CellMetrics, MAX_FONT_SIZE, MIN_FONT_SIZE};
 
 const CACHE_MAGIC: &[u8; 8] = b"FTTYFONT";
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 2;
+
+/// Maximum number of font family names supported in a single cache entry.
+pub const MAX_CACHED_FAMILIES: usize = 64;
+/// Maximum number of fallback font entries supported in a single cache entry.
+pub const MAX_CACHED_FALLBACKS: usize = 64;
 
 /// File metadata tracking a resolved font on disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,9 +79,44 @@ pub struct FontCacheData {
     pub families: Vec<String>,
     pub font_size: f32,
     pub subpixel: bool,
+    pub dirs_fingerprint: u64,
     pub primary: CachedFontFile,
     pub metrics: CellMetrics,
-    pub fallbacks: Vec<CachedFontFile>,
+    pub fallbacks: Vec<Option<CachedFontFile>>,
+}
+
+/// Generates a fingerprint of font system directories to detect font installations or config changes.
+#[must_use]
+pub fn font_system_fingerprint() -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let dirs = [
+        Path::new("/etc/fonts"),
+        Path::new("/usr/share/fonts"),
+        Path::new("/usr/local/share/fonts"),
+    ];
+    for d in &dirs {
+        if let Ok(meta) = std::fs::metadata(d)
+            && let Ok(mtime) = meta.modified()
+            && let Ok(dur) = mtime.duration_since(SystemTime::UNIX_EPOCH)
+        {
+            hasher.write_u64(dur.as_secs());
+            hasher.write_u32(dur.subsec_nanos());
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let home_path = PathBuf::from(home);
+        for sub in [".config/fontconfig", ".local/share/fonts", ".fonts"] {
+            let path = home_path.join(sub);
+            if let Ok(meta) = std::fs::metadata(&path)
+                && let Ok(mtime) = meta.modified()
+                && let Ok(dur) = mtime.duration_since(SystemTime::UNIX_EPOCH)
+            {
+                hasher.write_u64(dur.as_secs());
+                hasher.write_u32(dur.subsec_nanos());
+            }
+        }
+    }
+    hasher.finish()
 }
 
 /// Locates the persistent font cache file path in `$XDG_CACHE_HOME/ftty/font_cache.bin`.
@@ -118,10 +160,14 @@ pub fn try_load_cache(
         return None;
     }
 
+    if data.dirs_fingerprint != font_system_fingerprint() {
+        return None;
+    }
+
     if !data.primary.is_valid() {
         return None;
     }
-    for fb in &data.fallbacks {
+    for fb in data.fallbacks.iter().flatten() {
         if !fb.is_valid() {
             return None;
         }
@@ -138,8 +184,12 @@ pub fn save_cache(
     primary_path: &Path,
     primary_index: u32,
     metrics: CellMetrics,
-    fallback_entries: &[(PathBuf, u32)],
+    fallback_entries: &[Option<(PathBuf, u32)>],
 ) {
+    if families.len() > MAX_CACHED_FAMILIES || fallback_entries.len() > MAX_CACHED_FALLBACKS {
+        return;
+    }
+
     let Some(cache_path) = cache_file_path() else {
         return;
     };
@@ -154,9 +204,14 @@ pub fn save_cache(
         return;
     };
     let mut fallbacks = Vec::with_capacity(fallback_entries.len());
-    for (path, index) in fallback_entries {
-        if let Some(fb) = CachedFontFile::from_path_and_index(path.clone(), *index) {
-            fallbacks.push(fb);
+    for entry in fallback_entries {
+        match entry {
+            Some((path, index)) => {
+                fallbacks.push(CachedFontFile::from_path_and_index(path.clone(), *index));
+            }
+            None => {
+                fallbacks.push(None);
+            }
         }
     }
 
@@ -164,6 +219,7 @@ pub fn save_cache(
         families: families.to_vec(),
         font_size,
         subpixel,
+        dirs_fingerprint: font_system_fingerprint(),
         primary,
         metrics,
         fallbacks,
@@ -191,6 +247,7 @@ pub fn serialize_cache(data: &FontCacheData) -> Vec<u8> {
 
     buf.extend_from_slice(&data.font_size.to_bits().to_le_bytes());
     buf.push(u8::from(data.subpixel));
+    buf.extend_from_slice(&data.dirs_fingerprint.to_le_bytes());
 
     write_cached_file(&mut buf, &data.primary);
 
@@ -200,17 +257,24 @@ pub fn serialize_cache(data: &FontCacheData) -> Vec<u8> {
 
     buf.extend_from_slice(&(data.fallbacks.len() as u32).to_le_bytes());
     for fb in &data.fallbacks {
-        write_cached_file(&mut buf, fb);
+        match fb {
+            Some(file) => {
+                buf.push(1);
+                write_cached_file(&mut buf, file);
+            }
+            None => {
+                buf.push(0);
+            }
+        }
     }
 
     buf
 }
 
 fn write_cached_file(buf: &mut Vec<u8>, file: &CachedFontFile) {
-    let path_str = file.path.to_string_lossy();
-    let bytes = path_str.as_bytes();
-    buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-    buf.extend_from_slice(bytes);
+    let raw_bytes = file.path.as_os_str().as_bytes();
+    buf.extend_from_slice(&(raw_bytes.len() as u32).to_le_bytes());
+    buf.extend_from_slice(raw_bytes);
     buf.extend_from_slice(&file.index.to_le_bytes());
     buf.extend_from_slice(&file.mtime_secs.to_le_bytes());
     buf.extend_from_slice(&file.mtime_nanos.to_le_bytes());
@@ -233,7 +297,7 @@ pub fn deserialize_cache(bytes: &[u8]) -> Option<FontCacheData> {
     }
 
     let num_families = read_u32(&mut cursor).ok()? as usize;
-    if num_families > 64 {
+    if num_families > MAX_CACHED_FAMILIES {
         return None;
     }
     let mut families = Vec::with_capacity(num_families);
@@ -249,15 +313,29 @@ pub fn deserialize_cache(bytes: &[u8]) -> Option<FontCacheData> {
     }
 
     let font_size = f32::from_bits(read_u32(&mut cursor).ok()?);
+    if !font_size.is_finite() || font_size < MIN_FONT_SIZE || font_size > MAX_FONT_SIZE {
+        return None;
+    }
+
     let mut subpixel_byte = [0u8; 1];
     cursor.read_exact(&mut subpixel_byte).ok()?;
     let subpixel = subpixel_byte[0] != 0;
+
+    let dirs_fingerprint = read_u64(&mut cursor).ok()?;
 
     let primary = read_cached_file(&mut cursor).ok()?;
 
     let cell_width = read_u32(&mut cursor).ok()?;
     let cell_height = read_u32(&mut cursor).ok()?;
     let ascent = read_i32(&mut cursor).ok()?;
+
+    if !(1..=256).contains(&cell_width) || !(1..=256).contains(&cell_height) {
+        return None;
+    }
+    if ascent < -(cell_height as i32) || ascent > (cell_height as i32 * 2) {
+        return None;
+    }
+
     let metrics = CellMetrics {
         cell_width,
         cell_height,
@@ -265,19 +343,26 @@ pub fn deserialize_cache(bytes: &[u8]) -> Option<FontCacheData> {
     };
 
     let num_fallbacks = read_u32(&mut cursor).ok()? as usize;
-    if num_fallbacks > 64 {
+    if num_fallbacks > MAX_CACHED_FALLBACKS {
         return None;
     }
     let mut fallbacks = Vec::with_capacity(num_fallbacks);
     for _ in 0..num_fallbacks {
-        let fb = read_cached_file(&mut cursor).ok()?;
-        fallbacks.push(fb);
+        let mut tag = [0u8; 1];
+        cursor.read_exact(&mut tag).ok()?;
+        if tag[0] == 1 {
+            let fb = read_cached_file(&mut cursor).ok()?;
+            fallbacks.push(Some(fb));
+        } else {
+            fallbacks.push(None);
+        }
     }
 
     Some(FontCacheData {
         families,
         font_size,
         subpixel,
+        dirs_fingerprint,
         primary,
         metrics,
         fallbacks,
@@ -315,15 +400,14 @@ fn read_cached_file<R: Read>(r: &mut R) -> io::Result<CachedFontFile> {
     }
     let mut path_bytes = vec![0u8; len];
     r.read_exact(&mut path_bytes)?;
-    let path_str =
-        String::from_utf8(path_bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let path = PathBuf::from(std::ffi::OsString::from_vec(path_bytes));
     let index = read_u32(r)?;
     let mtime_secs = read_i64(r)?;
     let mtime_nanos = read_u32(r)?;
     let file_size = read_u64(r)?;
 
     Ok(CachedFontFile {
-        path: PathBuf::from(path_str),
+        path,
         index,
         mtime_secs,
         mtime_nanos,
@@ -341,6 +425,7 @@ mod tests {
             families: vec!["monospace".to_string(), "JoyPixels".to_string()],
             font_size: 14.5,
             subpixel: true,
+            dirs_fingerprint: 0x1234_5678_9ABC_DEF0,
             primary: CachedFontFile {
                 path: PathBuf::from("/usr/share/fonts/TTF/DejaVuSansMono.ttf"),
                 index: 0,
@@ -353,13 +438,16 @@ mod tests {
                 cell_height: 18,
                 ascent: 14,
             },
-            fallbacks: vec![CachedFontFile {
-                path: PathBuf::from("/usr/share/fonts/JoyPixels.ttf"),
-                index: 1,
-                mtime_secs: 1_700_000_100,
-                mtime_nanos: 0,
-                file_size: 20_000_000,
-            }],
+            fallbacks: vec![
+                None,
+                Some(CachedFontFile {
+                    path: PathBuf::from("/usr/share/fonts/JoyPixels.ttf"),
+                    index: 1,
+                    mtime_secs: 1_700_000_100,
+                    mtime_nanos: 0,
+                    file_size: 20_000_000,
+                }),
+            ],
         };
 
         let serialized = serialize_cache(&original);
@@ -371,6 +459,36 @@ mod tests {
     fn test_corrupted_cache_handled_safely() {
         assert!(deserialize_cache(b"").is_none());
         assert!(deserialize_cache(b"INVALID_HEADER_DATA").is_none());
-        assert!(deserialize_cache(b"FTTYFONT\x02\x00\x00\x00").is_none()); // Version mismatch
+        assert!(deserialize_cache(b"FTTYFONT\x01\x00\x00\x00").is_none()); // Version mismatch
+    }
+
+    #[test]
+    fn test_invalid_cell_metrics_rejected() {
+        let mut data = FontCacheData {
+            families: vec!["monospace".to_string()],
+            font_size: 14.0,
+            subpixel: false,
+            dirs_fingerprint: 1,
+            primary: CachedFontFile {
+                path: PathBuf::from("/nonexistent.ttf"),
+                index: 0,
+                mtime_secs: 0,
+                mtime_nanos: 0,
+                file_size: 0,
+            },
+            metrics: CellMetrics {
+                cell_width: 0, // Invalid zero width
+                cell_height: 18,
+                ascent: 14,
+            },
+            fallbacks: Vec::new(),
+        };
+        let bytes = serialize_cache(&data);
+        assert!(deserialize_cache(&bytes).is_none());
+
+        data.metrics.cell_width = 10;
+        data.metrics.cell_height = 0; // Invalid zero height
+        let bytes2 = serialize_cache(&data);
+        assert!(deserialize_cache(&bytes2).is_none());
     }
 }
