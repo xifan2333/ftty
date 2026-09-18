@@ -17,7 +17,7 @@ bitflags = "2.8"
 calloop = { version = "0.14", features = ["signals"] }
 calloop-wayland-source = "0.4"
 fontconfig = "0.11.0"
-fontdue = { version = "0.9", features = ["parallel"] }
+freetype-rs = "0.38"
 glow = "0.18"
 khronos-egl = { version = "6.0", features = ["1_5", "dynamic"] }
 libc = "0.2"
@@ -48,7 +48,7 @@ wayland-protocols = { version = "0.32", features = [
 xkbcommon = { version = "0.9", features = ["wayland"] }
 
 [lints.rust]
-# `unsafe` is confined to the audited FFI modules (`render`, `pty`), which opt back in
+# `unsafe` is confined to the audited FFI modules (`render`, `pty`, `font`), which opt back in
 # with an explicit `allow` so every other module is guaranteed safe Rust.
 unsafe_code = "deny"
 

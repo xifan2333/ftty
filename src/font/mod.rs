@@ -1,6 +1,7 @@
 //! Font loading, multi-family fallback chaining, and dynamic text metrics calculation.
 
 pub mod atlas;
+pub(crate) mod face;
 pub(crate) mod fallback;
 
 #[cfg(test)]
@@ -15,6 +16,7 @@ use crate::font::fallback::{FallbackCache, fontconfig, load_font_file, match_fam
 use crate::grid::CellFlags;
 
 pub use atlas::{CachedGlyph, GlyphAtlas, MAX_ATLAS_SIZE};
+pub use face::{Font, LineMetrics, RasterizedGlyph};
 
 /// Cell size and baseline alignment metrics for the active font and font size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,21 +92,14 @@ pub(crate) struct FaceKey {
 
 /// An immutable chain of font faces for a single style (Regular, Bold, Italic, or BoldItalic).
 struct StyleChain {
-    primary: fontdue::Font,
-    fallbacks: Vec<fontdue::Font>,
+    primary: Font,
+    fallbacks: Vec<Font>,
 }
 
 /// Minimum font size in points/pixels supported by the terminal.
 pub const MIN_FONT_SIZE: f32 = 6.0;
 /// Maximum font size in points/pixels supported by the terminal.
 pub const MAX_FONT_SIZE: f32 = 72.0;
-
-/// Maximum font zoom size supported by the terminal.
-///
-/// Fontdue optimizes its vector geometry simplification for `FontSettings::scale`.
-/// Parsing every face at `MAX_FONT_ZOOM_SCALE` guarantees full outline fidelity
-/// across all interactive zoom sizes without outline degradation.
-pub const MAX_FONT_ZOOM_SCALE: f32 = MAX_FONT_SIZE;
 
 pub(crate) fn style_index(flags: CellFlags) -> usize {
     usize::from(flags.contains(CellFlags::BOLD))
@@ -114,7 +109,7 @@ pub(crate) fn style_index(flags: CellFlags) -> usize {
 /// Loads configured font chain and on-demand fallback faces with cell metrics calculation.
 pub struct FontManager {
     regular: StyleChain,
-    regular_slots: Vec<Option<fontdue::Font>>,
+    regular_slots: Vec<Option<Font>>,
     bold: OnceLock<StyleChain>,
     italic: OnceLock<StyleChain>,
     bold_italic: OnceLock<StyleChain>,
@@ -150,7 +145,7 @@ impl FontManager {
         fc: Option<&Fontconfig>,
         bold: bool,
         italic: bool,
-        fallback_primary: &fontdue::Font,
+        fallback_primary: &Font,
     ) -> StyleChain {
         let primary_name = &self.families[0];
         let fallback_names = &self.families[1..];
@@ -207,8 +202,7 @@ impl FontManager {
 
         // 2. Compute metrics from the primary Regular font ('0' advance width & horizontal line metrics)
         let cell_width = primary_regular
-            .metrics('0', font_size)
-            .advance_width
+            .glyph_advance_width('0', font_size)
             .ceil()
             .max(1.0) as u32;
 
@@ -223,7 +217,7 @@ impl FontManager {
             .unwrap_or((font_size.ceil().max(1.0) as u32, font_size.ceil() as i32));
 
         // 3. User fallback regular slots maintain 1:1 index alignment with fallback_names.
-        let regular_slots: Vec<Option<fontdue::Font>> = fallback_names
+        let regular_slots: Vec<Option<Font>> = fallback_names
             .iter()
             .map(|name| {
                 let (path, index) = match_family(fc, name, false, false)?;
@@ -231,8 +225,7 @@ impl FontManager {
             })
             .collect();
 
-        let regular_fallbacks: Vec<fontdue::Font> =
-            regular_slots.iter().flatten().cloned().collect();
+        let regular_fallbacks: Vec<Font> = regular_slots.iter().flatten().cloned().collect();
 
         let regular = StyleChain {
             primary: primary_regular,
@@ -307,8 +300,7 @@ impl FontManager {
         let cell_width = self
             .regular
             .primary
-            .metrics('0', new_size)
-            .advance_width
+            .glyph_advance_width('0', new_size)
             .ceil()
             .max(1.0) as u32;
 
@@ -335,13 +327,13 @@ impl FontManager {
 
     /// Falls back to the regular face if a styled face cannot be loaded.
     #[must_use]
-    pub fn font_for_style(&self, flags: CellFlags) -> &fontdue::Font {
+    pub fn font_for_style(&self, flags: CellFlags) -> &Font {
         let style = style_index(flags) as u8;
         &self.chain_for_style(style).primary
     }
 
     #[cfg(test)]
-    pub(crate) fn regular(&self) -> &fontdue::Font {
+    pub(crate) fn regular(&self) -> &Font {
         &self.regular.primary
     }
 
@@ -400,7 +392,10 @@ impl FontManager {
     }
 
     /// Rasterizes a resolved glyph.
-    pub(crate) fn rasterize(&self, key: FaceKey) -> (fontdue::Metrics, Vec<u8>) {
+    pub(crate) fn rasterize(&self, key: FaceKey) -> RasterizedGlyph {
+        if key.glyph == 0 {
+            return RasterizedGlyph::empty();
+        }
         let chain = self.chain_for_style(key.style);
         let num_configured = (1 + chain.fallbacks.len()) as u16;
 
