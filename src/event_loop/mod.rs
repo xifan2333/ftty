@@ -113,8 +113,11 @@ impl AppState {
         config: Config,
         config_path: Option<PathBuf>,
     ) -> Result<Self, FttyError> {
-        let font_mgr =
-            FontManager::load_with_families(&config.font_families(), config.font_size())?;
+        let font_mgr = FontManager::load_with_families_and_subpixel(
+            &config.font_families(),
+            config.font_size(),
+            config.font_subpixel(),
+        )?;
         Self::with_font_and_config(terminal, pty, font_mgr, config, config_path)
     }
 

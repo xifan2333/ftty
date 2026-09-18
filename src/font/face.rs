@@ -17,7 +17,11 @@ fn ft_global_lock() -> MutexGuard<'static, ()> {
 
 fn ft_library() -> io::Result<&'static freetype::Library> {
     static LIB: OnceLock<Result<freetype::Library, String>> = OnceLock::new();
-    let res = LIB.get_or_init(|| freetype::Library::init().map_err(|e| format!("{e:?}")));
+    let res = LIB.get_or_init(|| {
+        let lib = freetype::Library::init().map_err(|e| format!("{e:?}"))?;
+        let _ = lib.set_lcd_filter(freetype::LcdFilter::LcdFilterDefault);
+        Ok(lib)
+    });
     match res {
         Ok(lib) => Ok(lib),
         Err(e) => Err(io::Error::other(format!(
@@ -177,15 +181,24 @@ impl Font {
         (font_size * 0.6).ceil().max(1.0)
     }
 
-    /// Rasterizes an indexed glyph on-demand into an 8-bit alpha mask, normalizing pitch to top-to-bottom.
+    /// Rasterizes an indexed glyph on-demand into an alpha mask or LCD subpixel bitmap, normalizing pitch to top-to-bottom.
     #[must_use]
-    pub fn rasterize_indexed(&self, glyph_index: u16, font_size: f32) -> RasterizedGlyph {
+    pub fn rasterize_indexed(
+        &self,
+        glyph_index: u16,
+        font_size: f32,
+        subpixel: bool,
+    ) -> RasterizedGlyph {
         let guard = self.inner.borrow();
         let Some(face) = &guard.face else {
             return RasterizedGlyph::empty();
         };
         Self::set_font_size(face, font_size);
-        let flags = LoadFlag::RENDER | LoadFlag::TARGET_LIGHT;
+        let flags = if subpixel {
+            LoadFlag::RENDER | LoadFlag::TARGET_LCD
+        } else {
+            LoadFlag::RENDER | LoadFlag::TARGET_LIGHT
+        };
         if face.load_glyph(glyph_index as u32, flags).is_err() {
             return RasterizedGlyph::empty();
         }
