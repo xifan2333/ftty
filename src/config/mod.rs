@@ -97,9 +97,17 @@ pub struct ScrollbackConfig {
     pub auto_scroll: Option<bool>,
 }
 
+/// Security policies controlling OSC 52 remote clipboard access.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub struct ClipboardConfig {
+    /// Whether applications running in the terminal are permitted to query/read the system clipboard.
+    ///
+    /// Defaults to `false` for security (preventing untrusted remote SSH processes from silently
+    /// exfiltrating local clipboard tokens or passwords).
     pub allow_osc52_read: Option<bool>,
+    /// Whether applications running in the terminal are permitted to set or clear the system clipboard.
+    ///
+    /// Defaults to `true` for standard terminal compatibility.
     pub allow_osc52_write: Option<bool>,
 }
 
