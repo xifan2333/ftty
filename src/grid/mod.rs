@@ -272,6 +272,52 @@ impl Grid {
         self.prompt_marks.insert(line);
     }
 
+    pub(crate) fn shift_region_marks_up(
+        &mut self,
+        top_row: usize,
+        bottom_row: usize,
+        count: usize,
+    ) {
+        if self.prompt_marks.is_empty() || count == 0 {
+            return;
+        }
+        let sb_len = self.scrollback.len();
+        let abs_top = sb_len + top_row;
+        let abs_bottom = sb_len + bottom_row;
+        let mut new_marks = BTreeSet::new();
+        for &mark in &self.prompt_marks {
+            if mark < abs_top || mark > abs_bottom {
+                new_marks.insert(mark);
+            } else if mark >= abs_top + count {
+                new_marks.insert(mark - count);
+            }
+        }
+        self.prompt_marks = new_marks;
+    }
+
+    pub(crate) fn shift_region_marks_down(
+        &mut self,
+        top_row: usize,
+        bottom_row: usize,
+        count: usize,
+    ) {
+        if self.prompt_marks.is_empty() || count == 0 {
+            return;
+        }
+        let sb_len = self.scrollback.len();
+        let abs_top = sb_len + top_row;
+        let abs_bottom = sb_len + bottom_row;
+        let mut new_marks = BTreeSet::new();
+        for &mark in &self.prompt_marks {
+            if mark < abs_top || mark > abs_bottom {
+                new_marks.insert(mark);
+            } else if mark + count <= abs_bottom {
+                new_marks.insert(mark + count);
+            }
+        }
+        self.prompt_marks = new_marks;
+    }
+
     /// Scrolls the viewport up to the previous semantic prompt boundary.
     pub fn scroll_to_prompt_prev(&mut self) {
         if self.is_alt_screen() || self.prompt_marks.is_empty() {
@@ -449,6 +495,9 @@ impl Grid {
             }
         }
 
+        if !is_full_screen {
+            self.shift_region_marks_up(self.scroll_region_top, self.scroll_region_bottom, count);
+        }
         self.lines[self.scroll_region_top..=self.scroll_region_bottom].rotate_left(count);
         for row in
             &mut self.lines[self.scroll_region_bottom + 1 - count..=self.scroll_region_bottom]
@@ -471,6 +520,7 @@ impl Grid {
             return;
         }
 
+        self.shift_region_marks_down(self.scroll_region_top, self.scroll_region_bottom, count);
         self.lines[self.scroll_region_top..=self.scroll_region_bottom].rotate_right(count);
         for row in &mut self.lines[self.scroll_region_top..self.scroll_region_top + count] {
             row.reset();
@@ -833,6 +883,7 @@ impl Grid {
             return;
         }
         let count = count.min(self.scroll_region_bottom - self.cursor.row + 1);
+        self.shift_region_marks_down(self.cursor.row, self.scroll_region_bottom, count);
         for _ in 0..count {
             self.lines.remove(self.scroll_region_bottom);
             self.lines.insert(self.cursor.row, Row::new(self.cols));
@@ -846,6 +897,7 @@ impl Grid {
             return;
         }
         let count = count.min(self.scroll_region_bottom - self.cursor.row + 1);
+        self.shift_region_marks_up(self.cursor.row, self.scroll_region_bottom, count);
         for _ in 0..count {
             self.lines.remove(self.cursor.row);
             self.lines

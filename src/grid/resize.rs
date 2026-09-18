@@ -130,12 +130,22 @@ impl Grid {
                 self.saved_cursor.row = self.saved_cursor.row.saturating_sub(from_top);
                 if !active_retains {
                     shift_placements(&mut self.placements, from_top);
+                    if from_top > 0 {
+                        let mut shifted = std::collections::BTreeSet::new();
+                        for &m in &self.prompt_marks {
+                            if m >= from_top {
+                                shifted.insert(m - from_top);
+                            }
+                        }
+                        self.prompt_marks = shifted;
+                    }
                 }
             }
 
             let bottom_line = self.scrollback.len() + new_rows;
             self.placements.retain(|p| p.line < bottom_line);
             self.alt_placements.retain(|p| p.line < bottom_line);
+            self.prompt_marks.retain(|&m| m < bottom_line);
         }
 
         self.cols = new_cols;
