@@ -132,7 +132,7 @@ impl AppState {
         config: Config,
         config_path: Option<PathBuf>,
     ) -> Result<Self, FttyError> {
-        let atlas = GlyphAtlas::new(1024, 1024);
+        let atlas = GlyphAtlas::default();
         let palette = config.build_palette();
         let default_fg = config.foreground();
         let default_bg = config.background();
