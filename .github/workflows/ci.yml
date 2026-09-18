@@ -45,5 +45,18 @@ jobs:
       - name: Build release binary
         run: cargo build --release --verbose
 
+      - name: Strip release binary
+        run: strip target/release/ftty
+
       - name: Run tests
         run: cargo test --verbose
+
+      - name: Package release artifact
+        run: tar -czf ftty-linux-x86_64.tar.gz -C target/release ftty
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ftty-linux-x86_64
+          path: ftty-linux-x86_64.tar.gz
+          if-no-files-found: error
