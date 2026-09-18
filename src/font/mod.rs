@@ -1,6 +1,7 @@
 //! Font loading, multi-family fallback chaining, and dynamic text metrics calculation.
 
 pub mod atlas;
+pub(crate) mod cache;
 pub(crate) mod face;
 pub(crate) mod fallback;
 
@@ -197,14 +198,41 @@ impl FontManager {
                 format!("font size must be between {MIN_FONT_SIZE} and {MAX_FONT_SIZE}"),
             ));
         }
-        let fc = fontconfig()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "fontconfig not available"))?;
-
         let valid_families: Vec<String> = if families.is_empty() {
             vec!["monospace".to_string()]
         } else {
             families.to_vec()
         };
+
+        if let Some(cached) = cache::try_load_cache(&valid_families, font_size, subpixel)
+            && let Ok(primary_regular) = load_font_file(&cached.primary.path, cached.primary.index)
+        {
+            let regular_slots: Vec<Option<Font>> = cached
+                .fallbacks
+                .iter()
+                .map(|f| load_font_file(&f.path, f.index).ok())
+                .collect();
+            let regular_fallbacks: Vec<Font> = regular_slots.iter().flatten().cloned().collect();
+            let regular = StyleChain {
+                primary: primary_regular,
+                fallbacks: regular_fallbacks,
+            };
+            return Ok(Self {
+                regular: regular.clone(),
+                regular_slots,
+                chains: RefCell::new([Some(regular), None, None, None]),
+                fallbacks: RefCell::new(FallbackCache::default()),
+                families: valid_families,
+                primary_path: cached.primary.path,
+                primary_index: cached.primary.index,
+                font_size,
+                subpixel,
+                metrics: cached.metrics,
+            });
+        }
+
+        let fc = fontconfig()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "fontconfig not available"))?;
 
         let primary_name = &valid_families[0];
         let fallback_names = &valid_families[1..];
@@ -240,15 +268,27 @@ impl FontManager {
             });
 
         // 3. User fallback regular slots maintain 1:1 index alignment with fallback_names.
+        let mut fallback_entries = Vec::with_capacity(fallback_names.len());
         let regular_slots: Vec<Option<Font>> = fallback_names
             .iter()
             .map(|name| {
                 let (path, index) = match_family(fc, name, false, false)?;
+                fallback_entries.push((path.clone(), index));
                 load_font_file(&path, index).ok()
             })
             .collect();
 
         let regular_fallbacks: Vec<Font> = regular_slots.iter().flatten().cloned().collect();
+
+        cache::save_cache(
+            &valid_families,
+            font_size,
+            subpixel,
+            &primary_path,
+            primary_index,
+            metrics,
+            &fallback_entries,
+        );
 
         let regular = StyleChain {
             primary: primary_regular,
