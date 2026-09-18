@@ -11,7 +11,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use fontconfig::Fontconfig;
 
-use crate::font::fallback::{FallbackCache, fontconfig, load_font_file, match_family};
+use crate::font::fallback::{
+    FallbackCache, FallbackFace, MAX_FALLBACK_FACES, fontconfig, load_font_file, match_family,
+    query_fontconfig_candidates,
+};
 use crate::grid::CellFlags;
 
 pub use atlas::{CachedGlyph, GlyphAtlas, MAX_ATLAS_SIZE};
@@ -194,11 +197,35 @@ impl FontManager {
         std::thread::Builder::new()
             .name("font-prewarm".to_string())
             .spawn(move || {
-                let mut cache = fallbacks_prewarm
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let _ = cache.resolve('中', 0, &preferred);
-                let _ = cache.resolve('中', 1, &preferred);
+                let Some(fc) = fontconfig() else {
+                    return;
+                };
+                for style in [0u8, 1u8] {
+                    let bold = (style & 1) != 0;
+                    if let Some(candidates) =
+                        query_fontconfig_candidates(fc, &preferred, bold, false, '中')
+                    {
+                        for (path, index) in candidates.into_iter().take(1) {
+                            if let Ok(font) = load_font_file(&path, index) {
+                                let mut cache = fallbacks_prewarm
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                if cache.faces.len() < MAX_FALLBACK_FACES
+                                    && !cache.faces.iter().any(|f| {
+                                        f.path == path && f.index == index && f.style == style
+                                    })
+                                {
+                                    cache.faces.push(FallbackFace {
+                                        path,
+                                        index,
+                                        style,
+                                        font,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
             })
             .ok();
 
