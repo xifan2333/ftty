@@ -100,17 +100,64 @@ fn test_window_state_as_str() {
 }
 
 #[test]
-fn test_stashed_floating_size_initialization() {
-    let term = Terminal::new(80, 24, 100);
-    let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).unwrap();
-    let app = AppState::new(term, pty).unwrap();
+fn test_xdg_toplevel_configure_sizing_behavior() {
+    use wayland_protocols::xdg::shell::client::xdg_toplevel::{Event, XdgToplevel};
 
-    assert!(app.wayland.stashed_floating_size.is_some());
-    let [w, h] = app.wayland.stashed_floating_size.unwrap();
-    assert_eq!(w, app.wayland.width);
-    assert_eq!(h, app.wayland.height);
-    assert!(w >= 720);
-    assert!(h >= 400);
+    let (client, server) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+    let conn = Connection::from_socket(client).expect("conn");
+    let queue = conn.new_event_queue::<AppState>();
+    let qh = queue.handle();
+    let registry = conn.display().get_registry(&qh, ());
+    let term = Terminal::new(80, 24, 100);
+    let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
+    let mut app = AppState::new(term, pty).expect("app");
+
+    let comp =
+        registry.bind::<wayland_client::protocol::wl_compositor::WlCompositor, _, _>(1, 4, &qh, ());
+    app.wayland.compositor = Some(comp);
+    let xdg = registry.bind::<wayland_protocols::xdg::shell::client::xdg_wm_base::XdgWmBase, _, _>(
+        2,
+        1,
+        &qh,
+        (),
+    );
+    app.wayland.xdg_wm_base = Some(xdg);
+    app.wayland.init_window(&qh);
+    let toplevel = app.wayland.xdg_toplevel.clone().expect("toplevel");
+
+    // 1. Positive configure event dispatched through production handler schedules 1351x735
+    <AppState as wayland_client::Dispatch<XdgToplevel, ()>>::event(
+        &mut app,
+        &toplevel,
+        Event::Configure {
+            width: 1351,
+            height: 735,
+            states: Vec::new(),
+        },
+        &(),
+        &conn,
+        &qh,
+    );
+    assert_eq!(app.pending_size, Some([1351, 735]));
+
+    // 2. Zero-sized configure event supersedes queued size and preserves active dimensions
+    <AppState as wayland_client::Dispatch<XdgToplevel, ()>>::event(
+        &mut app,
+        &toplevel,
+        Event::Configure {
+            width: 0,
+            height: 0,
+            states: Vec::new(),
+        },
+        &(),
+        &conn,
+        &qh,
+    );
+    assert_eq!(
+        app.pending_size,
+        Some([app.wayland.width, app.wayland.height])
+    );
+    drop(server);
 }
 
 #[test]
