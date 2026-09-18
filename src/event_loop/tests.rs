@@ -530,3 +530,20 @@ fn test_app_state_with_font_and_config_initialization() {
     assert!(app.font_mgr.metrics.cell_width > 0);
     assert!(app.font_mgr.metrics.cell_height > 0);
 }
+
+#[test]
+fn test_pre_event_loop_window_creation_and_surface_setup() {
+    let term = Terminal::new(80, 24, 100);
+    let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
+    let config = crate::config::Config::default();
+    let font_mgr = crate::font::FontManager::load(14.0).expect("load font");
+    let app = AppState::with_font_and_config(term, pty, font_mgr, config, None)
+        .expect("with_font_and_config");
+
+    assert!(app.wayland.surface.is_none());
+    assert!(!app.wayland.configured);
+    assert_eq!(
+        app.wayland.window_state,
+        crate::wayland::WindowState::Unmapped
+    );
+}

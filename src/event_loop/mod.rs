@@ -225,12 +225,14 @@ impl AppState {
 ///
 /// # Errors
 /// Returns [`FttyError`] if Wayland connection, calloop initialization, or event dispatching fails.
-pub fn run_event_loop(app_state: AppState) -> Result<(), FttyError> {
+pub fn run_event_loop(mut app_state: AppState) -> Result<(), FttyError> {
     let conn = Connection::connect_to_env().map_err(|e| WaylandError::Connection(e.to_string()))?;
-    let event_queue = conn.new_event_queue();
+    let mut event_queue = conn.new_event_queue();
     let qh = event_queue.handle();
     let display = conn.display();
     display.get_registry(&qh, ());
+    let _ = conn.flush();
+    let _ = event_queue.roundtrip(&mut app_state);
     let _ = conn.flush();
     run_event_loop_with_connection(app_state, conn, event_queue)
 }

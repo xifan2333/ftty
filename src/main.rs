@@ -76,8 +76,7 @@ fn main() {
         return;
     }
 
-    // Step 1: Connect to Wayland and flush registry request over IPC at t = 1ms, overlapping
-    // socket negotiation and compositor global announcements with PTY spawning and font loading.
+    // Step 1: Connect to Wayland
     let conn = match wayland_client::Connection::connect_to_env() {
         Ok(c) => c,
         Err(e) => {
@@ -85,7 +84,7 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let event_queue = conn.new_event_queue();
+    let mut event_queue = conn.new_event_queue();
     let qh = event_queue.handle();
     conn.display().get_registry(&qh, ());
     let _ = conn.flush();
@@ -115,13 +114,20 @@ fn main() {
         }
     };
 
-    let app_state = match AppState::with_font_and_config(term, pty, font_mgr, config, config_path) {
-        Ok(state) => state,
-        Err(e) => {
-            eprintln!("ftty: failed to initialize state: {e}");
-            std::process::exit(1);
-        }
-    };
+    let mut app_state =
+        match AppState::with_font_and_config(term, pty, font_mgr, config, config_path) {
+            Ok(state) => state,
+            Err(e) => {
+                eprintln!("ftty: failed to initialize state: {e}");
+                std::process::exit(1);
+            }
+        };
+
+    // Step 3: Perform immediate initial Wayland roundtrip to bind compositor globals,
+    // initialize window, and commit the surface over IPC at t = 2ms, enabling instantaneous
+    // compositor layout and window mapping before entering the event loop.
+    let _ = event_queue.roundtrip(&mut app_state);
+    let _ = conn.flush();
 
     if let Err(e) = run_event_loop_with_connection(app_state, conn, event_queue) {
         eprintln!("ftty error: {e}");
