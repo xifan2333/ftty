@@ -13,13 +13,16 @@ pub mod grid;
 pub mod input;
 pub mod kitty;
 pub mod parser;
-// Audited FFI boundaries: EGL/OpenGL and the PTY ioctl wrappers.
+// Audited FFI boundaries: EGL/OpenGL, POSIX PTY, and GNU allocator tuning.
+#[allow(unsafe_code)]
+pub mod alloc;
 #[allow(unsafe_code)]
 pub mod pty;
 #[allow(unsafe_code)]
 pub mod render;
 pub mod wayland;
 
+pub use alloc::trim_memory;
 pub use color::{Color, Rgb, default_256_palette};
 pub use config::Config;
 pub use error::{

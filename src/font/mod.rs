@@ -17,7 +17,7 @@ use fontconfig::Fontconfig;
 use crate::font::fallback::{FallbackCache, fontconfig, load_font_file, match_family};
 use crate::grid::CellFlags;
 
-pub use atlas::{CachedGlyph, GlyphAtlas, MAX_ATLAS_SIZE};
+pub use atlas::{CachedGlyph, GlyphAtlas, INITIAL_ATLAS_SIZE, MAX_ATLAS_SIZE};
 pub use face::{Font, LineMetrics, RasterizedGlyph};
 
 /// Cell size and baseline alignment metrics for the active font and font size.

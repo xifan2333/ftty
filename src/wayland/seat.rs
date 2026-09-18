@@ -262,7 +262,7 @@ impl Dispatch<WlPointer, ()> for AppState {
                     let cell = state.terminal.grid.visible_line(screen_row).cells.get(col);
                     if let Some(cell) = cell
                         && let Some(id) = cell.hyperlink_id
-                        && let Some(url) = state.terminal.hyperlink_url(id)
+                        && let Some(url) = state.terminal.hyperlink_url(id.get())
                     {
                         let url_owned = url.to_string();
                         std::thread::spawn(move || {
@@ -445,8 +445,7 @@ impl AppState {
             let row = self.terminal.grid.visible_line(screen_row);
             if let Some(cell) = row.cells.get(col)
                 && let Some(id) = cell.hyperlink_id
-                && id > 0
-                && self.terminal.hyperlink_url(id).is_some()
+                && self.terminal.hyperlink_url(id.get()).is_some()
             {
                 let mut start_col = col;
                 while start_col > 0

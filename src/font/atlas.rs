@@ -6,6 +6,7 @@ use crate::font::{FontManager, RasterizedGlyph, style_index};
 use crate::grid::CellFlags;
 
 pub const MAX_ATLAS_SIZE: u32 = 2048;
+pub const INITIAL_ATLAS_SIZE: u32 = 512;
 
 /// Pixel coordinates stay valid when the atlas grows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +64,12 @@ pub struct GlyphAtlas {
     pub(crate) ascii_cache: [Option<CachedGlyph>; 128 * 4],
     // Fallback O(1) cache for non-ASCII characters directly keyed by (char, style_index).
     pub(crate) cache: HashMap<(char, u8), CachedGlyph>,
+}
+
+impl Default for GlyphAtlas {
+    fn default() -> Self {
+        Self::new(INITIAL_ATLAS_SIZE, INITIAL_ATLAS_SIZE)
+    }
 }
 
 impl GlyphAtlas {

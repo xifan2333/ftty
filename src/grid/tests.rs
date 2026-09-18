@@ -921,3 +921,8 @@ fn test_ascii_fast_path_writing_and_wrapping() {
     assert_eq!(grid.cursor.row, 1);
     assert_eq!(grid.cursor.col, 3);
 }
+
+#[test]
+fn test_cell_memory_footprint() {
+    assert!(std::mem::size_of::<crate::grid::Cell>() <= 24);
+}

@@ -424,10 +424,10 @@ fn test_update_hover_state_and_pointer_shape() {
 
     // Cells at cols 4..=6 have hyperlink ID 1
     for col in 4..=6 {
-        app.terminal.grid.lines[0].cells[col].hyperlink_id = Some(1);
+        app.terminal.grid.lines[0].cells[col].set_hyperlink_id(Some(1));
     }
     // Cell at col 8 has hyperlink ID 0 (invalid/exhausted sentinel)
-    app.terminal.grid.lines[0].cells[8].hyperlink_id = Some(0);
+    app.terminal.grid.lines[0].cells[8].set_hyperlink_id(Some(0));
 
     let cw = f64::from(app.font_mgr.metrics.cell_width);
     let ch = f64::from(app.font_mgr.metrics.cell_height);

@@ -521,6 +521,7 @@ impl Grid {
         underline_color: Color,
         hyperlink_id: Option<u32>,
     ) {
+        let hl_id = hyperlink_id.and_then(std::num::NonZeroU32::new);
         let mut rest = text;
         while !rest.is_empty() {
             if self.cursor.col >= self.cols {
@@ -551,7 +552,7 @@ impl Grid {
                     bg,
                     underline_color,
                     flags,
-                    hyperlink_id,
+                    hyperlink_id: hl_id,
                 };
             }
             if let Some(coords) = &mut row_line.placeholders {
@@ -574,6 +575,7 @@ impl Grid {
         underline_color: Color,
         hyperlink_id: Option<u32>,
     ) {
+        let hl_id = hyperlink_id.and_then(std::num::NonZeroU32::new);
         if c.is_ascii() && c >= ' ' {
             let col = self.cursor.col;
             let row = self.cursor.row;
@@ -584,7 +586,7 @@ impl Grid {
                     bg,
                     underline_color,
                     flags,
-                    hyperlink_id,
+                    hyperlink_id: hl_id,
                 };
                 if !self.lines[row].dirty.get() {
                     self.lines[row].dirty.set(true);
@@ -649,7 +651,7 @@ impl Grid {
             bg,
             underline_color,
             flags: cell_flags,
-            hyperlink_id,
+            hyperlink_id: hl_id,
         };
         self.lines[row].dirty.set(true);
 
@@ -678,7 +680,7 @@ impl Grid {
                 bg,
                 underline_color,
                 flags: flags | CellFlags::WIDE_CHAR_SPACER,
-                hyperlink_id,
+                hyperlink_id: hl_id,
             };
         }
 

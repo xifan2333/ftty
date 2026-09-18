@@ -79,6 +79,9 @@ pub struct AppState {
     pub(crate) sync_output_start: Option<std::time::Instant>,
     pub(crate) last_sync_gen: u64,
     pub(crate) pty_registered: bool,
+    pub(crate) last_activity: std::time::Instant,
+    pub(crate) last_trim: std::time::Instant,
+    pub(crate) pending_trim: bool,
 }
 
 impl AppState {
@@ -132,7 +135,7 @@ impl AppState {
         config: Config,
         config_path: Option<PathBuf>,
     ) -> Result<Self, FttyError> {
-        let atlas = GlyphAtlas::new(1024, 1024);
+        let atlas = GlyphAtlas::default();
         let palette = config.build_palette();
         let default_fg = config.foreground();
         let default_bg = config.background();
@@ -215,6 +218,9 @@ impl AppState {
             sync_output_start: None,
             last_sync_gen: 0,
             pty_registered: false,
+            last_activity: std::time::Instant::now(),
+            last_trim: std::time::Instant::now(),
+            pending_trim: false,
         })
     }
 
@@ -379,6 +385,8 @@ pub fn run_event_loop_with_connection(
 
                     if total_read > 0 {
                         state.needs_redraw = true;
+                        state.last_activity = std::time::Instant::now();
+                        state.pending_trim = true;
                         state.update_ime_cursor_area();
                     }
                     Ok(calloop::PostAction::Continue)
@@ -452,11 +460,22 @@ pub fn run_event_loop_with_connection(
             app_state.needs_redraw = false;
         }
 
+        if app_state.pending_trim
+            && app_state.last_activity.elapsed() >= std::time::Duration::from_secs(3)
+            && app_state.last_trim.elapsed() >= std::time::Duration::from_secs(10)
+        {
+            app_state.pending_trim = false;
+            app_state.last_trim = std::time::Instant::now();
+            crate::alloc::trim_memory();
+        }
+
         let _ = conn.flush();
     }
 
     app_state.render_error.map_or(Ok(()), Err)
 }
+
+pub use crate::alloc::trim_memory;
 
 #[cfg(test)]
 mod tests;
