@@ -61,7 +61,7 @@ pub(crate) fn style_index(flags: CellFlags) -> usize {
 
 /// Loads configured font chain and on-demand fallback faces with cell metrics calculation.
 pub struct FontManager {
-    regular: StyleChain,
+    regular: Option<StyleChain>,
     regular_slots: Vec<Option<fontdue::Font>>,
     bold: OnceLock<StyleChain>,
     italic: OnceLock<StyleChain>,
@@ -73,24 +73,28 @@ pub struct FontManager {
 }
 
 impl FontManager {
-    fn chain_for_style(&self, style: u8) -> &StyleChain {
-        match style {
-            0 => &self.regular,
+    fn chain_for_style(&self, style: u8) -> Option<&StyleChain> {
+        let regular = self.regular.as_ref()?;
+        Some(match style {
+            0 => regular,
             1 => self.bold.get_or_init(|| {
                 let fc = fontconfig();
-                self.load_styled_chain(fc, true, false, &self.regular.primary)
+                self.load_styled_chain(fc, true, false, &regular.primary)
             }),
             2 => self.italic.get_or_init(|| {
                 let fc = fontconfig();
-                self.load_styled_chain(fc, false, true, &self.regular.primary)
+                self.load_styled_chain(fc, false, true, &regular.primary)
             }),
             3 => self.bold_italic.get_or_init(|| {
                 let fc = fontconfig();
-                let bold_chain = self.chain_for_style(1);
-                self.load_styled_chain(fc, true, true, &bold_chain.primary)
+                let fallback = self
+                    .chain_for_style(1)
+                    .map(|b| &b.primary)
+                    .unwrap_or(&regular.primary);
+                self.load_styled_chain(fc, true, true, fallback)
             }),
-            _ => &self.regular,
-        }
+            _ => regular,
+        })
     }
 
     fn load_styled_chain(
@@ -220,7 +224,7 @@ impl FontManager {
             .ok();
 
         Ok(Self {
-            regular,
+            regular: Some(regular),
             regular_slots,
             bold: OnceLock::new(),
             italic: OnceLock::new(),
@@ -234,6 +238,40 @@ impl FontManager {
                 ascent,
             },
         })
+    }
+
+    /// Constructs an uninitialized `FontManager` with approximate metrics before font parsing completes.
+    #[must_use]
+    pub fn uninitialized(families: &[String], font_size: f32) -> Self {
+        let valid_families = if families.is_empty() {
+            vec!["monospace".to_string()]
+        } else {
+            families.to_vec()
+        };
+        let cw = (font_size * 0.6).ceil().max(1.0) as u32;
+        let ch = (font_size * 1.2).ceil().max(1.0) as u32;
+        let ascent = (font_size * 0.8).ceil() as i32;
+        Self {
+            regular: None,
+            regular_slots: Vec::new(),
+            bold: OnceLock::new(),
+            italic: OnceLock::new(),
+            bold_italic: OnceLock::new(),
+            fallbacks: Arc::new(Mutex::new(FallbackCache::default())),
+            families: valid_families,
+            font_size,
+            metrics: CellMetrics {
+                cell_width: cw,
+                cell_height: ch,
+                ascent,
+            },
+        }
+    }
+
+    /// Returns `true` if the primary font face has been loaded and initialized.
+    #[must_use]
+    pub fn is_loaded(&self) -> bool {
+        self.regular.is_some()
     }
 
     /// Discovers and loads a font face by family name and size in pixels per em.
@@ -284,45 +322,57 @@ impl FontManager {
         }
         self.font_size = new_size;
 
-        let cell_width = self
-            .regular
-            .primary
-            .metrics('0', new_size)
-            .advance_width
-            .ceil()
-            .max(1.0) as u32;
+        if let Some(regular) = &self.regular {
+            let cell_width = regular
+                .primary
+                .metrics('0', new_size)
+                .advance_width
+                .ceil()
+                .max(1.0) as u32;
 
-        let (cell_height, ascent) = self
-            .regular
-            .primary
-            .horizontal_line_metrics(new_size)
-            .map(|line| {
-                (
-                    line.new_line_size.ceil().max(1.0) as u32,
-                    line.ascent.ceil() as i32,
-                )
-            })
-            .unwrap_or((new_size.ceil().max(1.0) as u32, new_size.ceil() as i32));
+            let (cell_height, ascent) = regular
+                .primary
+                .horizontal_line_metrics(new_size)
+                .map(|line| {
+                    (
+                        line.new_line_size.ceil().max(1.0) as u32,
+                        line.ascent.ceil() as i32,
+                    )
+                })
+                .unwrap_or((new_size.ceil().max(1.0) as u32, new_size.ceil() as i32));
 
-        self.metrics = CellMetrics {
-            cell_width,
-            cell_height,
-            ascent,
-        };
+            self.metrics = CellMetrics {
+                cell_width,
+                cell_height,
+                ascent,
+            };
+        } else {
+            let cw = (new_size * 0.6).ceil().max(1.0) as u32;
+            let ch = (new_size * 1.2).ceil().max(1.0) as u32;
+            let ascent = (new_size * 0.8).ceil() as i32;
+            self.metrics = CellMetrics {
+                cell_width: cw,
+                cell_height: ch,
+                ascent,
+            };
+        }
 
         true
     }
 
     /// Falls back to the regular face if a styled face cannot be loaded.
     #[must_use]
-    pub fn font_for_style(&self, flags: CellFlags) -> &fontdue::Font {
+    pub fn font_for_style(&self, flags: CellFlags) -> Option<&fontdue::Font> {
         let style = style_index(flags) as u8;
-        &self.chain_for_style(style).primary
+        self.chain_for_style(style).map(|c| &c.primary)
     }
 
     #[cfg(test)]
     pub(crate) fn regular(&self) -> &fontdue::Font {
-        &self.regular.primary
+        &self
+            .chain_for_style(0)
+            .expect("test font must be loaded")
+            .primary
     }
 
     fn lock_fallbacks(&self) -> std::sync::MutexGuard<'_, FallbackCache> {
@@ -336,7 +386,13 @@ impl FontManager {
     /// Glyph index `0` is `.notdef`, so a zero index means "no face has this glyph".
     pub(crate) fn face_key(&self, c: char, flags: CellFlags) -> FaceKey {
         let style = style_index(flags) as u8;
-        let chain = self.chain_for_style(style);
+        let Some(chain) = self.chain_for_style(style) else {
+            return FaceKey {
+                face: 0,
+                glyph: 0,
+                style,
+            };
+        };
 
         // Tier 1: Primary font for this style
         let glyph = chain.primary.lookup_glyph_index(c);
@@ -381,7 +437,9 @@ impl FontManager {
 
     /// Rasterizes a resolved glyph.
     pub(crate) fn rasterize(&self, key: FaceKey) -> (fontdue::Metrics, Vec<u8>) {
-        let chain = self.chain_for_style(key.style);
+        let Some(chain) = self.chain_for_style(key.style) else {
+            return (fontdue::Metrics::default(), Vec::new());
+        };
         let num_configured = (1 + chain.fallbacks.len()) as u16;
 
         if key.face == 0 {

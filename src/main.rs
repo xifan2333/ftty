@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use ftty::{AppState, Config, Pty, Terminal, run_event_loop};
+use ftty::{AppState, Config, Pty, Terminal, run_event_loop_with_connection};
 
 fn print_help() {
     println!(
@@ -64,6 +64,46 @@ fn main() {
         }
     };
 
+    let has_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty())
+        || std::env::var_os("WAYLAND_SOCKET").is_some_and(|v| !v.is_empty());
+
+    if !has_wayland {
+        println!(
+            "ftty v{} - Minimalist Wayland Terminal Emulator",
+            env!("CARGO_PKG_VERSION")
+        );
+        println!("No active Wayland compositor detected. Core initialized successfully.");
+        return;
+    }
+
+    // Step 1: Connect to Wayland and flush registry request over IPC at t = 1ms, overlapping
+    // socket negotiation and compositor global announcements with PTY spawning and font loading.
+    let conn = match wayland_client::Connection::connect_to_env() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("ftty: failed to connect to Wayland: {e}");
+            std::process::exit(1);
+        }
+    };
+    let event_queue = conn.new_event_queue();
+    let qh = event_queue.handle();
+    conn.display().get_registry(&qh, ());
+    let _ = conn.flush();
+
+    // Step 2: Concurrently spawn font loader thread and PTY child process
+    let font_families = config.font_families();
+    let font_size = config.font_size();
+    let font_worker = match std::thread::Builder::new()
+        .name("font-loader".to_string())
+        .spawn(move || ftty::FontManager::load_with_families(&font_families, font_size))
+    {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("ftty: failed to spawn font loader thread: {e}");
+            std::process::exit(1);
+        }
+    };
+
     let cols = config.columns();
     let rows = config.rows();
 
@@ -79,27 +119,15 @@ fn main() {
         }
     };
 
-    let app_state = match AppState::with_loaded_config(term, pty, config, config_path) {
+    let app_state = match AppState::with_font_worker(term, pty, font_worker, config, config_path) {
         Ok(state) => state,
         Err(e) => {
-            eprintln!("ftty: failed to initialize font or state: {e}");
+            eprintln!("ftty: failed to initialize state: {e}");
             std::process::exit(1);
         }
     };
 
-    let has_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty())
-        || std::env::var_os("WAYLAND_SOCKET").is_some_and(|v| !v.is_empty());
-
-    if !has_wayland {
-        println!(
-            "ftty v{} - Minimalist Wayland Terminal Emulator",
-            env!("CARGO_PKG_VERSION")
-        );
-        println!("No active Wayland compositor detected. Core initialized successfully.");
-        return;
-    }
-
-    if let Err(e) = run_event_loop(app_state) {
+    if let Err(e) = run_event_loop_with_connection(app_state, conn, event_queue) {
         eprintln!("ftty error: {e}");
         std::process::exit(1);
     }

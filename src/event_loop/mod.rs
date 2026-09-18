@@ -41,6 +41,7 @@ pub struct AppState {
     pub keyboard: KeyboardHandler,
     pub wayland: WaylandState,
     pub font_mgr: FontManager,
+    pub(crate) font_worker: Option<std::thread::JoinHandle<io::Result<FontManager>>>,
     pub atlas: GlyphAtlas,
     pub ime: ImeState,
     pub kitty_parser: KittyParser,
@@ -79,6 +80,7 @@ pub struct AppState {
     pub(crate) render_error: Option<FttyError>,
     pub(crate) sync_output_start: Option<std::time::Instant>,
     pub(crate) last_sync_gen: u64,
+    pub(crate) pty_registered: bool,
 }
 
 impl AppState {
@@ -108,13 +110,27 @@ impl AppState {
     /// # Errors
     /// Returns [`FttyError`] if font discovery fails.
     pub fn with_loaded_config(
-        mut terminal: Terminal,
+        terminal: Terminal,
         pty: Pty,
         config: Config,
         config_path: Option<PathBuf>,
     ) -> Result<Self, FttyError> {
         let font_mgr =
             FontManager::load_with_families(&config.font_families(), config.font_size())?;
+        Self::with_font_and_config(terminal, pty, font_mgr, config, config_path)
+    }
+
+    /// Creates a new `AppState` with terminal, PTY, pre-loaded font manager, configuration, and optional configuration path.
+    ///
+    /// # Errors
+    /// Returns [`FttyError`] if PTY resizing fails.
+    pub fn with_font_and_config(
+        mut terminal: Terminal,
+        pty: Pty,
+        font_mgr: FontManager,
+        config: Config,
+        config_path: Option<PathBuf>,
+    ) -> Result<Self, FttyError> {
         let mut atlas = GlyphAtlas::new(1024, 1024);
         for c in ' '..='~' {
             let _ = atlas.get_or_insert(c, CellFlags::empty(), &font_mgr);
@@ -201,7 +217,39 @@ impl AppState {
             render_error: None,
             sync_output_start: None,
             last_sync_gen: 0,
+            pty_registered: false,
+            font_worker: None,
         })
+    }
+
+    /// Creates a new `AppState` with an asynchronous font loader worker handle,
+    /// deferring font synchronization until renderer configuration.
+    ///
+    /// # Errors
+    /// Returns [`FttyError`] if PTY initialization fails.
+    pub fn with_font_worker(
+        terminal: Terminal,
+        pty: Pty,
+        font_worker: std::thread::JoinHandle<io::Result<FontManager>>,
+        config: Config,
+        config_path: Option<PathBuf>,
+    ) -> Result<Self, FttyError> {
+        let uninit_font = FontManager::uninitialized(&config.font_families(), config.font_size());
+        let mut state =
+            Self::with_font_and_config(terminal, pty, uninit_font, config, config_path)?;
+        state.font_worker = Some(font_worker);
+        Ok(state)
+    }
+
+    pub(crate) fn ensure_font_loaded(&mut self) -> Result<(), FttyError> {
+        if let Some(worker) = self.font_worker.take() {
+            let loaded = worker
+                .join()
+                .map_err(|_| WaylandError::Dispatch("font worker panicked".to_string()))?
+                .map_err(FttyError::from)?;
+            self.font_mgr = loaded;
+        }
+        Ok(())
     }
 }
 
@@ -213,14 +261,26 @@ impl AppState {
 ///
 /// # Errors
 /// Returns [`FttyError`] if Wayland connection, calloop initialization, or event dispatching fails.
-pub fn run_event_loop(mut app_state: AppState) -> Result<(), FttyError> {
+pub fn run_event_loop(app_state: AppState) -> Result<(), FttyError> {
     let conn = Connection::connect_to_env().map_err(|e| WaylandError::Connection(e.to_string()))?;
-
     let event_queue = conn.new_event_queue();
     let qh = event_queue.handle();
-
     let display = conn.display();
     display.get_registry(&qh, ());
+    let _ = conn.flush();
+    run_event_loop_with_connection(app_state, conn, event_queue)
+}
+
+/// Runs the unified calloop event loop with an existing Wayland connection and event queue.
+///
+/// # Errors
+/// Returns [`FttyError`] if calloop initialization or event dispatching fails.
+pub fn run_event_loop_with_connection(
+    mut app_state: AppState,
+    conn: Connection,
+    event_queue: wayland_client::EventQueue<AppState>,
+) -> Result<(), FttyError> {
+    let qh = event_queue.handle();
 
     let mut event_loop: EventLoop<AppState> =
         EventLoop::try_new().map_err(|e| WaylandError::Dispatch(e.to_string()))?;
@@ -234,67 +294,7 @@ pub fn run_event_loop(mut app_state: AppState) -> Result<(), FttyError> {
         })
         .map_err(|e| WaylandError::Dispatch(e.to_string()))?;
 
-    // 2. PTY Master Read Event Source
-    let pty_master = app_state.pty.try_clone_master()?;
-    let pty_source = Generic::new(pty_master, Interest::READ, Mode::Level);
-    event_loop
-        .handle()
-        .insert_source(pty_source, |_event, _fd, state: &mut AppState| {
-            let mut buf = [0u8; 65536];
-            let mut total_read = 0;
-            loop {
-                match state.pty.read(&mut buf) {
-                    Ok(n) if n > 0 => {
-                        total_read += n;
-                        let incoming = &buf[..n];
-                        if state.kitty_parser.is_fast_path(incoming) {
-                            state.process_terminal_output(incoming, &qh);
-                        } else {
-                            let (clean_text, events) = state.kitty_parser.filter_bytes(incoming);
-                            for event in &events {
-                                if let KittyEvent::Response(resp) = event {
-                                    state.write_pty_blocking(resp);
-                                }
-                            }
-                            state.process_terminal_output(&clean_text, &qh);
-                            for event in events {
-                                if !matches!(event, KittyEvent::Response(_)) {
-                                    state.handle_kitty_event(event);
-                                }
-                            }
-                        }
-
-                        // Rule 3332946: Synchronize Kitty keyboard flags directly on every PTY read iteration,
-                        // ensuring state alignment even if the chunk contained only filtered graphics events.
-                        state.keyboard.kitty_flags = state.terminal.kitty_keyboard_flags;
-
-                        if total_read >= 65536 {
-                            break;
-                        }
-                    }
-                    Ok(_) => {
-                        // EOF on PTY master
-                        state.running = false;
-                        return Ok(calloop::PostAction::Reregister);
-                    }
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                    Err(_) => {
-                        // Child process likely exited (EIO on Linux PTY)
-                        state.running = false;
-                        return Ok(calloop::PostAction::Reregister);
-                    }
-                }
-            }
-
-            if total_read > 0 {
-                state.needs_redraw = true;
-                state.update_ime_cursor_area();
-            }
-            Ok(calloop::PostAction::Continue)
-        })
-        .map_err(|e| WaylandError::Dispatch(e.to_string()))?;
-
-    // 3. POSIX Signals Event Source
+    // 2. POSIX Signals Event Source
     let signals = Signals::new(&[
         Signal::SIGCHLD,
         Signal::SIGINT,
@@ -322,7 +322,7 @@ pub fn run_event_loop(mut app_state: AppState) -> Result<(), FttyError> {
         })
         .map_err(|e| WaylandError::Dispatch(e.to_string()))?;
 
-    // 4. Main Event Loop Tick
+    // 3. Main Event Loop Tick
     while app_state.running {
         let dispatch_timeout = if app_state.terminal.synchronized_output {
             Some(std::time::Duration::from_millis(50))
@@ -346,6 +346,68 @@ pub fn run_event_loop(mut app_state: AppState) -> Result<(), FttyError> {
                 app_state.running = false;
                 break;
             }
+        }
+
+        // Register PTY read source exactly once after initial configure establishes
+        // final tiling dimensions and creates the renderer, preventing busy-looping and SIGWINCH restarts.
+        if !app_state.pty_registered && app_state.renderer.is_some() {
+            app_state.pty_registered = true;
+            let pty_master = app_state.pty.try_clone_master()?;
+            let pty_source = Generic::new(pty_master, Interest::READ, Mode::Level);
+            let pty_qh = qh.clone();
+            event_loop
+                .handle()
+                .insert_source(pty_source, move |_event, _fd, state: &mut AppState| {
+                    let mut buf = [0u8; 65536];
+                    let mut total_read = 0;
+                    loop {
+                        match state.pty.read(&mut buf) {
+                            Ok(n) if n > 0 => {
+                                total_read += n;
+                                let incoming = &buf[..n];
+                                if state.kitty_parser.is_fast_path(incoming) {
+                                    state.process_terminal_output(incoming, &pty_qh);
+                                } else {
+                                    let (clean_text, events) =
+                                        state.kitty_parser.filter_bytes(incoming);
+                                    for event in &events {
+                                        if let KittyEvent::Response(resp) = event {
+                                            state.write_pty_blocking(resp);
+                                        }
+                                    }
+                                    state.process_terminal_output(&clean_text, &pty_qh);
+                                    for event in events {
+                                        if !matches!(event, KittyEvent::Response(_)) {
+                                            state.handle_kitty_event(event);
+                                        }
+                                    }
+                                }
+
+                                state.keyboard.kitty_flags = state.terminal.kitty_keyboard_flags;
+
+                                if total_read >= 65536 {
+                                    break;
+                                }
+                            }
+                            Ok(_) => {
+                                state.running = false;
+                                return Ok(calloop::PostAction::Reregister);
+                            }
+                            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                            Err(_) => {
+                                state.running = false;
+                                return Ok(calloop::PostAction::Reregister);
+                            }
+                        }
+                    }
+
+                    if total_read > 0 {
+                        state.needs_redraw = true;
+                        state.update_ime_cursor_area();
+                    }
+                    Ok(calloop::PostAction::Continue)
+                })
+                .map_err(|e| WaylandError::Dispatch(e.to_string()))?;
         }
 
         if app_state.terminal.sync_output_gen != app_state.last_sync_gen {
