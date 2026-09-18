@@ -90,6 +90,8 @@ impl AppState {
         self.terminal
             .set_default_colors(self.default_fg, self.default_bg);
         self.terminal.set_palette(self.palette);
+        self.terminal.allow_osc52_read = new_config.allow_osc52_read();
+        self.terminal.allow_osc52_write = new_config.allow_osc52_write();
         self.terminal.grid.cursor.shape = new_config.cursor_shape();
         self.config = new_config;
 

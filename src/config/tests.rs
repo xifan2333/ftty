@@ -203,3 +203,25 @@ fn test_include_keybindings_prompt_navigation() {
         vec!["Ctrl+Shift+J"]
     );
 }
+
+#[test]
+fn test_clipboard_security_config() {
+    let toml_str = r#"
+        [clipboard]
+        allow_osc52_read = true
+        allow_osc52_write = false
+    "#;
+    let config: Config = toml::from_str(toml_str).unwrap();
+    assert!(config.allow_osc52_read());
+    assert!(!config.allow_osc52_write());
+
+    let default_config = Config::default();
+    assert!(!default_config.allow_osc52_read());
+    assert!(default_config.allow_osc52_write());
+
+    let mut base = Config::default();
+    let mut inc = Config::default();
+    inc.clipboard.allow_osc52_read = Some(true);
+    base.merge(inc);
+    assert!(base.allow_osc52_read());
+}

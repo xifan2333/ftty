@@ -64,6 +64,10 @@ pub struct Terminal {
     pub synchronized_output: bool,
     /// Generation counter incremented on each mode-2026 activation.
     pub sync_output_gen: u64,
+    /// Whether OSC 52 clipboard reading queries are permitted.
+    pub allow_osc52_read: bool,
+    /// Whether OSC 52 clipboard write/clear operations are permitted.
+    pub allow_osc52_write: bool,
     /// Internal clipboard content accessible for OSC 52 queries and updates.
     pub clipboard_content: Option<String>,
     /// Pending clipboard updates received via OSC 52: Some(Some(text)) for set, Some(None) for clear.
@@ -145,6 +149,8 @@ impl Terminal {
             focus_reporting: false,
             synchronized_output: false,
             sync_output_gen: 0,
+            allow_osc52_read: false,
+            allow_osc52_write: true,
             clipboard_content: None,
             pending_clipboard: None,
             current_dir: None,

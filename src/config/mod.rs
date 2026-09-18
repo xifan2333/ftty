@@ -97,6 +97,20 @@ pub struct ScrollbackConfig {
     pub auto_scroll: Option<bool>,
 }
 
+/// Security policies controlling OSC 52 remote clipboard access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub struct ClipboardConfig {
+    /// Whether applications running in the terminal are permitted to query/read the system clipboard.
+    ///
+    /// Defaults to `false` for security (preventing untrusted remote SSH processes from silently
+    /// exfiltrating local clipboard tokens or passwords).
+    pub allow_osc52_read: Option<bool>,
+    /// Whether applications running in the terminal are permitted to set or clear the system clipboard.
+    ///
+    /// Defaults to `true` for standard terminal compatibility.
+    pub allow_osc52_write: Option<bool>,
+}
+
 /// A single key combination string or a list of alternatives.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(untagged)]
@@ -156,6 +170,8 @@ pub struct Config {
     pub colors: ColorsConfig,
     #[serde(default)]
     pub scrollback: ScrollbackConfig,
+    #[serde(default)]
+    pub clipboard: ClipboardConfig,
     #[serde(default)]
     pub keybindings: KeybindingsConfig,
 }
@@ -248,6 +264,13 @@ impl Config {
             self.scrollback.auto_scroll = Some(auto);
         }
 
+        if let Some(r) = other.clipboard.allow_osc52_read {
+            self.clipboard.allow_osc52_read = Some(r);
+        }
+        if let Some(w) = other.clipboard.allow_osc52_write {
+            self.clipboard.allow_osc52_write = Some(w);
+        }
+
         include::merge_keybindings(&mut self.keybindings, other.keybindings);
     }
 
@@ -313,6 +336,16 @@ impl Config {
     #[must_use]
     pub fn scroll_multiplier(&self) -> f32 {
         self.scrollback.multiplier.unwrap_or(3.0).clamp(0.1, 100.0)
+    }
+
+    #[must_use]
+    pub fn allow_osc52_read(&self) -> bool {
+        self.clipboard.allow_osc52_read.unwrap_or(false)
+    }
+
+    #[must_use]
+    pub fn allow_osc52_write(&self) -> bool {
+        self.clipboard.allow_osc52_write.unwrap_or(true)
     }
 
     #[must_use]

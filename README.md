@@ -28,7 +28,39 @@
 
 ---
 
-## 2. Developer Workflow & Quality Gates
+## 2. Configuration Reference
+
+`ftty` loads its configuration from `$XDG_CONFIG_HOME/ftty/ftty.toml` (or `~/.config/ftty/ftty.toml`). All settings support dynamic hot-reloading via `SIGUSR1` or configuration `include` directives.
+
+```toml
+[font]
+family = "monospace"
+size = 14.0
+subpixel = false
+
+[window]
+columns = 80
+rows = 24
+padding_x = 0
+padding_y = 0
+
+[clipboard]
+# OSC 52 remote clipboard security policies:
+# allow_osc52_read: allows CLI applications to query/read the system clipboard.
+# Disabled by default (false) to prevent untrusted remote SSH processes from silently exfiltrating credentials.
+allow_osc52_read = false
+
+# allow_osc52_write: allows CLI applications (nvim, tmux, yazi) to set or clear the system clipboard.
+allow_osc52_write = true
+
+[keybindings]
+prompt_prev = ["Ctrl+Shift+Z"]
+prompt_next = ["Ctrl+Shift+X"]
+```
+
+---
+
+## 3. Developer Workflow & Quality Gates
 
 This repository uses **mise** and **hk** with automated quality gates:
 
@@ -43,6 +75,6 @@ mise run test           # run test suite
 
 ---
 
-## 3. License
+## 4. License
 
 GPL-3.0-only
