@@ -26,7 +26,7 @@ fn font_metrics_and_rasterization() {
     let glyph_idx = fonts.regular().lookup_glyph_index('M');
     let raster = fonts
         .regular()
-        .rasterize_indexed(glyph_idx, fonts.font_size);
+        .rasterize_indexed(glyph_idx, fonts.font_size, false);
     assert!(raster.width > 0 && raster.height > 0);
     assert!(raster.pixels.iter().any(|&pixel| pixel != 0));
 }
@@ -417,4 +417,21 @@ fn test_font_manager_initialization_is_fast() {
         elapsed < std::time::Duration::from_millis(200),
         "FreeType initialization took {elapsed:?}"
     );
+}
+
+#[test]
+fn test_subpixel_and_grayscale_rasterization() {
+    let fonts_gray = FontManager::load(14.0).expect("load grayscale font");
+    assert!(!fonts_gray.subpixel);
+    let key = fonts_gray.face_key('M', CellFlags::empty());
+    let gray_glyph = fonts_gray.rasterize(key);
+    assert!(gray_glyph.width > 0 && gray_glyph.height > 0);
+
+    let fonts_lcd =
+        FontManager::load_with_families_and_subpixel(&["monospace".to_string()], 14.0, true)
+            .expect("load lcd subpixel font");
+    assert!(fonts_lcd.subpixel);
+    let lcd_glyph = fonts_lcd.rasterize(key);
+    assert!(lcd_glyph.width > 0 && lcd_glyph.height > 0);
+    assert!(!lcd_glyph.pixels.is_empty());
 }

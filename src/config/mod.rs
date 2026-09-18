@@ -46,6 +46,7 @@ pub struct FontConfig {
     #[serde(alias = "families")]
     pub family: Option<FontFamilies>,
     pub size: Option<f32>,
+    pub subpixel: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
@@ -192,6 +193,9 @@ impl Config {
         if let Some(size) = other.font.size {
             self.font.size = Some(size);
         }
+        if let Some(subpixel) = other.font.subpixel {
+            self.font.subpixel = Some(subpixel);
+        }
 
         if let Some(cols) = other.window.columns {
             self.window.columns = Some(cols);
@@ -272,6 +276,11 @@ impl Config {
     #[must_use]
     pub fn font_size(&self) -> f32 {
         self.font.size.unwrap_or(DEFAULT_FONT_SIZE)
+    }
+
+    #[must_use]
+    pub fn font_subpixel(&self) -> bool {
+        self.font.subpixel.unwrap_or(false)
     }
 
     #[must_use]

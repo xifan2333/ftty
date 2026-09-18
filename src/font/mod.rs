@@ -118,6 +118,7 @@ pub struct FontManager {
     primary_path: PathBuf,
     primary_index: u32,
     font_size: f32,
+    pub subpixel: bool,
     pub metrics: CellMetrics,
 }
 
@@ -178,6 +179,18 @@ impl FontManager {
     /// # Errors
     /// Returns an error for an invalid size, missing font, or unreadable font data.
     pub fn load_with_families(families: &[String], font_size: f32) -> io::Result<Self> {
+        Self::load_with_families_and_subpixel(families, font_size, false)
+    }
+
+    /// Discovers and loads an ordered list of font families with explicit subpixel setting.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid size, missing font, or unreadable font data.
+    pub fn load_with_families_and_subpixel(
+        families: &[String],
+        font_size: f32,
+        subpixel: bool,
+    ) -> io::Result<Self> {
         if !font_size.is_finite() || font_size < MIN_FONT_SIZE || font_size > MAX_FONT_SIZE {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -251,6 +264,7 @@ impl FontManager {
             primary_path,
             primary_index,
             font_size,
+            subpixel,
             metrics,
         })
     }
@@ -417,19 +431,30 @@ impl FontManager {
         let num_configured = (1 + chain.fallbacks.len()) as u16;
 
         if key.face == 0 {
-            return chain.primary.rasterize_indexed(key.glyph, self.font_size);
+            return chain
+                .primary
+                .rasterize_indexed(key.glyph, self.font_size, self.subpixel);
         }
         if key.face < num_configured {
             let fallback_idx = (key.face - 1) as usize;
-            return chain.fallbacks[fallback_idx].rasterize_indexed(key.glyph, self.font_size);
+            return chain.fallbacks[fallback_idx].rasterize_indexed(
+                key.glyph,
+                self.font_size,
+                self.subpixel,
+            );
         }
 
         let fallback_idx = (key.face - num_configured) as usize;
         drop(binding);
         let fallbacks = self.fallbacks.borrow();
         match fallbacks.faces.get(fallback_idx) {
-            Some(face) => face.font.rasterize_indexed(key.glyph, self.font_size),
-            None => self.regular.primary.rasterize_indexed(0, self.font_size),
+            Some(face) => face
+                .font
+                .rasterize_indexed(key.glyph, self.font_size, self.subpixel),
+            None => self
+                .regular
+                .primary
+                .rasterize_indexed(0, self.font_size, self.subpixel),
         }
     }
 }

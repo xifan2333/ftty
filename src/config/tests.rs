@@ -160,3 +160,27 @@ fn test_circular_include_rejection() {
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+#[test]
+fn test_parse_subpixel_antialiasing_config() {
+    let toml_default = r#"
+        [font]
+        size = 14.0
+    "#;
+    let config: Config = toml::from_str(toml_default).unwrap();
+    assert!(!config.font_subpixel());
+
+    let toml_enabled = r#"
+        [font]
+        size = 14.0
+        subpixel = true
+    "#;
+    let config_subpixel: Config = toml::from_str(toml_enabled).unwrap();
+    assert!(config_subpixel.font_subpixel());
+
+    let mut base = Config::default();
+    let mut inc = Config::default();
+    inc.font.subpixel = Some(true);
+    base.merge(inc);
+    assert!(base.font_subpixel());
+}
