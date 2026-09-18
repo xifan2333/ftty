@@ -7,7 +7,7 @@ pub mod row;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use unicode_width::UnicodeWidthChar;
 
 use crate::color::Color;
@@ -40,6 +40,7 @@ pub struct Grid {
 
     pub scroll_region_top: usize,
     pub scroll_region_bottom: usize,
+    pub prompt_marks: BTreeSet<usize>,
 
     // The hidden primary screen while the alternate screen is active. Each screen owns its saved
     // cursor and placements so a resize on one cannot shift the other's coordinates.
@@ -71,6 +72,7 @@ impl Grid {
             saved_cursor: Cursor::default(),
             scroll_region_top: 0,
             scroll_region_bottom: actual_rows.saturating_sub(1),
+            prompt_marks: BTreeSet::new(),
             alt_lines: None,
             alt_cursor: None,
             alt_saved_cursor: None,
@@ -248,7 +250,72 @@ impl Grid {
                 }
             });
         }
+        if !self.prompt_marks.is_empty() {
+            let mut shifted = BTreeSet::new();
+            for &mark in &self.prompt_marks {
+                if mark > 0 {
+                    shifted.insert(mark - 1);
+                }
+            }
+            self.prompt_marks = shifted;
+        }
         Some(row)
+    }
+
+    /// Records an absolute line marker for OSC 133 semantic prompt navigation.
+    pub fn add_prompt_mark(&mut self, line: usize) {
+        if self.prompt_marks.len() >= 1024
+            && let Some(&first) = self.prompt_marks.iter().next()
+        {
+            self.prompt_marks.remove(&first);
+        }
+        self.prompt_marks.insert(line);
+    }
+
+    /// Scrolls the viewport up to the previous semantic prompt boundary.
+    pub fn scroll_to_prompt_prev(&mut self) {
+        if self.is_alt_screen() || self.prompt_marks.is_empty() {
+            return;
+        }
+        let top_line = self.scrollback.len().saturating_sub(self.viewport_offset);
+        if let Some(&mark) = self.prompt_marks.range(..top_line).next_back() {
+            let new_offset = self
+                .scrollback
+                .len()
+                .saturating_sub(mark)
+                .min(self.scrollback.len());
+            if new_offset != self.viewport_offset {
+                self.viewport_offset = new_offset;
+                self.mark_all_dirty();
+            }
+        } else if let Some(&first) = self.prompt_marks.iter().next() {
+            let new_offset = self
+                .scrollback
+                .len()
+                .saturating_sub(first)
+                .min(self.scrollback.len());
+            if new_offset != self.viewport_offset {
+                self.viewport_offset = new_offset;
+                self.mark_all_dirty();
+            }
+        }
+    }
+
+    /// Scrolls the viewport down to the next semantic prompt boundary.
+    pub fn scroll_to_prompt_next(&mut self) {
+        if self.is_alt_screen() || self.viewport_offset == 0 {
+            return;
+        }
+        let top_line = self.scrollback.len().saturating_sub(self.viewport_offset);
+        if let Some(&mark) = self.prompt_marks.range(top_line + 1..).next() {
+            let new_offset = self.scrollback.len().saturating_sub(mark);
+            if new_offset != self.viewport_offset {
+                self.viewport_offset = new_offset;
+                self.mark_all_dirty();
+            }
+        } else {
+            self.scroll_viewport_bottom();
+        }
     }
 
     pub(crate) fn push_scrollback(&mut self, row: Row) {
