@@ -11,7 +11,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use fontconfig::Fontconfig;
 
-use crate::font::fallback::{FallbackCache, fontconfig, load_font_file, match_family};
+use crate::font::fallback::{
+    FallbackCache, FallbackFace, fontconfig, load_font_file, match_family,
+    query_fontconfig_candidates,
+};
 use crate::grid::CellFlags;
 
 pub use atlas::{CachedGlyph, GlyphAtlas, MAX_ATLAS_SIZE};
@@ -83,12 +86,8 @@ impl FontManager {
             }),
             3 => self.bold_italic.get_or_init(|| {
                 let fc = fontconfig();
-                let fallback = self
-                    .bold
-                    .get()
-                    .map(|b| &b.primary)
-                    .unwrap_or(&self.regular.primary);
-                self.load_styled_chain(fc, true, true, fallback)
+                let bold_chain = self.chain_for_style(1);
+                self.load_styled_chain(fc, true, true, &bold_chain.primary)
             }),
             _ => &self.regular,
         }
@@ -194,11 +193,29 @@ impl FontManager {
         std::thread::Builder::new()
             .name("font-prewarm".to_string())
             .spawn(move || {
-                let mut cache = fallbacks_prewarm
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let _ = cache.resolve('中', 0, &preferred);
-                let _ = cache.resolve('中', 1, &preferred);
+                let Some(fc) = fontconfig() else {
+                    return;
+                };
+                for style in [0u8, 1u8] {
+                    let bold = (style & 1) != 0;
+                    if let Some(candidates) =
+                        query_fontconfig_candidates(fc, &preferred, bold, false, '中')
+                    {
+                        for (path, index) in candidates.into_iter().take(1) {
+                            if let Ok(font) = load_font_file(&path, index) {
+                                let mut cache = fallbacks_prewarm
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                cache.insert_face(FallbackFace {
+                                    path,
+                                    index,
+                                    style,
+                                    font,
+                                });
+                            }
+                        }
+                    }
+                }
             })
             .ok();
 

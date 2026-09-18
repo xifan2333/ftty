@@ -29,6 +29,23 @@ pub(crate) struct FallbackCache {
 }
 
 impl FallbackCache {
+    pub(crate) fn insert_face(&mut self, face: FallbackFace) -> usize {
+        if let Some(pos) = self
+            .faces
+            .iter()
+            .position(|f| f.path == face.path && f.index == face.index && f.style == face.style)
+        {
+            return pos;
+        }
+        if self.faces.len() >= MAX_FALLBACK_FACES {
+            self.faces.remove(0);
+            self.resolved.clear();
+            self.resolved_order.clear();
+        }
+        self.faces.push(face);
+        self.faces.len() - 1
+    }
+
     pub(crate) fn resolve(
         &mut self,
         c: char,
@@ -77,18 +94,12 @@ impl FallbackCache {
                         let Ok(font) = load_font_file(&path, index) else {
                             continue;
                         };
-                        if self.faces.len() >= MAX_FALLBACK_FACES {
-                            self.faces.remove(0);
-                            self.resolved.clear();
-                            self.resolved_order.clear();
-                        }
-                        self.faces.push(FallbackFace {
+                        self.insert_face(FallbackFace {
                             path,
                             index,
                             style,
                             font,
-                        });
-                        self.faces.len() - 1
+                        })
                     }
                 };
 
