@@ -70,7 +70,6 @@ impl AppState {
     }
 
     pub(crate) fn configure_renderer(&mut self, connection: &Connection) -> Result<(), FttyError> {
-        self.ensure_font_loaded()?;
         let size = self
             .pending_size
             .take()

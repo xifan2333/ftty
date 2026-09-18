@@ -518,19 +518,15 @@ fn test_app_state_with_font_and_config() {
 }
 
 #[test]
-fn test_app_state_with_font_worker_pipelining() {
+fn test_app_state_with_font_and_config_initialization() {
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
     let config = crate::config::Config::default();
-    let (metrics_rx, worker) =
-        crate::font::FontManager::spawn_worker(&config.font_families(), config.font_size())
-            .expect("spawn font worker");
-    let mut app = AppState::with_font_worker(term, pty, worker, metrics_rx, config, None)
-        .expect("with_font_worker");
-    assert!(app.font_worker.is_some());
-    // Ensure font loaded joins the worker and initializes font_mgr
-    app.ensure_font_loaded().expect("ensure_font_loaded");
-    assert!(app.font_worker.is_none());
-    assert!(app.font_mgr.is_loaded());
+    let font_mgr =
+        crate::font::FontManager::load_with_families(&config.font_families(), config.font_size())
+            .expect("load font");
+    let app = AppState::with_font_and_config(term, pty, font_mgr, config, None)
+        .expect("with_font_and_config");
     assert!(app.font_mgr.metrics.cell_width > 0);
+    assert!(app.font_mgr.metrics.cell_height > 0);
 }

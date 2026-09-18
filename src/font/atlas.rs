@@ -186,6 +186,9 @@ impl GlyphAtlas {
         let key = fonts.face_key(c, flags);
         let (metrics, bitmap) = fonts.rasterize(key);
         let glyph = self.insert_bitmap(metrics, &bitmap)?;
+        if glyph.width == 0 && glyph.height == 0 && !c.is_whitespace() {
+            return None;
+        }
         if is_ascii {
             self.ascii_cache[ascii_idx] = Some(glyph);
         } else {

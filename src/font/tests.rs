@@ -80,9 +80,8 @@ fn unassigned_codepoints_do_not_resolve_to_a_glyph() {
 fn cjk_glyphs_resolve_through_a_fallback_face() {
     let fonts = fonts();
     assert_eq!(fonts.face_key('A', CellFlags::empty()).face, 0);
-    if let Some(primary) = fonts.font_for_style(CellFlags::empty())
-        && primary.lookup_glyph_index('中') != 0
-    {
+    let primary = fonts.font_for_style(CellFlags::empty());
+    if primary.lookup_glyph_index('中') != 0 {
         return; // The primary face already covers CJK on this system.
     }
     let key = fonts.face_key('中', CellFlags::empty());
@@ -333,7 +332,7 @@ fn test_styled_chain_and_fallback_prewarm() {
         CellFlags::ITALIC,
         CellFlags::BOLD | CellFlags::ITALIC,
     ] {
-        let face = fonts.font_for_style(flags).unwrap();
+        let face = fonts.font_for_style(flags);
         assert!(face.horizontal_line_metrics(14.0).is_some());
         let key = fonts.face_key('A', flags);
         assert_eq!(key.glyph, face.lookup_glyph_index('A'));
@@ -363,4 +362,40 @@ fn rejects_invalid_font_sizes_in_cell_metrics_parser() {
         assert!(parse_cell_metrics_from_bytes(&bytes, index, invalid).is_none());
         assert!(parse_cell_metrics_from_file(&path, index, invalid).is_err());
     }
+}
+
+#[test]
+fn test_printable_ascii_regular_glyphs_have_nonzero_dimensions() {
+    let fonts = fonts();
+    let mut atlas = GlyphAtlas::new(1024, 1024);
+    for c in '!'..='~' {
+        let glyph = atlas
+            .get_or_insert(c, CellFlags::empty(), fonts)
+            .unwrap_or_else(|| panic!("printable ascii '{c}' must produce a glyph"));
+        assert!(
+            glyph.width > 0 && glyph.height > 0,
+            "printable ascii '{c}' must have non-zero dimensions"
+        );
+        let retrieved = atlas
+            .get(c, CellFlags::empty(), fonts)
+            .expect("glyph must be present in atlas");
+        assert_eq!(glyph, retrieved);
+    }
+}
+
+#[test]
+fn test_whitespace_and_empty_glyph_safeguards() {
+    let fonts = fonts();
+    let mut atlas = GlyphAtlas::new(256, 256);
+    // Space is whitespace: width * height is 0 and it is successfully cached
+    let space = atlas
+        .get_or_insert(' ', CellFlags::empty(), fonts)
+        .expect("space glyph must be cached");
+    assert_eq!(space.width * space.height, 0);
+    assert_eq!(atlas.get(' ', CellFlags::empty(), fonts), Some(space));
+
+    // Null char '\0' is not whitespace and has no glyph; get_or_insert must not poison ascii_cache
+    let res = atlas.get_or_insert('\0', CellFlags::empty(), fonts);
+    assert!(res.is_none());
+    assert_eq!(atlas.ascii_cache[0], None);
 }
