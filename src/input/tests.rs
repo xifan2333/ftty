@@ -35,6 +35,38 @@ fn keymap_fd_loads_the_advertised_bytes_and_strips_the_trailing_nul() {
 }
 
 #[test]
+fn test_set_keymap_from_fd_handles_multiple_trailing_nuls_and_padding() {
+    use nix::sys::memfd::{MFdFlags, memfd_create};
+    use std::io::{Seek, Write};
+
+    let mut handler = KeyboardHandler::new();
+    let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+    let keymap = Keymap::new_from_names(
+        &context,
+        "",
+        "",
+        "fr",
+        "",
+        None,
+        xkb::KEYMAP_COMPILE_NO_FLAGS,
+    )
+    .unwrap();
+    let mut bytes = keymap.get_as_string(KEYMAP_FORMAT_TEXT_V1).into_bytes();
+    // Simulate compositor page-alignment with multiple trailing zeroes
+    bytes.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0]);
+    let size = bytes.len();
+
+    let fd = memfd_create(c"ftty-keymap-padding-test", MFdFlags::MFD_CLOEXEC).unwrap();
+    let mut file = std::fs::File::from(fd);
+    file.write_all(&bytes).unwrap();
+    file.rewind().unwrap();
+    handler.set_keymap_from_fd(file.into(), size);
+
+    assert!(handler.keymap.is_some());
+    assert!(handler.state.is_some());
+}
+
+#[test]
 fn test_keyboard_handler_initialization() {
     let handler = KeyboardHandler::new();
     assert!(handler.keymap.is_some());
