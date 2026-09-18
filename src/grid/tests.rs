@@ -1,8 +1,5 @@
-use std::collections::HashMap;
-
 use crate::color::Color;
 use crate::grid::diacritics::KITTY_PLACEHOLDER;
-use crate::grid::row::MAX_ROW_OVERFLOW;
 use crate::grid::{CellFlags, ClearMode, Grid, Row};
 use crate::kitty::{ImageData, ImagePlacement};
 
@@ -430,15 +427,25 @@ fn shrink_evicts_placements_below_the_new_bottom() {
 }
 
 #[test]
-fn shrink_on_alternate_screen_shifts_placements() {
+fn shrink_on_alternate_screen_evicts_truncated_placements() {
     let mut grid = Grid::new(10, 4, 100);
     grid.enter_alt_screen();
     fill_rows(&mut grid, 4);
-    grid.cursor.row = 3;
 
-    // The alternate screen has no history, so its content shifts up on shrink.
+    // Placement on row 1 (survives) and row 3 (truncated)
     grid.add_placement(ImagePlacement {
         image_id: 1,
+        placement_id: 0,
+        line: grid.scrollback.len() + 1,
+        col: 0,
+        cols: 1,
+        rows: 1,
+        offset_x: 0,
+        offset_y: 0,
+        z_index: 0,
+    });
+    grid.add_placement(ImagePlacement {
+        image_id: 2,
         placement_id: 0,
         line: grid.scrollback.len() + 3,
         col: 0,
@@ -454,12 +461,12 @@ fn shrink_on_alternate_screen_shifts_placements() {
     assert_eq!(
         grid.placements.len(),
         1,
-        "the placement must not be dropped"
+        "only the surviving row placement is retained"
     );
     assert_eq!(
         grid.placements[0].line,
         grid.scrollback.len() + 1,
-        "it follows its row up the alternate screen"
+        "row 1 maintains its absolute row placement"
     );
 }
 
@@ -642,7 +649,7 @@ fn test_shrink_and_grow_restores_scrollback_text() {
 }
 
 #[test]
-fn test_horizontal_shrink_and_grow_preserves_overflow_cells() {
+fn test_horizontal_shrink_and_grow_pads_with_default_cells() {
     let mut grid = Grid::new(20, 2, 100);
     let text = "Hello World 12345";
     for c in text.chars() {
@@ -655,43 +662,93 @@ fn test_horizontal_shrink_and_grow_preserves_overflow_cells() {
     }
     assert_eq!(grid.visible_line(0).cells[16].c, '5');
 
-    // Shrink horizontally to 5 columns
+    // Shrink horizontally to 5 columns: excess columns truncated
     grid.resize(5, 2);
     assert_eq!(grid.cols, 5);
+    assert_eq!(grid.visible_line(0).cells.len(), 5);
     assert_eq!(grid.visible_line(0).cells[0].c, 'H');
     assert_eq!(grid.visible_line(0).cells[4].c, 'o');
 
-    // Grow horizontally back to 20 columns: overflow cells restored!
+    // Grow horizontally back to 20 columns: expanded columns are clean defaults without stale resurrection
     grid.resize(20, 2);
     assert_eq!(grid.cols, 20);
-    let restored: String = grid.visible_line(0).cells[..17]
+    assert_eq!(grid.visible_line(0).cells.len(), 20);
+    let prefix: String = grid.visible_line(0).cells[..5]
         .iter()
         .map(|c| c.c)
         .collect();
-    assert_eq!(restored, "Hello World 12345");
+    assert_eq!(prefix, "Hello");
+    for cell in &grid.visible_line(0).cells[5..] {
+        assert_eq!(cell.c, ' ');
+    }
 }
 
 #[test]
-fn test_shrink_and_grow_restores_placeholder_coordinates_and_bounds_overflow() {
-    let mut row = Row::new(300);
-    row.placeholders = Some(HashMap::from([(50, (1, 2, 3))]));
-
-    // Shrink to 40 columns (excess = 260)
-    row.resize(40);
-    assert_eq!(row.cells.len(), 40);
-    // Placeholder at 50 is beyond 40, so it's stashed in overflow_placeholders at offset 10
-    assert!(row.placeholders.as_ref().unwrap().is_empty());
-    assert_eq!(row.overflow.len(), MAX_ROW_OVERFLOW); // Bounded to 256!
-    assert_eq!(row.overflow_placeholders, vec![(10, (1, 2, 3))]);
-
-    // Grow back to 60 columns: restores 20 overflow cells
-    row.resize(60);
-    assert_eq!(row.cells.len(), 60);
-    // Offset 10 is restored to column 40 + 10 = 50!
-    assert_eq!(
-        row.placeholders.as_ref().unwrap().get(&50),
-        Some(&(1, 2, 3))
+fn test_horizontal_shrink_clears_split_wide_character() {
+    let mut grid = Grid::new(10, 1, 100);
+    grid.cursor.col = 4;
+    // Write 2-column wide character '你' at col 4 and 5
+    grid.write_char(
+        '你',
+        Color::DefaultForeground,
+        Color::DefaultBackground,
+        CellFlags::empty(),
     );
+    assert!(
+        grid.visible_line(0).cells[4]
+            .flags
+            .contains(CellFlags::WIDE_CHAR)
+    );
+    assert!(
+        grid.visible_line(0).cells[5]
+            .flags
+            .contains(CellFlags::WIDE_CHAR_SPACER)
+    );
+
+    // Shrink to 5 columns: separates WIDE_CHAR from its spacer at col 5
+    grid.resize(5, 1);
+    assert_eq!(grid.visible_line(0).cells[4], crate::grid::Cell::default());
+
+    // Grow back to 10 columns: no orphaned wide-character flag survives
+    grid.resize(10, 1);
+    assert_eq!(grid.visible_line(0).cells[4], crate::grid::Cell::default());
+    assert_eq!(grid.visible_line(0).cells[5], crate::grid::Cell::default());
+}
+
+#[test]
+fn test_alt_screen_resize_preserves_absolute_row_coordinates() {
+    let mut grid = Grid::new(20, 5, 100);
+    grid.enter_alt_screen();
+
+    for r in 0..5 {
+        grid.cursor.row = r;
+        grid.cursor.col = 0;
+        let c = char::from_digit(r as u32, 10).unwrap();
+        grid.write_char(
+            c,
+            Color::DefaultForeground,
+            Color::DefaultBackground,
+            CellFlags::empty(),
+        );
+    }
+
+    // Shrink to 3 rows on alternate screen: row 0, 1, 2 stay intact (never drained from top)
+    grid.resize(20, 3);
+    assert_eq!(grid.rows, 3);
+    assert_eq!(grid.lines.len(), 3);
+    assert_eq!(grid.visible_line(0).cells[0].c, '0');
+    assert_eq!(grid.visible_line(1).cells[0].c, '1');
+    assert_eq!(grid.visible_line(2).cells[0].c, '2');
+
+    // Grow back to 5 rows on alternate screen: bottom rows appended as clean blanks
+    grid.resize(20, 5);
+    assert_eq!(grid.rows, 5);
+    assert_eq!(grid.lines.len(), 5);
+    assert_eq!(grid.visible_line(0).cells[0].c, '0');
+    assert_eq!(grid.visible_line(1).cells[0].c, '1');
+    assert_eq!(grid.visible_line(2).cells[0].c, '2');
+    assert_eq!(grid.visible_line(3).cells[0].c, ' ');
+    assert_eq!(grid.visible_line(4).cells[0].c, ' ');
 }
 
 #[test]

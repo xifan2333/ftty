@@ -96,38 +96,41 @@ impl Grid {
         } else if new_rows < old_rows {
             let to_remove = old_rows - new_rows;
 
-            // The alternate screen keeps no history, so only the primary screen with scrollback
-            // enabled preserves the absolute line of its surviving rows.
             let active_on_alt = self.alt_lines.is_some();
-            let active_retains = !active_on_alt && self.max_scrollback > 0;
+            if active_on_alt {
+                // Alternate screen (Neovim/htop/tmux): rows strictly map to absolute screen rows.
+                // Truncate at bottom only; never drain from top or shift surviving row coordinates.
+                self.lines.truncate(new_rows);
+                self.cursor.row = self.cursor.row.min(new_rows.saturating_sub(1));
+                self.saved_cursor.row = self.saved_cursor.row.min(new_rows.saturating_sub(1));
 
-            // Active screen: trim below the cursor first so its line is always retained.
-            let removed_top = shrink_rows(&mut self.lines, to_remove, self.cursor.row, new_rows);
-            let from_top = removed_top.len();
-            if !active_on_alt {
+                // Hidden primary screen stashed in alt: trim rows preserving cursor line
+                if let Some(alt) = &mut self.alt_lines {
+                    let hidden_row = self.alt_cursor.unwrap_or_default().row;
+                    let hidden_removed = shrink_rows(alt, to_remove, hidden_row, new_rows);
+                    let hidden_from_top = hidden_removed.len();
+                    if let Some(cursor) = &mut self.alt_cursor {
+                        cursor.row = cursor.row.saturating_sub(hidden_from_top);
+                    }
+                    if let Some(saved) = &mut self.alt_saved_cursor {
+                        saved.row = saved.row.saturating_sub(hidden_from_top);
+                    }
+                    shift_placements(&mut self.alt_placements, hidden_from_top);
+                }
+            } else {
+                // Primary screen with scrollback: trim below cursor first so active prompt/cursor survives.
+                let active_retains = self.max_scrollback > 0;
+                let removed_top =
+                    shrink_rows(&mut self.lines, to_remove, self.cursor.row, new_rows);
+                let from_top = removed_top.len();
                 for row in removed_top {
                     self.push_scrollback(row);
                 }
-            }
-            self.cursor.row = self.cursor.row.saturating_sub(from_top);
-            self.saved_cursor.row = self.saved_cursor.row.saturating_sub(from_top);
-            if !active_retains {
-                shift_placements(&mut self.placements, from_top);
-            }
-
-            // Hidden primary screen while the alternate screen is active. Its rows are dropped
-            // rather than saved, so its own placements shift by its own removal count.
-            if let Some(alt) = &mut self.alt_lines {
-                let hidden_row = self.alt_cursor.unwrap_or_default().row;
-                let hidden_removed = shrink_rows(alt, to_remove, hidden_row, new_rows);
-                let hidden_from_top = hidden_removed.len();
-                if let Some(cursor) = &mut self.alt_cursor {
-                    cursor.row = cursor.row.saturating_sub(hidden_from_top);
+                self.cursor.row = self.cursor.row.saturating_sub(from_top);
+                self.saved_cursor.row = self.saved_cursor.row.saturating_sub(from_top);
+                if !active_retains {
+                    shift_placements(&mut self.placements, from_top);
                 }
-                if let Some(saved) = &mut self.alt_saved_cursor {
-                    saved.row = saved.row.saturating_sub(hidden_from_top);
-                }
-                shift_placements(&mut self.alt_placements, hidden_from_top);
             }
 
             let bottom_line = self.scrollback.len() + new_rows;
