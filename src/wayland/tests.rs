@@ -270,3 +270,29 @@ fn pointer_events_from_the_wire_drive_mouse_reports() {
     assert!(!app.mouse_reported);
     assert_eq!(app.selection.start, SelectionPoint::new(1, 2));
 }
+
+#[test]
+fn test_find_url_at_col() {
+    use crate::grid::Row;
+    use crate::wayland::seat::find_url_at_col;
+
+    let mut row = Row::new(50);
+    let s = "Check https://github.com/xifan2333/ftty. Great!";
+    for (i, c) in s.chars().enumerate() {
+        row.cells[i].c = c;
+    }
+
+    // Col 5 is on " " before URL -> None
+    assert_eq!(find_url_at_col(&row, 5), None);
+
+    // Col 10 is on "https://..." -> Some
+    let url_opt = find_url_at_col(&row, 10);
+    assert!(url_opt.is_some());
+    let (start, end, url) = url_opt.unwrap();
+    assert_eq!(url, "https://github.com/xifan2333/ftty");
+    assert_eq!(start, 6);
+    assert_eq!(end, 38);
+
+    // Col 45 is on "Great!" -> None
+    assert_eq!(find_url_at_col(&row, 45), None);
+}

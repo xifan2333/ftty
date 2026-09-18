@@ -536,3 +536,62 @@ impl AppState {
         true
     }
 }
+
+/// Extracts a plaintext URL and its column span on a given row if `col` falls within it.
+#[must_use]
+pub fn find_url_at_col(row: &crate::grid::Row, col: usize) -> Option<(usize, usize, String)> {
+    let text: String = row.cells.iter().map(|c| c.c).collect();
+    let schemes = ["https://", "http://", "file://", "gemini://"];
+    for scheme in &schemes {
+        let mut search_from = 0;
+        while let Some(pos) = text[search_from..].find(scheme) {
+            let start = search_from + pos;
+            let mut end = start;
+            for (idx, ch) in text[start..].char_indices() {
+                if ch.is_whitespace()
+                    || ch == '<'
+                    || ch == '>'
+                    || ch == '"'
+                    || ch == '`'
+                    || ch == '^'
+                    || ch == '\\'
+                    || ch == '|'
+                {
+                    break;
+                }
+                end = start + idx + ch.len_utf8();
+            }
+
+            while end > start {
+                let Some(last_char) = text[..end].chars().next_back() else {
+                    break;
+                };
+                if matches!(
+                    last_char,
+                    '.' | ',' | '!' | '?' | ';' | ':' | ')' | ']' | '}' | '\'' | '"'
+                ) {
+                    if last_char == ')'
+                        && text[start..end].matches('(').count()
+                            == text[start..end].matches(')').count()
+                    {
+                        break;
+                    }
+                    end -= last_char.len_utf8();
+                } else {
+                    break;
+                }
+            }
+
+            let start_col = text[..start].chars().count();
+            let end_col = text[..end].chars().count();
+
+            if col >= start_col && col < end_col && end > start + scheme.len() {
+                let url = text[start..end].to_string();
+                return Some((start_col, end_col.saturating_sub(1), url));
+            }
+
+            search_from = start + scheme.len();
+        }
+    }
+    None
+}
