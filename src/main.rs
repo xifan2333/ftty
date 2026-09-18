@@ -76,6 +76,8 @@ fn main() {
         return;
     }
 
+    // Step 1: Connect to Wayland and flush registry request over IPC at t = 1ms, overlapping
+    // socket negotiation and compositor global announcements with PTY spawning and font loading.
     let conn = match wayland_client::Connection::connect_to_env() {
         Ok(c) => c,
         Err(e) => {
@@ -88,6 +90,7 @@ fn main() {
     conn.display().get_registry(&qh, ());
     let _ = conn.flush();
 
+    // Step 2: Concurrently spawn font loader thread and PTY child process
     let font_families = config.font_families();
     let font_size = config.font_size();
     let font_thread = std::thread::Builder::new()
@@ -109,6 +112,7 @@ fn main() {
         }
     };
 
+    // Step 3: Await font loader before constructing complete AppState
     let font_mgr = match font_thread.map(|h| h.join()) {
         Ok(Ok(Ok(mgr))) => mgr,
         Ok(Ok(Err(e))) => {
