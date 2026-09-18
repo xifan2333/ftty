@@ -126,10 +126,13 @@ fn main() {
             }
         };
 
-    // Step 3: Perform immediate initial Wayland roundtrip to bind compositor globals,
-    // initialize window, and commit the surface over IPC at t = 2ms, enabling instantaneous
-    // compositor layout and window mapping before entering the event loop.
-    if let Err(e) = event_queue.roundtrip(&mut app_state) {
+    // Step 3: Dispatch any compositor globals that arrived during font/pty loading.
+    // If the surface was already committed during dispatch, flush immediately to avoid
+    // an extra synchronous roundtrip stall; otherwise, perform roundtrip as fallback.
+    let _ = event_queue.dispatch_pending(&mut app_state);
+    if app_state.wayland.surface.is_none()
+        && let Err(e) = event_queue.roundtrip(&mut app_state)
+    {
         eprintln!("ftty: initial Wayland roundtrip failed: {e}");
         std::process::exit(1);
     }

@@ -238,8 +238,6 @@ pub fn run_event_loop(mut app_state: AppState) -> Result<(), FttyError> {
     let qh = event_queue.handle();
     let display = conn.display();
     display.get_registry(&qh, ());
-    conn.flush()
-        .map_err(|e| WaylandError::Dispatch(e.to_string()))?;
     event_queue
         .roundtrip(&mut app_state)
         .map_err(|e| WaylandError::Dispatch(e.to_string()))?;

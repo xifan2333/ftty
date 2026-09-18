@@ -21,7 +21,7 @@ impl Dispatch<WlRegistry, ()> for AppState {
         registry: &WlRegistry,
         event: wl_registry::Event,
         _data: &(),
-        conn: &Connection,
+        _conn: &Connection,
         qh: &QueueHandle<Self>,
     ) {
         if let wl_registry::Event::Global {
@@ -35,13 +35,11 @@ impl Dispatch<WlRegistry, ()> for AppState {
                     let comp = registry.bind::<WlCompositor, _, _>(name, version.min(4), qh, ());
                     state.wayland.compositor = Some(comp);
                     state.wayland.init_window(qh);
-                    let _ = conn.flush();
                 }
                 "xdg_wm_base" => {
                     let xdg = registry.bind::<XdgWmBase, _, _>(name, 1, qh, ());
                     state.wayland.xdg_wm_base = Some(xdg);
                     state.wayland.init_window(qh);
-                    let _ = conn.flush();
                 }
                 "wl_seat" => {
                     let seat = registry.bind::<WlSeat, _, _>(name, version.min(5), qh, ());
