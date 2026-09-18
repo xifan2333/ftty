@@ -321,3 +321,22 @@ fn test_ascii_direct_cache_consistency() {
     atlas.clear();
     assert_eq!(atlas.get('A', CellFlags::empty(), fonts), None);
 }
+
+#[test]
+fn test_styled_chain_and_fallback_prewarm() {
+    let fonts = FontManager::load(14.0).expect("load monospace");
+    assert!(fonts.metrics.cell_width > 0);
+    assert!(fonts.metrics.cell_height > 0);
+
+    for flags in [
+        CellFlags::empty(),
+        CellFlags::BOLD,
+        CellFlags::ITALIC,
+        CellFlags::BOLD | CellFlags::ITALIC,
+    ] {
+        let face = fonts.font_for_style(flags);
+        assert!(face.horizontal_line_metrics(14.0).is_some());
+        let key = fonts.face_key('A', flags);
+        assert_eq!(key.glyph, face.lookup_glyph_index('A'));
+    }
+}
