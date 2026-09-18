@@ -126,8 +126,14 @@ fn main() {
     // Step 3: Perform immediate initial Wayland roundtrip to bind compositor globals,
     // initialize window, and commit the surface over IPC at t = 2ms, enabling instantaneous
     // compositor layout and window mapping before entering the event loop.
-    let _ = event_queue.roundtrip(&mut app_state);
-    let _ = conn.flush();
+    if let Err(e) = event_queue.roundtrip(&mut app_state) {
+        eprintln!("ftty: initial Wayland roundtrip failed: {e}");
+        std::process::exit(1);
+    }
+    if let Err(e) = conn.flush() {
+        eprintln!("ftty: initial Wayland flush failed: {e}");
+        std::process::exit(1);
+    }
 
     if let Err(e) = run_event_loop_with_connection(app_state, conn, event_queue) {
         eprintln!("ftty error: {e}");

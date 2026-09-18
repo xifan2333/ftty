@@ -533,17 +533,45 @@ fn test_app_state_with_font_and_config_initialization() {
 
 #[test]
 fn test_pre_event_loop_window_creation_and_surface_setup() {
+    let (client, server) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+    let conn = wayland_client::Connection::from_socket(client).expect("conn");
+    let queue = conn.new_event_queue::<AppState>();
+    let qh = queue.handle();
+    let registry = conn.display().get_registry(&qh, ());
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
-    let config = crate::config::Config::default();
-    let font_mgr = crate::font::FontManager::load(14.0).expect("load font");
-    let app = AppState::with_font_and_config(term, pty, font_mgr, config, None)
-        .expect("with_font_and_config");
+    let mut app = AppState::new(term, pty).expect("app");
 
-    assert!(app.wayland.surface.is_none());
-    assert!(!app.wayland.configured);
+    // Before binding globals, window remains unmapped
     assert_eq!(
         app.wayland.window_state,
         crate::wayland::WindowState::Unmapped
     );
+    assert!(app.wayland.surface.is_none());
+
+    // Bind compositor and xdg_wm_base globals into app
+    let comp =
+        registry.bind::<wayland_client::protocol::wl_compositor::WlCompositor, _, _>(1, 4, &qh, ());
+    app.wayland.compositor = Some(comp);
+    let xdg = registry.bind::<wayland_protocols::xdg::shell::client::xdg_wm_base::XdgWmBase, _, _>(
+        2,
+        1,
+        &qh,
+        (),
+    );
+    app.wayland.xdg_wm_base = Some(xdg);
+
+    // Initializing window creates surface and transitions to Initializing
+    app.wayland.init_window(&qh);
+    assert!(app.wayland.surface.is_some());
+    assert!(app.wayland.xdg_surface.is_some());
+    assert!(app.wayland.xdg_toplevel.is_some());
+    assert_eq!(
+        app.wayland.window_state,
+        crate::wayland::WindowState::Initializing
+    );
+
+    // Flushing connection succeeds without error
+    assert!(conn.flush().is_ok());
+    drop(server);
 }
