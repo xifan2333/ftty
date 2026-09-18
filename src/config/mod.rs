@@ -133,6 +133,8 @@ pub struct KeybindingsConfig {
     pub scrollback_down_line: Option<KeyCombos>,
     pub scrollback_home: Option<KeyCombos>,
     pub scrollback_end: Option<KeyCombos>,
+    pub prompt_prev: Option<KeyCombos>,
+    pub prompt_next: Option<KeyCombos>,
     pub font_increase: Option<KeyCombos>,
     pub font_decrease: Option<KeyCombos>,
     pub font_reset: Option<KeyCombos>,

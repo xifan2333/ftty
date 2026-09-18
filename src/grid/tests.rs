@@ -926,3 +926,20 @@ fn test_ascii_fast_path_writing_and_wrapping() {
 fn test_cell_memory_footprint() {
     assert!(std::mem::size_of::<crate::grid::Cell>() <= 24);
 }
+
+#[test]
+fn test_prompt_marks_navigation_and_rebasing() {
+    let mut grid = Grid::new(20, 5, 10);
+    grid.add_prompt_mark(0);
+    grid.add_prompt_mark(2);
+
+    grid.scroll_up(3);
+    assert_eq!(grid.scrollback.len(), 3);
+    assert_eq!(grid.viewport_offset, 0);
+
+    grid.scroll_to_prompt_prev();
+    assert!(grid.viewport_offset > 0);
+
+    grid.scroll_to_prompt_next();
+    assert_eq!(grid.viewport_offset, 0);
+}

@@ -276,6 +276,7 @@ fn test_osc_133_shell_integration() {
         term.shell_integration,
         Some(ShellIntegrationState::PromptStart)
     );
+    assert!(term.grid.prompt_marks.contains(&0));
 
     term.advance_bytes(b"\x1b]133;B\x07");
     assert_eq!(
