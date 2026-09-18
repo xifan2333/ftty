@@ -119,6 +119,17 @@ pub struct Renderer {
     pub(crate) egl: EglContext,
 }
 
+#[must_use]
+pub(crate) fn row_cache_needs_reset(
+    cached_rows: usize,
+    current_rows: usize,
+    last_cols: usize,
+    current_cols: usize,
+    padding_changed: bool,
+) -> bool {
+    cached_rows != current_rows || last_cols != current_cols || padding_changed
+}
+
 impl Renderer {
     /// Clears cached per-row vertex geometry across all screens and styles.
     pub fn clear_cache(&mut self) {
@@ -347,14 +358,19 @@ impl Renderer {
         let hover_changed = self.last_hovered_span != options.hovered_span;
 
         let cols_changed = self.last_cols != grid.cols;
-        self.last_cols = grid.cols;
-
         let rows = grid.rows.min(MAX_RENDER_CACHE_ROWS);
-        if self.row_valid.len() != rows || padding_changed || cols_changed {
+        if row_cache_needs_reset(
+            self.row_valid.len(),
+            rows,
+            self.last_cols,
+            grid.cols,
+            padding_changed,
+        ) {
             self.row_bg = vec![Vec::new(); rows];
             self.row_fg = vec![Vec::new(); rows];
             self.row_valid = vec![false; rows];
         }
+        self.last_cols = grid.cols;
 
         let ctx = RenderContext {
             grid,

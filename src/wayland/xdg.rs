@@ -98,17 +98,21 @@ impl Dispatch<XdgToplevel, ()> for AppState {
 
                 let target_w = if width > 0 {
                     width as u32
+                } else if is_floating {
+                    stashed[0]
                 } else if state.wayland.width > 0 {
                     state.wayland.width
                 } else {
-                    stashed[0]
+                    default_w
                 };
                 let target_h = if height > 0 {
                     height as u32
+                } else if is_floating {
+                    stashed[1]
                 } else if state.wayland.height > 0 {
                     state.wayland.height
                 } else {
-                    stashed[1]
+                    default_h
                 };
 
                 state.pending_size = Some([target_w, target_h]);

@@ -619,3 +619,17 @@ fn test_column_resize_regenerates_row_foregrounds_and_backgrounds() {
     // Row 2 foreground must have at least 2 quads ('X' and 'Y')
     assert!(row_fg[2].len() >= 2 * 48);
 }
+
+#[test]
+fn test_row_cache_needs_reset_on_column_or_row_change() {
+    use crate::render::row_cache_needs_reset;
+
+    // Same rows, expanded columns (the exact bug case): must trigger reset
+    assert!(row_cache_needs_reset(24, 24, 80, 150, false));
+    // Same rows and columns: must not reset
+    assert!(!row_cache_needs_reset(24, 24, 80, 80, false));
+    // Changed rows: must reset
+    assert!(row_cache_needs_reset(24, 40, 80, 80, false));
+    // Padding changed: must reset
+    assert!(row_cache_needs_reset(24, 24, 80, 80, true));
+}
