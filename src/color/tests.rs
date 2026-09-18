@@ -43,3 +43,21 @@ fn test_rgb_from_hex_and_serde() {
     assert!("aéabc".parse::<Rgb>().is_err());
     assert!("#éff".parse::<Rgb>().is_err());
 }
+
+#[test]
+fn test_parse_color_spec() {
+    use crate::color::parse_color_spec;
+
+    assert_eq!(parse_color_spec("#181818"), Some(Rgb::new(24, 24, 24)));
+    assert_eq!(parse_color_spec("#fff"), Some(Rgb::new(255, 255, 255)));
+    assert_eq!(parse_color_spec("rgb:18/24/36"), Some(Rgb::new(24, 36, 54)));
+    assert_eq!(
+        parse_color_spec("rgb:1818/2424/3636"),
+        Some(Rgb::new(24, 36, 54))
+    );
+    assert_eq!(parse_color_spec("invalid"), None);
+    assert_eq!(parse_color_spec("rgb:€/00/00"), None);
+    assert_eq!(parse_color_spec("rgb:00/€/00"), None);
+    assert_eq!(parse_color_spec("rgb:00/00/€€"), None);
+    assert_eq!(parse_color_spec("rgb:😀/00/00"), None);
+}

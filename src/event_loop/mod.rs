@@ -142,6 +142,7 @@ impl AppState {
         let default_fg = config.foreground();
         let default_bg = config.background();
         terminal.set_default_colors(default_fg, default_bg);
+        terminal.set_palette(palette);
         terminal.grid.cursor.shape = config.cursor_shape();
         terminal.grid.max_scrollback = config.scrollback_lines();
 
