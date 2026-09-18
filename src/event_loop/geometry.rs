@@ -53,6 +53,9 @@ impl AppState {
                     .saturating_sub(u32::from(padding[1]) * 2),
             ),
         ];
+        if (self.terminal.grid.cols, self.terminal.grid.rows) != (cols as usize, rows as usize) {
+            self.terminal.grid.resize(cols as usize, rows as usize);
+        }
         self.terminal.set_geometry(
             [
                 saturating_u16(self.font_mgr.metrics.cell_width),
@@ -63,9 +66,6 @@ impl AppState {
         // The kernel only signals SIGWINCH on an actual change, so this is safe to repeat.
         self.pty
             .resize(cols, rows, viewport_pixels[0], viewport_pixels[1])?;
-        if (self.terminal.grid.cols, self.terminal.grid.rows) != (cols as usize, rows as usize) {
-            self.terminal.grid.resize(cols as usize, rows as usize);
-        }
         for response in self.terminal.take_responses() {
             self.write_pty_blocking(&response);
         }

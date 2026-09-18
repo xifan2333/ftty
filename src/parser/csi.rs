@@ -134,13 +134,23 @@ impl Terminal {
                         2048 => {
                             self.report_window_size = enabled;
                             if enabled {
+                                let current_size = (
+                                    [self.grid.rows, self.grid.cols],
+                                    [self.viewport_pixels[1], self.viewport_pixels[0]],
+                                );
+                                self.last_reported_window_size = Some(current_size);
                                 self.responses.push(
                                     format!(
-                                        "\x1b[4;{};{}t",
-                                        self.viewport_pixels[1], self.viewport_pixels[0]
+                                        "\x1b[48;{};{};{};{}t",
+                                        self.grid.rows,
+                                        self.grid.cols,
+                                        self.viewport_pixels[1],
+                                        self.viewport_pixels[0]
                                     )
                                     .into_bytes(),
                                 );
+                            } else {
+                                self.last_reported_window_size = None;
                             }
                         }
                         _ => {
