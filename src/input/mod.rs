@@ -203,8 +203,9 @@ impl KeyboardHandler {
         use std::io::Seek;
         let mut file = std::fs::File::from(fd);
         let _ = file.rewind();
-        let mut buf = Vec::with_capacity(size);
-        if let Err(err) = file.take(size as u64).read_to_end(&mut buf) {
+        let max_read = (size as u64).min(2 * 1024 * 1024);
+        let mut buf = Vec::new();
+        if let Err(err) = file.take(max_read).read_to_end(&mut buf) {
             eprintln!("ftty: failed reading keymap from fd: {err}");
             return;
         }
