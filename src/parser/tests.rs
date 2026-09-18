@@ -427,7 +427,7 @@ fn test_osc_8_hyperlinks() {
     for i in 0..5 {
         let cell = term.grid.lines[0].cells[i];
         assert!(cell.hyperlink_id.is_some());
-        let id = cell.hyperlink_id.unwrap();
+        let id = cell.hyperlink_id.unwrap().get();
         assert_eq!(term.hyperlink_url(id), Some("https://example.com"));
     }
 
@@ -462,7 +462,7 @@ fn test_osc_8_hyperlinks() {
     full_term.advance_bytes(b"\x1b]8;;https://overflow.com\x07Overflow\x1b]8;;\x07");
     let cell = full_term.grid.lines[0].cells[0];
     assert!(cell.hyperlink_id.is_some());
-    let overflow_id = cell.hyperlink_id.unwrap();
+    let overflow_id = cell.hyperlink_id.unwrap().get();
     assert_eq!(
         full_term.hyperlink_url(overflow_id),
         Some("https://overflow.com")

@@ -2,6 +2,7 @@
 
 pub(crate) use std::cell::Cell as DirtyCell;
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 
 use crate::color::Color;
 
@@ -41,7 +42,7 @@ pub struct Cell {
     pub bg: Color,
     pub underline_color: Color,
     pub flags: CellFlags,
-    pub hyperlink_id: Option<u32>,
+    pub hyperlink_id: Option<NonZeroU32>,
 }
 
 impl Default for Cell {
@@ -60,6 +61,17 @@ impl Default for Cell {
 impl Cell {
     pub fn reset(&mut self) {
         *self = Self::default();
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn hyperlink_id(&self) -> Option<u32> {
+        self.hyperlink_id.map(NonZeroU32::get)
+    }
+
+    #[inline]
+    pub fn set_hyperlink_id(&mut self, id: Option<u32>) {
+        self.hyperlink_id = id.and_then(NonZeroU32::new);
     }
 }
 
