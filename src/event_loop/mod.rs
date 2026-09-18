@@ -215,6 +215,17 @@ impl AppState {
             pty_registered: false,
         })
     }
+
+    /// Pre-warms EGL display, OpenGL context, and shader compilation immediately
+    /// following window surface creation so the first configure only needs a sub-millisecond resize.
+    pub fn prewarm_renderer(&mut self, connection: &Connection) {
+        if let Some(surface) = &self.wayland.surface {
+            let size = [self.wayland.width, self.wayland.height];
+            if let Ok(renderer) = Renderer::new(surface, connection, size) {
+                self.renderer = Some(renderer);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -238,6 +249,9 @@ pub fn run_event_loop(mut app_state: AppState) -> Result<(), FttyError> {
         .map_err(|e| WaylandError::Dispatch(e.to_string()))?;
     conn.flush()
         .map_err(|e| WaylandError::Dispatch(e.to_string()))?;
+
+    app_state.prewarm_renderer(&conn);
+
     run_event_loop_with_connection(app_state, conn, event_queue)
 }
 

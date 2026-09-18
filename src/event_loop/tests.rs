@@ -575,3 +575,38 @@ fn test_pre_event_loop_window_creation_and_surface_setup() {
     assert!(conn.flush().is_ok());
     drop(server);
 }
+
+#[test]
+fn test_prewarm_renderer_noop_without_surface() {
+    let (client, server) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+    let conn = wayland_client::Connection::from_socket(client).expect("conn");
+    let term = Terminal::new(80, 24, 100);
+    let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
+    let mut app = AppState::new(term, pty).expect("app");
+
+    // Before surface creation, prewarm must be a deterministic no-op
+    assert!(app.wayland.surface.is_none());
+    assert!(app.renderer.is_none());
+    app.prewarm_renderer(&conn);
+    assert!(app.renderer.is_none());
+    drop(server);
+}
+
+#[test]
+fn test_configure_renderer_requires_window_surface() {
+    let (client, server) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+    let conn = wayland_client::Connection::from_socket(client).expect("conn");
+    let term = Terminal::new(80, 24, 100);
+    let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
+    let mut app = AppState::new(term, pty).expect("app");
+
+    // Without a window surface, configure_renderer must fail with WindowNotCreated
+    assert!(app.wayland.surface.is_none());
+    assert!(matches!(
+        app.configure_renderer(&conn),
+        Err(crate::error::FttyError::Wayland(
+            crate::error::WaylandError::WindowNotCreated
+        ))
+    ));
+    drop(server);
+}
