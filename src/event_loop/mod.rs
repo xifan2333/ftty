@@ -41,6 +41,7 @@ pub struct AppState {
     pub keyboard: KeyboardHandler,
     pub wayland: WaylandState,
     pub font_mgr: FontManager,
+    pub(crate) font_worker: Option<std::thread::JoinHandle<io::Result<FontManager>>>,
     pub atlas: GlyphAtlas,
     pub ime: ImeState,
     pub kitty_parser: KittyParser,
@@ -217,7 +218,38 @@ impl AppState {
             sync_output_start: None,
             last_sync_gen: 0,
             pty_registered: false,
+            font_worker: None,
         })
+    }
+
+    /// Creates a new `AppState` with an asynchronous font loader worker handle,
+    /// deferring font synchronization until renderer configuration.
+    ///
+    /// # Errors
+    /// Returns [`FttyError`] if PTY initialization fails.
+    pub fn with_font_worker(
+        terminal: Terminal,
+        pty: Pty,
+        font_worker: std::thread::JoinHandle<io::Result<FontManager>>,
+        config: Config,
+        config_path: Option<PathBuf>,
+    ) -> Result<Self, FttyError> {
+        let uninit_font = FontManager::uninitialized(&config.font_families(), config.font_size());
+        let mut state =
+            Self::with_font_and_config(terminal, pty, uninit_font, config, config_path)?;
+        state.font_worker = Some(font_worker);
+        Ok(state)
+    }
+
+    pub(crate) fn ensure_font_loaded(&mut self) -> Result<(), FttyError> {
+        if let Some(worker) = self.font_worker.take() {
+            let loaded = worker
+                .join()
+                .map_err(|_| WaylandError::Dispatch("font worker panicked".to_string()))?
+                .map_err(FttyError::from)?;
+            self.font_mgr = loaded;
+        }
+        Ok(())
     }
 }
 

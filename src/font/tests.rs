@@ -79,10 +79,8 @@ fn unassigned_codepoints_do_not_resolve_to_a_glyph() {
 fn cjk_glyphs_resolve_through_a_fallback_face() {
     let fonts = fonts();
     assert_eq!(fonts.face_key('A', CellFlags::empty()).face, 0);
-    if fonts
-        .font_for_style(CellFlags::empty())
-        .lookup_glyph_index('中')
-        != 0
+    if let Some(primary) = fonts.font_for_style(CellFlags::empty())
+        && primary.lookup_glyph_index('中') != 0
     {
         return; // The primary face already covers CJK on this system.
     }
@@ -334,7 +332,7 @@ fn test_styled_chain_and_fallback_prewarm() {
         CellFlags::ITALIC,
         CellFlags::BOLD | CellFlags::ITALIC,
     ] {
-        let face = fonts.font_for_style(flags);
+        let face = fonts.font_for_style(flags).unwrap();
         assert!(face.horizontal_line_metrics(14.0).is_some());
         let key = fonts.face_key('A', flags);
         assert_eq!(key.glyph, face.lookup_glyph_index('A'));

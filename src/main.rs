@@ -93,9 +93,16 @@ fn main() {
     // Step 2: Concurrently spawn font loader thread and PTY child process
     let font_families = config.font_families();
     let font_size = config.font_size();
-    let font_thread = std::thread::Builder::new()
+    let font_worker = match std::thread::Builder::new()
         .name("font-loader".to_string())
-        .spawn(move || ftty::FontManager::load_with_families(&font_families, font_size));
+        .spawn(move || ftty::FontManager::load_with_families(&font_families, font_size))
+    {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("ftty: failed to spawn font loader thread: {e}");
+            std::process::exit(1);
+        }
+    };
 
     let cols = config.columns();
     let rows = config.rows();
@@ -112,20 +119,7 @@ fn main() {
         }
     };
 
-    // Step 3: Await font loader before constructing complete AppState
-    let font_mgr = match font_thread.map(|h| h.join()) {
-        Ok(Ok(Ok(mgr))) => mgr,
-        Ok(Ok(Err(e))) => {
-            eprintln!("ftty: failed to initialize font: {e}");
-            std::process::exit(1);
-        }
-        _ => {
-            eprintln!("ftty: font loader thread failed");
-            std::process::exit(1);
-        }
-    };
-
-    let app_state = match AppState::with_font_and_config(term, pty, font_mgr, config, config_path) {
+    let app_state = match AppState::with_font_worker(term, pty, font_worker, config, config_path) {
         Ok(state) => state,
         Err(e) => {
             eprintln!("ftty: failed to initialize state: {e}");
