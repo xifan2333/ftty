@@ -577,19 +577,35 @@ fn test_pre_event_loop_window_creation_and_surface_setup() {
 }
 
 #[test]
-fn test_prewarm_renderer_noop_without_surface() {
-    let (client, server) = std::os::unix::net::UnixStream::pair().expect("socketpair");
-    let conn = wayland_client::Connection::from_socket(client).expect("conn");
+fn test_pty_registration_guarded_by_wayland_configured() {
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
     let mut app = AppState::new(term, pty).expect("app");
 
-    // Before surface creation, prewarm must be a deterministic no-op
-    assert!(app.wayland.surface.is_none());
-    assert!(app.renderer.is_none());
-    app.prewarm_renderer(&conn);
-    assert!(app.renderer.is_none());
-    drop(server);
+    // 1. Unmapped state: must reject registration
+    assert!(!app.wayland.configured);
+    assert!(!app.should_register_pty());
+
+    // 2. Initializing state: still unconfigured, must reject registration
+    assert!(
+        app.wayland
+            .transition_window_to(crate::wayland::WindowState::Initializing)
+            .is_ok()
+    );
+    assert!(!app.should_register_pty());
+
+    // 3. Configured state: must accept registration
+    assert!(
+        app.wayland
+            .transition_window_to(crate::wayland::WindowState::Configured)
+            .is_ok()
+    );
+    assert!(app.wayland.configured);
+    assert!(app.should_register_pty());
+
+    // 4. Once registered: must not register a second time
+    app.pty_registered = true;
+    assert!(!app.should_register_pty());
 }
 
 #[test]
