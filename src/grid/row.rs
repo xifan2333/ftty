@@ -102,16 +102,12 @@ pub enum ClearMode {
     Saved,
 }
 
-pub(crate) const MAX_ROW_OVERFLOW: usize = 256;
-
 /// A horizontal row of cells in the terminal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Row {
     pub cells: Vec<Cell>,
     pub wrapped: bool,
     pub placeholders: Option<HashMap<usize, (u16, u16, u8)>>,
-    pub overflow: Vec<Cell>,
-    pub overflow_placeholders: Vec<(usize, (u16, u16, u8))>,
     pub dirty: DirtyCell<bool>,
 }
 
@@ -122,71 +118,19 @@ impl Row {
             cells: vec![Cell::default(); cols],
             wrapped: false,
             placeholders: None,
-            overflow: Vec::new(),
-            overflow_placeholders: Vec::new(),
             dirty: DirtyCell::new(true),
         }
     }
 
     pub fn resize(&mut self, new_cols: usize) {
         if new_cols < self.cells.len() {
-            let current_len = self.cells.len();
-            let excess_len = current_len - new_cols;
-
-            let mut newly_overflowed_ph = Vec::new();
+            self.cells.truncate(new_cols);
             if let Some(coords) = &mut self.placeholders {
-                coords.retain(|&col, &mut data| {
-                    if col >= new_cols {
-                        newly_overflowed_ph.push((col - new_cols, data));
-                        false
-                    } else {
-                        true
-                    }
-                });
-            }
-
-            for (offset, _) in &mut self.overflow_placeholders {
-                *offset = offset.saturating_add(excess_len);
-            }
-            newly_overflowed_ph.append(&mut self.overflow_placeholders);
-            self.overflow_placeholders = newly_overflowed_ph;
-
-            let excess: Vec<Cell> = self.cells.drain(new_cols..).collect();
-            let mut new_overflow = excess;
-            new_overflow.append(&mut self.overflow);
-            self.overflow = new_overflow;
-
-            if self.overflow.len() > MAX_ROW_OVERFLOW {
-                self.overflow.truncate(MAX_ROW_OVERFLOW);
-                self.overflow_placeholders
-                    .retain(|&(offset, _)| offset < MAX_ROW_OVERFLOW);
+                coords.retain(|&col, _| col < new_cols);
             }
             self.dirty.set(true);
         } else if new_cols > self.cells.len() {
-            let current_len = self.cells.len();
-            let needed = new_cols - current_len;
-            let from_overflow = needed.min(self.overflow.len());
-
-            for cell in self.overflow.drain(0..from_overflow) {
-                self.cells.push(cell);
-            }
-
-            let mut remaining_ph = Vec::new();
-            for (offset, data) in self.overflow_placeholders.drain(..) {
-                if offset < from_overflow {
-                    let col = current_len + offset;
-                    self.placeholders
-                        .get_or_insert_with(HashMap::new)
-                        .insert(col, data);
-                } else {
-                    remaining_ph.push((offset - from_overflow, data));
-                }
-            }
-            self.overflow_placeholders = remaining_ph;
-
-            if self.cells.len() < new_cols {
-                self.cells.resize(new_cols, Cell::default());
-            }
+            self.cells.resize(new_cols, Cell::default());
             self.dirty.set(true);
         }
     }
@@ -197,8 +141,6 @@ impl Row {
         if let Some(coords) = &mut self.placeholders {
             coords.clear();
         }
-        self.overflow.clear();
-        self.overflow_placeholders.clear();
         self.dirty.set(true);
     }
 }
