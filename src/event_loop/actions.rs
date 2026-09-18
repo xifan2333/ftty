@@ -108,7 +108,7 @@ impl AppState {
         }
 
         self.needs_redraw = true;
-        crate::event_loop::trim_memory();
+        crate::alloc::trim_memory();
     }
 
     /// Executes a semantic shortcut action (e.g. scroll page up, zoom font).

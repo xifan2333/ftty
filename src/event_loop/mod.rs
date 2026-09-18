@@ -79,7 +79,9 @@ pub struct AppState {
     pub(crate) sync_output_start: Option<std::time::Instant>,
     pub(crate) last_sync_gen: u64,
     pub(crate) pty_registered: bool,
-    pub(crate) needs_trim: bool,
+    pub(crate) last_activity: std::time::Instant,
+    pub(crate) last_trim: std::time::Instant,
+    pub(crate) pending_trim: bool,
 }
 
 impl AppState {
@@ -216,7 +218,9 @@ impl AppState {
             sync_output_start: None,
             last_sync_gen: 0,
             pty_registered: false,
-            needs_trim: false,
+            last_activity: std::time::Instant::now(),
+            last_trim: std::time::Instant::now(),
+            pending_trim: false,
         })
     }
 
@@ -381,7 +385,8 @@ pub fn run_event_loop_with_connection(
 
                     if total_read > 0 {
                         state.needs_redraw = true;
-                        state.needs_trim = true;
+                        state.last_activity = std::time::Instant::now();
+                        state.pending_trim = true;
                         state.update_ime_cursor_area();
                     }
                     Ok(calloop::PostAction::Continue)
@@ -448,15 +453,20 @@ pub fn run_event_loop_with_connection(
                 app_state.frame_callback = Some(surface.frame(&qh, ()));
             }
             renderer.present()?;
-            if app_state.needs_trim {
-                app_state.needs_trim = false;
-                trim_memory();
-            }
             let _ = app_state
                 .wayland
                 .transition_window_to(crate::wayland::WindowState::Active);
             app_state.update_ime_cursor_area();
             app_state.needs_redraw = false;
+        }
+
+        if app_state.pending_trim
+            && app_state.last_activity.elapsed() >= std::time::Duration::from_secs(3)
+            && app_state.last_trim.elapsed() >= std::time::Duration::from_secs(10)
+        {
+            app_state.pending_trim = false;
+            app_state.last_trim = std::time::Instant::now();
+            crate::alloc::trim_memory();
         }
 
         let _ = conn.flush();
@@ -465,7 +475,7 @@ pub fn run_event_loop_with_connection(
     app_state.render_error.map_or(Ok(()), Err)
 }
 
-pub use crate::pty::trim_memory;
+pub use crate::alloc::trim_memory;
 
 #[cfg(test)]
 mod tests;
