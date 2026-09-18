@@ -684,6 +684,38 @@ fn test_horizontal_shrink_and_grow_pads_with_default_cells() {
 }
 
 #[test]
+fn test_horizontal_shrink_clears_split_wide_character() {
+    let mut grid = Grid::new(10, 1, 100);
+    grid.cursor.col = 4;
+    // Write 2-column wide character '你' at col 4 and 5
+    grid.write_char(
+        '你',
+        Color::DefaultForeground,
+        Color::DefaultBackground,
+        CellFlags::empty(),
+    );
+    assert!(
+        grid.visible_line(0).cells[4]
+            .flags
+            .contains(CellFlags::WIDE_CHAR)
+    );
+    assert!(
+        grid.visible_line(0).cells[5]
+            .flags
+            .contains(CellFlags::WIDE_CHAR_SPACER)
+    );
+
+    // Shrink to 5 columns: separates WIDE_CHAR from its spacer at col 5
+    grid.resize(5, 1);
+    assert_eq!(grid.visible_line(0).cells[4], crate::grid::Cell::default());
+
+    // Grow back to 10 columns: no orphaned wide-character flag survives
+    grid.resize(10, 1);
+    assert_eq!(grid.visible_line(0).cells[4], crate::grid::Cell::default());
+    assert_eq!(grid.visible_line(0).cells[5], crate::grid::Cell::default());
+}
+
+#[test]
 fn test_alt_screen_resize_preserves_absolute_row_coordinates() {
     let mut grid = Grid::new(20, 5, 100);
     grid.enter_alt_screen();

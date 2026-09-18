@@ -124,6 +124,14 @@ impl Row {
 
     pub fn resize(&mut self, new_cols: usize) {
         if new_cols < self.cells.len() {
+            // Prevent splitting a wide character across the truncation boundary.
+            if new_cols > 0
+                && self.cells[new_cols - 1]
+                    .flags
+                    .contains(CellFlags::WIDE_CHAR)
+            {
+                self.cells[new_cols - 1] = Cell::default();
+            }
             self.cells.truncate(new_cols);
             if let Some(coords) = &mut self.placeholders {
                 coords.retain(|&col, _| col < new_cols);
