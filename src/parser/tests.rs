@@ -217,7 +217,13 @@ fn test_synchronized_output_and_decrqm_queries() {
 fn test_osc_52_clipboard_read_and_write() {
     let mut term = Terminal::new(80, 24, 100);
 
-    // Query empty clipboard
+    // By default, OSC 52 read is disabled for security
+    assert!(!term.allow_osc52_read);
+    term.advance_bytes(b"\x1b]52;c;?\x07");
+    assert_eq!(term.take_responses(), Vec::<Vec<u8>>::new());
+
+    // Enable OSC 52 read
+    term.allow_osc52_read = true;
     term.advance_bytes(b"\x1b]52;c;?\x07");
     assert_eq!(term.take_responses(), vec![b"\x1b]52;c;\x1b\\".to_vec()]);
 
@@ -236,7 +242,13 @@ fn test_osc_52_clipboard_read_and_write() {
         vec![b"\x1b]52;c;aGVsbG8gd29ybGQ=\x1b\\".to_vec()]
     );
 
-    // Clear clipboard
+    // When OSC 52 write is disabled, writes are ignored
+    term.allow_osc52_write = false;
+    term.advance_bytes(b"\x1b]52;c;bW9kaWZpZWQ=\x07");
+    assert_eq!(term.clipboard_content.as_deref(), Some("hello world"));
+
+    // Clear clipboard (when write re-enabled)
+    term.allow_osc52_write = true;
     term.advance_bytes(b"\x1b]52;c;\x07");
     assert_eq!(term.clipboard_content, None);
     assert_eq!(term.take_pending_clipboard(), Some(None));

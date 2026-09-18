@@ -128,17 +128,22 @@ impl Terminal {
                 let primary_target = target_str.chars().next().unwrap_or('c');
 
                 if payload == b"?" {
-                    let b64 = self
-                        .clipboard_content
-                        .as_ref()
-                        .map(|text| BASE64_STANDARD.encode(text.as_bytes()))
-                        .unwrap_or_default();
-                    let resp = format!("\x1b]52;{};{}\x1b\\", primary_target, b64);
-                    self.responses.push(resp.into_bytes());
+                    if self.allow_osc52_read {
+                        let b64 = self
+                            .clipboard_content
+                            .as_ref()
+                            .map(|text| BASE64_STANDARD.encode(text.as_bytes()))
+                            .unwrap_or_default();
+                        let resp = format!("\x1b]52;{};{}\x1b\\", primary_target, b64);
+                        self.responses.push(resp.into_bytes());
+                    }
                 } else if payload.is_empty() {
-                    self.clipboard_content = None;
-                    self.pending_clipboard = Some(None);
-                } else if let Ok(decoded) = BASE64_STANDARD.decode(payload)
+                    if self.allow_osc52_write {
+                        self.clipboard_content = None;
+                        self.pending_clipboard = Some(None);
+                    }
+                } else if self.allow_osc52_write
+                    && let Ok(decoded) = BASE64_STANDARD.decode(payload)
                     && let Ok(text) = String::from_utf8(decoded)
                 {
                     self.clipboard_content = Some(text.clone());
