@@ -209,8 +209,8 @@ impl KeyboardHandler {
             return;
         }
 
-        if let Some(&0) = buf.last() {
-            buf.pop();
+        if let Some(pos) = buf.iter().position(|&b| b == 0) {
+            buf.truncate(pos);
         }
         match std::str::from_utf8(&buf) {
             Ok(s) => self.set_keymap_from_string(s),
