@@ -96,9 +96,17 @@ impl Dispatch<XdgToplevel, ()> for AppState {
                     .stashed_floating_size
                     .unwrap_or([default_w, default_h]);
 
-                let target_w = if width > 0 { width as u32 } else { stashed[0] };
+                let target_w = if width > 0 {
+                    width as u32
+                } else if state.wayland.width > 0 {
+                    state.wayland.width
+                } else {
+                    stashed[0]
+                };
                 let target_h = if height > 0 {
                     height as u32
+                } else if state.wayland.height > 0 {
+                    state.wayland.height
                 } else {
                     stashed[1]
                 };
