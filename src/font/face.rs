@@ -167,7 +167,7 @@ impl Font {
         if let Some(face) = &guard.face {
             Self::set_font_size(face, font_size);
             let glyph_idx = face.get_char_index(c as usize).unwrap_or(0);
-            if face.load_glyph(glyph_idx, LoadFlag::DEFAULT).is_ok() {
+            if face.load_glyph(glyph_idx, LoadFlag::NO_HINTING).is_ok() {
                 let advance = face.glyph().advance().x;
                 if advance > 0 {
                     return (advance as f32) / 64.0;
