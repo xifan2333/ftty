@@ -8,3 +8,7 @@
 
 # Logs
 *.log
+
+# Agent local directories
+.claude/
+.pi/
