@@ -97,12 +97,24 @@ impl AppState {
             renderer.clear_cache();
         }
 
+        self.logical_font_size = new_font_size;
+        let factor = if self.wayland.is_fractional_scale_active() {
+            self.wayland.scale_factor
+        } else {
+            1.0
+        };
+        let scaled_font_size = (self.logical_font_size * factor as f32).clamp(
+            crate::font::MIN_FONT_SIZE,
+            crate::font::MAX_RASTER_FONT_SIZE,
+        );
+
         if let Some(new_font_mgr) = maybe_new_font {
             self.font_mgr = new_font_mgr;
             self.atlas.clear();
+            self.update_font_size(scaled_font_size);
             let _ = self.resize_terminal();
         } else if size_changed {
-            self.update_font_size(new_font_size);
+            self.update_font_size(scaled_font_size);
         } else if padding_changed {
             let _ = self.resize_terminal();
         }
@@ -156,16 +168,16 @@ impl AppState {
                 self.needs_redraw = true;
             }
             KeyAction::FontIncrease => {
-                let new_size = (self.font_mgr.font_size() + 1.0).min(crate::font::MAX_FONT_SIZE);
-                self.update_font_size(new_size);
+                let new_size = (self.logical_font_size + 1.0).min(crate::font::MAX_FONT_SIZE);
+                self.set_logical_font_size(new_size);
             }
             KeyAction::FontDecrease => {
-                let new_size = (self.font_mgr.font_size() - 1.0).max(crate::font::MIN_FONT_SIZE);
-                self.update_font_size(new_size);
+                let new_size = (self.logical_font_size - 1.0).max(crate::font::MIN_FONT_SIZE);
+                self.set_logical_font_size(new_size);
             }
             KeyAction::FontReset => {
                 let default_size = self.config.font_size();
-                self.update_font_size(default_size);
+                self.set_logical_font_size(default_size);
             }
             KeyAction::ClipboardCopy => {
                 self.copy_selection(qh);
@@ -174,5 +186,20 @@ impl AppState {
                 self.paste_clipboard(conn);
             }
         }
+    }
+
+    /// Sets the logical font size and updates font metrics scaled by the active display factor.
+    pub fn set_logical_font_size(&mut self, size: f32) {
+        self.logical_font_size = size;
+        let factor = if self.wayland.is_fractional_scale_active() {
+            self.wayland.scale_factor
+        } else {
+            1.0
+        };
+        let scaled_size = (size * factor as f32).clamp(
+            crate::font::MIN_FONT_SIZE,
+            crate::font::MAX_RASTER_FONT_SIZE,
+        );
+        self.update_font_size(scaled_size);
     }
 }

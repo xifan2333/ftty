@@ -101,8 +101,10 @@ struct StyleChain {
 
 /// Minimum font size in points/pixels supported by the terminal.
 pub const MIN_FONT_SIZE: f32 = 6.0;
-/// Maximum font size in points/pixels supported by the terminal.
+/// Maximum user-facing font size in points/pixels supported by the terminal.
 pub const MAX_FONT_SIZE: f32 = 72.0;
+/// Maximum physical raster font size accounting for display scale factors (up to 4x HiDPI).
+pub const MAX_RASTER_FONT_SIZE: f32 = MAX_FONT_SIZE * 4.0;
 
 pub(crate) fn style_index(flags: CellFlags) -> usize {
     usize::from(flags.contains(CellFlags::BOLD))
@@ -352,7 +354,7 @@ impl FontManager {
     /// scale factors during rasterization, this avoids re-reading font files from
     /// disk or re-querying Fontconfig on runtime zoom. Returns `true` if the size changed.
     pub fn set_font_size(&mut self, new_size: f32) -> bool {
-        if !new_size.is_finite() || new_size < MIN_FONT_SIZE || new_size > MAX_FONT_SIZE {
+        if !new_size.is_finite() || new_size < MIN_FONT_SIZE || new_size > MAX_RASTER_FONT_SIZE {
             return false;
         }
         if (self.font_size - new_size).abs() < f32::EPSILON {

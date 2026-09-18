@@ -91,7 +91,16 @@ impl AppState {
             self.font_mgr.metrics,
             [self.config.padding_x(), self.config.padding_y()],
         );
-        text_input.set_cursor_rectangle(x, y, w, h);
+        let scale = if self.wayland.is_fractional_scale_active() {
+            self.wayland.scale_factor.max(0.1)
+        } else {
+            1.0
+        };
+        let logical_x = (f64::from(x) / scale).round() as i32;
+        let logical_y = (f64::from(y) / scale).round() as i32;
+        let logical_w = (f64::from(w) / scale).round().max(1.0) as i32;
+        let logical_h = (f64::from(h) / scale).round().max(1.0) as i32;
+        text_input.set_cursor_rectangle(logical_x, logical_y, logical_w, logical_h);
         text_input.commit();
     }
 }

@@ -105,13 +105,7 @@ impl Dispatch<WlKeyboard, ()> for AppState {
                             zwp_text_input_v3::ContentHint::None,
                             zwp_text_input_v3::ContentPurpose::Terminal,
                         );
-                        let (x, y, w, h) = crate::input::ime::calculate_cursor_rect(
-                            &state.terminal.grid,
-                            state.font_mgr.metrics,
-                            [state.config.padding_x(), state.config.padding_y()],
-                        );
-                        text_input.set_cursor_rectangle(x, y, w, h);
-                        text_input.commit();
+                        state.update_ime_cursor_area();
                     }
                 }
             }
@@ -498,7 +492,11 @@ impl AppState {
     /// Returns the absolute `(line, screen_row, col)` grid coordinates under the surface-relative pointer position.
     #[must_use]
     pub fn cell_at_pointer(&self, surface_x: f64, surface_y: f64) -> (usize, usize, usize) {
-        let scale = self.wayland.scale_factor.max(0.1);
+        let scale = if self.wayland.is_fractional_scale_active() {
+            self.wayland.scale_factor.max(0.1)
+        } else {
+            1.0
+        };
         let cw = f64::from(self.font_mgr.metrics.cell_width) / scale;
         let ch = f64::from(self.font_mgr.metrics.cell_height) / scale;
         let pad_x = f64::from(self.config.padding_x());

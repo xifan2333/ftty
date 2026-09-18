@@ -39,19 +39,23 @@ impl AppState {
     }
 
     pub(crate) fn resize_terminal(&mut self) -> Result<(), FttyError> {
-        let padding = [self.config.padding_x(), self.config.padding_y()];
+        let factor = if self.wayland.is_fractional_scale_active() {
+            self.wayland.scale_factor
+        } else {
+            1.0
+        };
+        let phys_width = (self.wayland.width as f64 * factor).round() as u32;
+        let phys_height = (self.wayland.height as f64 * factor).round() as u32;
+        let pad_x = (f64::from(self.config.padding_x()) * factor).round() as u16;
+        let pad_y = (f64::from(self.config.padding_y()) * factor).round() as u16;
         let (cols, rows) = terminal_size(
-            [self.wayland.width, self.wayland.height],
+            [phys_width, phys_height],
             self.font_mgr.metrics,
-            padding,
+            [pad_x, pad_y],
         );
         let viewport_pixels = [
-            saturating_u16(self.wayland.width.saturating_sub(u32::from(padding[0]) * 2)),
-            saturating_u16(
-                self.wayland
-                    .height
-                    .saturating_sub(u32::from(padding[1]) * 2),
-            ),
+            saturating_u16(phys_width.saturating_sub(u32::from(pad_x) * 2)),
+            saturating_u16(phys_height.saturating_sub(u32::from(pad_y) * 2)),
         ];
         if (self.terminal.grid.cols, self.terminal.grid.rows) != (cols as usize, rows as usize) {
             self.terminal.grid.resize(cols as usize, rows as usize);
@@ -77,7 +81,11 @@ impl AppState {
             .pending_size
             .take()
             .unwrap_or([self.wayland.width, self.wayland.height]);
-        let factor = self.wayland.scale_factor;
+        let factor = if self.wayland.is_fractional_scale_active() {
+            self.wayland.scale_factor
+        } else {
+            1.0
+        };
         let physical_size = [
             (logical_size[0] as f64 * factor).round().max(1.0) as u32,
             (logical_size[1] as f64 * factor).round().max(1.0) as u32,
@@ -123,13 +131,18 @@ impl AppState {
 
     /// Handles Wayland fractional scale updates from `wp_fractional_scale_v1`.
     pub fn handle_preferred_scale(&mut self, scale_120: u32, connection: &Connection) {
+        if !self.wayland.is_fractional_scale_active() {
+            return;
+        }
         let factor = scale_120 as f64 / 120.0;
         if (self.wayland.scale_factor - factor).abs() > 0.001 {
             self.wayland.scale_factor = factor;
             self.wayland.preferred_scale_120 = scale_120;
 
-            let base_font_size = self.config.font_size();
-            let scaled_font_size = (base_font_size * factor as f32).max(crate::font::MIN_FONT_SIZE);
+            let scaled_font_size = (self.logical_font_size * factor as f32).clamp(
+                crate::font::MIN_FONT_SIZE,
+                crate::font::MAX_RASTER_FONT_SIZE,
+            );
             self.update_font_size(scaled_font_size);
 
             if let Err(e) = self.configure_renderer(connection) {

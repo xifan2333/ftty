@@ -41,11 +41,15 @@ impl Dispatch<WlRegistry, ()> for AppState {
                     let comp = registry.bind::<WlCompositor, _, _>(name, version.min(4), qh, ());
                     state.wayland.compositor = Some(comp);
                     state.wayland.init_window(qh);
+                    state.try_init_fractional_scale(qh);
+                    state.try_init_viewport(qh);
                 }
                 "xdg_wm_base" => {
                     let xdg = registry.bind::<XdgWmBase, _, _>(name, 1, qh, ());
                     state.wayland.xdg_wm_base = Some(xdg);
                     state.wayland.init_window(qh);
+                    state.try_init_fractional_scale(qh);
+                    state.try_init_viewport(qh);
                 }
                 "wl_seat" => {
                     let seat = registry.bind::<WlSeat, _, _>(name, version.min(5), qh, ());

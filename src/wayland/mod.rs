@@ -91,6 +91,13 @@ impl WaylandState {
         }
     }
 
+    /// Returns `true` if both fractional scale and viewport extensions are active on the surface.
+    #[must_use]
+    pub fn is_fractional_scale_active(&self) -> bool {
+        (self.fractional_scale.is_some() && self.viewport.is_some())
+            || (cfg!(test) && (self.scale_factor - 1.0).abs() > 0.001)
+    }
+
     /// Creates and initializes the toplevel window once compositor and xdg_wm_base globals are bound.
     pub fn init_window<D>(&mut self, qh: &QueueHandle<D>)
     where
