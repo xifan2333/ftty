@@ -133,6 +133,9 @@ pub fn parse_color_spec(s: &str) -> Option<Rgb> {
 }
 
 fn parse_x11_component(s: &str) -> Option<u8> {
+    if !s.is_ascii() {
+        return None;
+    }
     match s.len() {
         1 => u8::from_str_radix(s, 16).ok().map(|v| v * 17),
         2 => u8::from_str_radix(s, 16).ok(),

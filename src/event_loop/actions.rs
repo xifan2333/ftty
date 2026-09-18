@@ -89,6 +89,7 @@ impl AppState {
         self.default_bg = new_config.background();
         self.terminal
             .set_default_colors(self.default_fg, self.default_bg);
+        self.terminal.set_palette(self.palette);
         self.terminal.grid.cursor.shape = new_config.cursor_shape();
         self.config = new_config;
 

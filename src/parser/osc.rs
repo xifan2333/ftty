@@ -73,15 +73,13 @@ impl Terminal {
                 } else if let Ok(s) = std::str::from_utf8(params[1])
                     && let Some(color) = crate::color::parse_color_spec(s)
                 {
-                    self.default_bg = color;
-                    self.palette_dirty = true;
+                    self.update_dynamic_background(color);
                 }
             } else if params[0] == b"110" {
                 self.default_fg = self.initial_default_fg;
                 self.palette_dirty = true;
             } else if params[0] == b"111" {
-                self.default_bg = self.initial_default_bg;
-                self.palette_dirty = true;
+                self.update_dynamic_background(self.initial_default_bg);
             } else if params[0] == b"4" && params.len() >= 3 {
                 for chunk in params[1..].as_chunks::<2>().0 {
                     if let Ok(idx_str) = std::str::from_utf8(chunk[0])

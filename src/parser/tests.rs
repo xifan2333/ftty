@@ -653,4 +653,14 @@ fn test_dynamic_palette_and_colors_osc() {
     assert_eq!(term.palette[2], Rgb::new(0x11, 0x22, 0x33));
     term.advance_bytes(b"\x1b]104\x07");
     assert_eq!(term.palette[2], term.initial_palette[2]);
+
+    // 9. Mode 2031 color scheme reporting when background crosses threshold
+    term.advance_bytes(b"\x1b[?2031h");
+    term.take_responses();
+
+    term.advance_bytes(b"\x1b]11;#ffffff\x07");
+    assert_eq!(term.take_responses(), vec![b"\x1b[?2031;2$y".to_vec()]);
+
+    term.advance_bytes(b"\x1b]111\x07");
+    assert_eq!(term.take_responses(), vec![b"\x1b[?2031;1$y".to_vec()]);
 }

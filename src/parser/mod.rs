@@ -185,6 +185,17 @@ impl Terminal {
         self.initial_palette = palette;
     }
 
+    pub(crate) fn update_dynamic_background(&mut self, new_bg: Rgb) {
+        let old_bg = self.default_bg;
+        self.default_bg = new_bg;
+        self.palette_dirty = true;
+        if self.report_color_scheme
+            && Self::is_dark_background(old_bg) != Self::is_dark_background(new_bg)
+        {
+            self.send_color_scheme_report();
+        }
+    }
+
     pub(crate) const fn is_dark_background(bg: Rgb) -> bool {
         (bg.r as u32 * 299 + bg.g as u32 * 587 + bg.b as u32 * 114) / 1000 < 128
     }

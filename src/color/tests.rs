@@ -56,4 +56,8 @@ fn test_parse_color_spec() {
         Some(Rgb::new(24, 36, 54))
     );
     assert_eq!(parse_color_spec("invalid"), None);
+    assert_eq!(parse_color_spec("rgb:€/00/00"), None);
+    assert_eq!(parse_color_spec("rgb:00/€/00"), None);
+    assert_eq!(parse_color_spec("rgb:00/00/€€"), None);
+    assert_eq!(parse_color_spec("rgb:😀/00/00"), None);
 }
