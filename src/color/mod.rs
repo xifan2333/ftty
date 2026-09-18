@@ -112,5 +112,34 @@ impl Color {
 
 pub use palette::default_256_palette;
 
+/// Parses a color string in hex (`#RRGGBB`, `#RGB`) or X11 notation (`rgb:RR/GG/BB` or `rgb:RRRR/GGGG/BBBB`).
+#[must_use]
+pub fn parse_color_spec(s: &str) -> Option<Rgb> {
+    let s = s.trim();
+    if let Some(rest) = s.strip_prefix("rgb:") {
+        let mut parts = rest.split('/');
+        let r_str = parts.next()?;
+        let g_str = parts.next()?;
+        let b_str = parts.next()?;
+        if parts.next().is_some() {
+            return None;
+        }
+        let r = parse_x11_component(r_str)?;
+        let g = parse_x11_component(g_str)?;
+        let b = parse_x11_component(b_str)?;
+        return Some(Rgb::new(r, g, b));
+    }
+    s.parse::<Rgb>().ok()
+}
+
+fn parse_x11_component(s: &str) -> Option<u8> {
+    match s.len() {
+        1 => u8::from_str_radix(s, 16).ok().map(|v| v * 17),
+        2 => u8::from_str_radix(s, 16).ok(),
+        3 | 4 => u8::from_str_radix(&s[0..2], 16).ok(),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests;
