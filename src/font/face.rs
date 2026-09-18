@@ -2,13 +2,23 @@
 
 use std::io;
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use freetype::face::LoadFlag;
 
+fn ft_global_lock() -> MutexGuard<'static, ()> {
+    static FT_LOCK: Mutex<()> = Mutex::new(());
+    FT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn ft_library() -> io::Result<&'static freetype::Library> {
     static LIB: OnceLock<Result<freetype::Library, String>> = OnceLock::new();
-    let res = LIB.get_or_init(|| freetype::Library::init().map_err(|e| format!("{e:?}")));
+    let res = LIB.get_or_init(|| {
+        let _guard = ft_global_lock();
+        freetype::Library::init().map_err(|e| format!("{e:?}"))
+    });
     match res {
         Ok(lib) => Ok(lib),
         Err(e) => Err(io::Error::other(format!(
@@ -50,7 +60,16 @@ impl RasterizedGlyph {
 }
 
 struct FtFaceWrapper {
-    face: freetype::Face,
+    face: Option<freetype::Face>,
+}
+
+impl Drop for FtFaceWrapper {
+    fn drop(&mut self) {
+        // SAFETY: FreeType FT_Done_Face and FT_Done_Library are not thread-safe.
+        // We acquire the global FreeType lock before letting Face drop.
+        let _guard = ft_global_lock();
+        self.face.take();
+    }
 }
 
 // SAFETY: FreeType `FT_Face` handles are uniquely owned and exclusively
@@ -72,6 +91,7 @@ impl Font {
     /// # Errors
     /// Returns [`std::io::Error`] if the file cannot be opened or FreeType fails to parse headers.
     pub fn from_file(path: &Path, collection_index: u32) -> io::Result<Self> {
+        let _guard = ft_global_lock();
         let face = ft_library()?
             .new_face(path, collection_index as isize)
             .map_err(|e| {
@@ -81,7 +101,7 @@ impl Font {
                 )
             })?;
         Ok(Self {
-            inner: Arc::new(Mutex::new(FtFaceWrapper { face })),
+            inner: Arc::new(Mutex::new(FtFaceWrapper { face: Some(face) })),
         })
     }
 
@@ -90,6 +110,7 @@ impl Font {
     /// # Errors
     /// Returns [`std::io::Error`] if FreeType fails to parse font tables from the bytes.
     pub fn from_bytes(bytes: &[u8], collection_index: u32) -> io::Result<Self> {
+        let _guard = ft_global_lock();
         let face = ft_library()?
             .new_memory_face(bytes.to_vec(), collection_index as isize)
             .map_err(|e| {
@@ -99,7 +120,7 @@ impl Font {
                 )
             })?;
         Ok(Self {
-            inner: Arc::new(Mutex::new(FtFaceWrapper { face })),
+            inner: Arc::new(Mutex::new(FtFaceWrapper { face: Some(face) })),
         })
     }
 
@@ -112,7 +133,11 @@ impl Font {
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.face.get_char_index(c as usize).unwrap_or(0) as u16
+        guard
+            .face
+            .as_ref()
+            .and_then(|f| f.get_char_index(c as usize))
+            .unwrap_or(0) as u16
     }
 
     /// Sets the active character pixel height on the face.
@@ -128,11 +153,12 @@ impl Font {
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Self::set_font_size(&guard.face, font_size);
-        let metrics = guard.face.size_metrics()?;
-        let ascent = (metrics.ascender >> 6) as f32;
-        let descent = (metrics.descender >> 6) as f32;
-        let height = (metrics.height >> 6) as f32;
+        let face = guard.face.as_ref()?;
+        Self::set_font_size(face, font_size);
+        let metrics = face.size_metrics()?;
+        let ascent = (metrics.ascender as f32) / 64.0;
+        let descent = (metrics.descender as f32) / 64.0;
+        let height = (metrics.height as f32) / 64.0;
         let new_line_size = if height > 0.0 {
             height
         } else {
@@ -151,12 +177,14 @@ impl Font {
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Self::set_font_size(&guard.face, font_size);
-        let glyph_idx = guard.face.get_char_index(c as usize).unwrap_or(0);
-        if guard.face.load_glyph(glyph_idx, LoadFlag::DEFAULT).is_ok() {
-            let advance = guard.face.glyph().advance().x >> 6;
-            if advance > 0 {
-                return advance as f32;
+        if let Some(face) = &guard.face {
+            Self::set_font_size(face, font_size);
+            let glyph_idx = face.get_char_index(c as usize).unwrap_or(0);
+            if face.load_glyph(glyph_idx, LoadFlag::DEFAULT).is_ok() {
+                let advance = face.glyph().advance().x;
+                if advance > 0 {
+                    return (advance as f32) / 64.0;
+                }
             }
         }
         (font_size * 0.6).ceil().max(1.0)
@@ -169,12 +197,15 @@ impl Font {
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Self::set_font_size(&guard.face, font_size);
+        let Some(face) = &guard.face else {
+            return RasterizedGlyph::empty();
+        };
+        Self::set_font_size(face, font_size);
         let flags = LoadFlag::RENDER | LoadFlag::TARGET_LIGHT;
-        if guard.face.load_glyph(glyph_index as u32, flags).is_err() {
+        if face.load_glyph(glyph_index as u32, flags).is_err() {
             return RasterizedGlyph::empty();
         }
-        let slot = guard.face.glyph();
+        let slot = face.glyph();
         let bmp = slot.bitmap();
         let width = bmp.width().max(0) as u32;
         let height = bmp.rows().max(0) as u32;
