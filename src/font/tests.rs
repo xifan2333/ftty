@@ -1,6 +1,5 @@
 use std::fs;
 use std::io;
-use std::sync::OnceLock;
 
 use crate::font::FontManager;
 use crate::font::atlas::{GlyphAtlas, Shelf};
@@ -11,8 +10,12 @@ use crate::font::{parse_cell_metrics_from_bytes, parse_cell_metrics_from_file};
 use crate::grid::CellFlags;
 
 fn fonts() -> &'static FontManager {
-    static FONTS: OnceLock<FontManager> = OnceLock::new();
-    FONTS.get_or_init(|| FontManager::load(14.0).expect("system monospace font"))
+    thread_local! {
+        static CACHED: &'static FontManager = Box::leak(Box::new(
+            FontManager::load(14.0).expect("system monospace font")
+        ));
+    }
+    CACHED.with(|&f| f)
 }
 
 #[test]
@@ -20,9 +23,12 @@ fn font_metrics_and_rasterization() {
     let fonts = fonts();
     assert!(fonts.metrics.cell_width > 0);
     assert!(fonts.metrics.cell_height >= fonts.metrics.ascent as u32);
-    let (metrics, bitmap) = fonts.regular().rasterize('M', fonts.font_size);
-    assert_eq!(bitmap.len(), metrics.width * metrics.height);
-    assert!(bitmap.iter().any(|&pixel| pixel != 0));
+    let glyph_idx = fonts.regular().lookup_glyph_index('M');
+    let raster = fonts
+        .regular()
+        .rasterize_indexed(glyph_idx, fonts.font_size);
+    assert!(raster.width > 0 && raster.height > 0);
+    assert!(raster.pixels.iter().any(|&pixel| pixel != 0));
 }
 
 #[test]
@@ -340,7 +346,7 @@ fn test_styled_chain_and_fallback_prewarm() {
 }
 
 #[test]
-fn test_ttf_parser_metrics_match_fontdue() {
+fn test_ttf_parser_metrics_match_freetype() {
     let font_size = 14.0;
     let fonts = fonts();
     let fc = fontconfig().expect("fontconfig initialized");
@@ -398,4 +404,17 @@ fn test_whitespace_and_empty_glyph_safeguards() {
     let res = atlas.get_or_insert('\0', CellFlags::empty(), fonts);
     assert!(res.is_none());
     assert_eq!(atlas.ascii_cache[0], None);
+}
+
+#[test]
+fn test_font_manager_initialization_is_fast() {
+    let start = std::time::Instant::now();
+    let font_mgr = FontManager::load(14.0).expect("load monospace font");
+    let elapsed = start.elapsed();
+    assert!(font_mgr.metrics.cell_width > 0);
+    assert!(font_mgr.metrics.cell_height > 0);
+    assert!(
+        elapsed < std::time::Duration::from_millis(200),
+        "FreeType initialization took {elapsed:?}"
+    );
 }

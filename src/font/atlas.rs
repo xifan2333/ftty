@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::font::{FontManager, style_index};
+use crate::font::{FontManager, RasterizedGlyph, style_index};
 use crate::grid::CellFlags;
 
 pub const MAX_ATLAS_SIZE: u32 = 2048;
@@ -110,23 +110,23 @@ impl GlyphAtlas {
         true
     }
 
-    fn insert_bitmap(&mut self, metrics: fontdue::Metrics, bitmap: &[u8]) -> Option<CachedGlyph> {
-        let width = u32::try_from(metrics.width).ok()?;
-        let height = u32::try_from(metrics.height).ok()?;
-        let mut glyph = CachedGlyph {
+    fn insert_bitmap(&mut self, glyph: &RasterizedGlyph) -> Option<CachedGlyph> {
+        let width = glyph.width;
+        let height = glyph.height;
+        let mut cached = CachedGlyph {
             position: [0, 0],
             width,
             height,
-            offset_x: metrics.xmin,
-            offset_y: metrics.ymin,
+            offset_x: glyph.offset_x,
+            offset_y: glyph.offset_y,
         };
         if width == 0 || height == 0 {
-            return Some(glyph);
+            return Some(cached);
         }
         if width > MAX_ATLAS_SIZE - 2 || height > MAX_ATLAS_SIZE - 2 {
             return None;
         }
-        glyph.position = loop {
+        cached.position = loop {
             if let Some(position) = self
                 .shelf
                 .allocate(width, height, [self.width, self.height])
@@ -137,15 +137,18 @@ impl GlyphAtlas {
                 return None;
             }
         };
-        let [x, y] = glyph.position;
+        let [x, y] = cached.position;
+        let pitch = glyph.pitch.max(width as usize);
         for row in 0..height {
-            let src = (row * width) as usize;
+            let src = (row as usize) * pitch;
             let dst = ((y + row) * self.width + x) as usize;
-            self.pixels[dst..dst + width as usize]
-                .copy_from_slice(&bitmap[src..src + width as usize]);
+            if src + width as usize <= glyph.pixels.len() {
+                self.pixels[dst..dst + width as usize]
+                    .copy_from_slice(&glyph.pixels[src..src + width as usize]);
+            }
         }
         self.dirty = true;
-        Some(glyph)
+        Some(cached)
     }
 
     /// Looks up a glyph without modifying the atlas, for use after frame preparation.
@@ -184,8 +187,8 @@ impl GlyphAtlas {
         }
 
         let key = fonts.face_key(c, flags);
-        let (metrics, bitmap) = fonts.rasterize(key);
-        let glyph = self.insert_bitmap(metrics, &bitmap)?;
+        let rasterized = fonts.rasterize(key);
+        let glyph = self.insert_bitmap(&rasterized)?;
         if glyph.width == 0 && glyph.height == 0 && !c.is_whitespace() {
             return None;
         }

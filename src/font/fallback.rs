@@ -2,14 +2,13 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::ffi::CString;
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use fontconfig::{CharSet, Fontconfig, Pattern};
 
-use crate::font::MAX_FONT_ZOOM_SCALE;
+use crate::font::Font;
 
 pub(crate) const MAX_FALLBACK_FACES: usize = 64;
 pub(crate) const MAX_RESOLVED_CACHE: usize = 4096;
@@ -18,7 +17,7 @@ pub(crate) struct FallbackFace {
     pub(crate) path: PathBuf,
     pub(crate) index: u32,
     pub(crate) style: u8,
-    pub(crate) font: fontdue::Font,
+    pub(crate) font: Font,
 }
 
 #[derive(Default)]
@@ -222,19 +221,11 @@ pub(crate) fn query_fontconfig_candidates(
     None
 }
 
-pub(crate) fn load_font_bytes(bytes: &[u8], collection_index: u32) -> io::Result<fontdue::Font> {
-    fontdue::Font::from_bytes(
-        bytes,
-        fontdue::FontSettings {
-            collection_index,
-            scale: MAX_FONT_ZOOM_SCALE,
-            load_substitutions: false,
-        },
-    )
-    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+#[cfg(test)]
+pub(crate) fn load_font_bytes(bytes: &[u8], collection_index: u32) -> io::Result<Font> {
+    Font::from_bytes(bytes, collection_index)
 }
 
-pub(crate) fn load_font_file(path: &Path, collection_index: u32) -> io::Result<fontdue::Font> {
-    let bytes = fs::read(path)?;
-    load_font_bytes(&bytes, collection_index)
+pub(crate) fn load_font_file(path: &Path, collection_index: u32) -> io::Result<Font> {
+    Font::from_file(path, collection_index)
 }

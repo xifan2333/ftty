@@ -1,13 +1,15 @@
 //! Font loading, multi-family fallback chaining, and dynamic text metrics calculation.
 
 pub mod atlas;
+pub(crate) mod face;
 pub(crate) mod fallback;
 
 #[cfg(test)]
 mod tests;
 
+use std::cell::RefCell;
 use std::io;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::path::PathBuf;
 
 use fontconfig::Fontconfig;
 
@@ -15,6 +17,7 @@ use crate::font::fallback::{FallbackCache, fontconfig, load_font_file, match_fam
 use crate::grid::CellFlags;
 
 pub use atlas::{CachedGlyph, GlyphAtlas, MAX_ATLAS_SIZE};
+pub use face::{Font, LineMetrics, RasterizedGlyph};
 
 /// Cell size and baseline alignment metrics for the active font and font size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,22 +92,16 @@ pub(crate) struct FaceKey {
 }
 
 /// An immutable chain of font faces for a single style (Regular, Bold, Italic, or BoldItalic).
+#[derive(Clone)]
 struct StyleChain {
-    primary: fontdue::Font,
-    fallbacks: Vec<fontdue::Font>,
+    primary: Font,
+    fallbacks: Vec<Font>,
 }
 
 /// Minimum font size in points/pixels supported by the terminal.
 pub const MIN_FONT_SIZE: f32 = 6.0;
 /// Maximum font size in points/pixels supported by the terminal.
 pub const MAX_FONT_SIZE: f32 = 72.0;
-
-/// Maximum font zoom size supported by the terminal.
-///
-/// Fontdue optimizes its vector geometry simplification for `FontSettings::scale`.
-/// Parsing every face at `MAX_FONT_ZOOM_SCALE` guarantees full outline fidelity
-/// across all interactive zoom sizes without outline degradation.
-pub const MAX_FONT_ZOOM_SCALE: f32 = MAX_FONT_SIZE;
 
 pub(crate) fn style_index(flags: CellFlags) -> usize {
     usize::from(flags.contains(CellFlags::BOLD))
@@ -114,35 +111,38 @@ pub(crate) fn style_index(flags: CellFlags) -> usize {
 /// Loads configured font chain and on-demand fallback faces with cell metrics calculation.
 pub struct FontManager {
     regular: StyleChain,
-    regular_slots: Vec<Option<fontdue::Font>>,
-    bold: OnceLock<StyleChain>,
-    italic: OnceLock<StyleChain>,
-    bold_italic: OnceLock<StyleChain>,
-    fallbacks: Arc<Mutex<FallbackCache>>,
+    regular_slots: Vec<Option<Font>>,
+    chains: RefCell<[Option<StyleChain>; 4]>,
+    fallbacks: RefCell<FallbackCache>,
     families: Vec<String>,
+    primary_path: PathBuf,
+    primary_index: u32,
     font_size: f32,
     pub metrics: CellMetrics,
 }
 
 impl FontManager {
-    fn chain_for_style(&self, style: u8) -> &StyleChain {
-        match style {
-            0 => &self.regular,
-            1 => self.bold.get_or_init(|| {
-                let fc = fontconfig();
-                self.load_styled_chain(fc, true, false, &self.regular.primary)
-            }),
-            2 => self.italic.get_or_init(|| {
-                let fc = fontconfig();
-                self.load_styled_chain(fc, false, true, &self.regular.primary)
-            }),
-            3 => self.bold_italic.get_or_init(|| {
-                let fc = fontconfig();
-                let bold_chain = self.chain_for_style(1);
-                self.load_styled_chain(fc, true, true, &bold_chain.primary)
-            }),
-            _ => &self.regular,
+    fn ensure_chain(&self, style: u8) {
+        let idx = (style as usize).min(3);
+        if self.chains.borrow()[idx].is_some() {
+            return;
         }
+        let fc = fontconfig();
+        let chain = match style {
+            1 => self.load_styled_chain(fc, true, false, &self.regular.primary),
+            2 => self.load_styled_chain(fc, false, true, &self.regular.primary),
+            3 => {
+                self.ensure_chain(1);
+                let binding = self.chains.borrow();
+                let bold_primary = binding[1]
+                    .as_ref()
+                    .map(|c| &c.primary)
+                    .unwrap_or(&self.regular.primary);
+                self.load_styled_chain(fc, true, true, bold_primary)
+            }
+            _ => return,
+        };
+        self.chains.borrow_mut()[idx] = Some(chain);
     }
 
     fn load_styled_chain(
@@ -150,7 +150,7 @@ impl FontManager {
         fc: Option<&Fontconfig>,
         bold: bool,
         italic: bool,
-        fallback_primary: &fontdue::Font,
+        fallback_primary: &Font,
     ) -> StyleChain {
         let primary_name = &self.families[0];
         let fallback_names = &self.families[1..];
@@ -197,33 +197,37 @@ impl FontManager {
         let fallback_names = &valid_families[1..];
 
         // 1. Load the primary Regular font (determines CellMetrics)
-        let primary_regular = match_family(fc, primary_name, false, false)
-            .and_then(|(path, index)| load_font_file(&path, index).ok())
-            .or_else(|| {
-                let (path, index) = match_family(fc, "monospace", false, false)?;
-                load_font_file(&path, index).ok()
-            })
+        let (primary_path, primary_index) = match_family(fc, primary_name, false, false)
+            .or_else(|| match_family(fc, "monospace", false, false))
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no monospace font found"))?;
+        let primary_regular = load_font_file(&primary_path, primary_index)?;
 
-        // 2. Compute metrics from the primary Regular font ('0' advance width & horizontal line metrics)
-        let cell_width = primary_regular
-            .metrics('0', font_size)
-            .advance_width
-            .ceil()
-            .max(1.0) as u32;
+        // 2. Compute metrics from the primary Regular font tables
+        let metrics = parse_cell_metrics_from_file(&primary_path, primary_index, font_size)
+            .unwrap_or_else(|_| {
+                let cell_width = primary_regular
+                    .glyph_advance_width('0', font_size)
+                    .ceil()
+                    .max(1.0) as u32;
 
-        let (cell_height, ascent) = primary_regular
-            .horizontal_line_metrics(font_size)
-            .map(|line| {
-                (
-                    line.new_line_size.ceil().max(1.0) as u32,
-                    line.ascent.ceil() as i32,
-                )
-            })
-            .unwrap_or((font_size.ceil().max(1.0) as u32, font_size.ceil() as i32));
+                let (cell_height, ascent) = primary_regular
+                    .horizontal_line_metrics(font_size)
+                    .map(|line| {
+                        (
+                            line.new_line_size.ceil().max(1.0) as u32,
+                            line.ascent.ceil() as i32,
+                        )
+                    })
+                    .unwrap_or((font_size.ceil().max(1.0) as u32, font_size.ceil() as i32));
+                CellMetrics {
+                    cell_width,
+                    cell_height,
+                    ascent,
+                }
+            });
 
         // 3. User fallback regular slots maintain 1:1 index alignment with fallback_names.
-        let regular_slots: Vec<Option<fontdue::Font>> = fallback_names
+        let regular_slots: Vec<Option<Font>> = fallback_names
             .iter()
             .map(|name| {
                 let (path, index) = match_family(fc, name, false, false)?;
@@ -231,8 +235,7 @@ impl FontManager {
             })
             .collect();
 
-        let regular_fallbacks: Vec<fontdue::Font> =
-            regular_slots.iter().flatten().cloned().collect();
+        let regular_fallbacks: Vec<Font> = regular_slots.iter().flatten().cloned().collect();
 
         let regular = StyleChain {
             primary: primary_regular,
@@ -240,19 +243,15 @@ impl FontManager {
         };
 
         Ok(Self {
-            regular,
+            regular: regular.clone(),
             regular_slots,
-            bold: OnceLock::new(),
-            italic: OnceLock::new(),
-            bold_italic: OnceLock::new(),
-            fallbacks: Arc::new(Mutex::new(FallbackCache::default())),
+            chains: RefCell::new([Some(regular), None, None, None]),
+            fallbacks: RefCell::new(FallbackCache::default()),
             families: valid_families,
+            primary_path,
+            primary_index,
             font_size,
-            metrics: CellMetrics {
-                cell_width,
-                cell_height,
-                ascent,
-            },
+            metrics,
         })
     }
 
@@ -304,59 +303,64 @@ impl FontManager {
         }
         self.font_size = new_size;
 
-        let cell_width = self
-            .regular
-            .primary
-            .metrics('0', new_size)
-            .advance_width
-            .ceil()
-            .max(1.0) as u32;
+        if let Ok(metrics) =
+            parse_cell_metrics_from_file(&self.primary_path, self.primary_index, new_size)
+        {
+            self.metrics = metrics;
+        } else {
+            let cell_width = self
+                .regular
+                .primary
+                .glyph_advance_width('0', new_size)
+                .ceil()
+                .max(1.0) as u32;
 
-        let (cell_height, ascent) = self
-            .regular
-            .primary
-            .horizontal_line_metrics(new_size)
-            .map(|line| {
-                (
-                    line.new_line_size.ceil().max(1.0) as u32,
-                    line.ascent.ceil() as i32,
-                )
-            })
-            .unwrap_or((new_size.ceil().max(1.0) as u32, new_size.ceil() as i32));
+            let (cell_height, ascent) = self
+                .regular
+                .primary
+                .horizontal_line_metrics(new_size)
+                .map(|line| {
+                    (
+                        line.new_line_size.ceil().max(1.0) as u32,
+                        line.ascent.ceil() as i32,
+                    )
+                })
+                .unwrap_or((new_size.ceil().max(1.0) as u32, new_size.ceil() as i32));
 
-        self.metrics = CellMetrics {
-            cell_width,
-            cell_height,
-            ascent,
-        };
+            self.metrics = CellMetrics {
+                cell_width,
+                cell_height,
+                ascent,
+            };
+        }
 
         true
     }
 
     /// Falls back to the regular face if a styled face cannot be loaded.
     #[must_use]
-    pub fn font_for_style(&self, flags: CellFlags) -> &fontdue::Font {
-        let style = style_index(flags) as u8;
-        &self.chain_for_style(style).primary
+    pub fn font_for_style(&self, flags: CellFlags) -> Font {
+        let style = (style_index(flags) as u8).min(3);
+        self.ensure_chain(style);
+        self.chains.borrow()[style as usize]
+            .as_ref()
+            .map(|c| c.primary.clone())
+            .unwrap_or_else(|| self.regular.primary.clone())
     }
 
     #[cfg(test)]
-    pub(crate) fn regular(&self) -> &fontdue::Font {
-        &self.regular.primary
-    }
-
-    fn lock_fallbacks(&self) -> std::sync::MutexGuard<'_, FallbackCache> {
-        self.fallbacks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    pub(crate) fn regular(&self) -> Font {
+        self.regular.primary.clone()
     }
 
     /// Resolves a character to the face that can actually render it.
     ///
     /// Glyph index `0` is `.notdef`, so a zero index means "no face has this glyph".
     pub(crate) fn face_key(&self, c: char, flags: CellFlags) -> FaceKey {
-        let style = style_index(flags) as u8;
-        let chain = self.chain_for_style(style);
+        let style = (style_index(flags) as u8).min(3);
+        self.ensure_chain(style);
+        let binding = self.chains.borrow();
+        let chain = binding[style as usize].as_ref().unwrap_or(&self.regular);
 
         // Tier 1: Primary font for this style
         let glyph = chain.primary.lookup_glyph_index(c);
@@ -380,9 +384,11 @@ impl FontManager {
             }
         }
 
-        // Tier 3: Dynamic system fallback discovery
         let num_configured = (1 + chain.fallbacks.len()) as u16;
-        let mut fallbacks = self.lock_fallbacks();
+        drop(binding);
+
+        // Tier 3: Dynamic system fallback discovery
+        let mut fallbacks = self.fallbacks.borrow_mut();
         let preferred = self.family();
 
         match fallbacks.resolve(c, style, preferred) {
@@ -400,8 +406,14 @@ impl FontManager {
     }
 
     /// Rasterizes a resolved glyph.
-    pub(crate) fn rasterize(&self, key: FaceKey) -> (fontdue::Metrics, Vec<u8>) {
-        let chain = self.chain_for_style(key.style);
+    pub(crate) fn rasterize(&self, key: FaceKey) -> RasterizedGlyph {
+        if key.glyph == 0 {
+            return RasterizedGlyph::empty();
+        }
+        let style = key.style.min(3);
+        self.ensure_chain(style);
+        let binding = self.chains.borrow();
+        let chain = binding[style as usize].as_ref().unwrap_or(&self.regular);
         let num_configured = (1 + chain.fallbacks.len()) as u16;
 
         if key.face == 0 {
@@ -413,10 +425,11 @@ impl FontManager {
         }
 
         let fallback_idx = (key.face - num_configured) as usize;
-        let fallbacks = self.lock_fallbacks();
+        drop(binding);
+        let fallbacks = self.fallbacks.borrow();
         match fallbacks.faces.get(fallback_idx) {
             Some(face) => face.font.rasterize_indexed(key.glyph, self.font_size),
-            None => chain.primary.rasterize_indexed(0, self.font_size),
+            None => self.regular.primary.rasterize_indexed(0, self.font_size),
         }
     }
 }
