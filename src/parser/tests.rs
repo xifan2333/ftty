@@ -276,6 +276,7 @@ fn test_osc_133_shell_integration() {
         term.shell_integration,
         Some(ShellIntegrationState::PromptStart)
     );
+    assert!(term.grid.prompt_marks.contains(&0));
 
     term.advance_bytes(b"\x1b]133;B\x07");
     assert_eq!(
@@ -583,4 +584,16 @@ fn test_c1_control_split_sequence() {
     assert!(!term.parser_in_escape);
     assert_eq!(term.grid.lines[0].cells[0].c, 'X');
     assert_eq!(term.grid.lines[0].cells[0].fg, Color::Indexed(1));
+}
+
+#[test]
+fn test_alt_screen_prompt_markers_not_recorded_in_primary() {
+    let mut term = Terminal::new(80, 24, 100);
+    term.advance_bytes(b"\x1b[?1049h");
+    assert!(term.grid.is_alt_screen());
+    term.advance_bytes(b"\x1b]133;A\x07");
+    assert_eq!(term.grid.prompt_marks.len(), 0);
+    term.advance_bytes(b"\x1b[?1049l");
+    assert!(!term.grid.is_alt_screen());
+    assert_eq!(term.grid.prompt_marks.len(), 0);
 }

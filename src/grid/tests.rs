@@ -926,3 +926,38 @@ fn test_ascii_fast_path_writing_and_wrapping() {
 fn test_cell_memory_footprint() {
     assert!(std::mem::size_of::<crate::grid::Cell>() <= 24);
 }
+
+#[test]
+fn test_prompt_marks_navigation_and_rebasing() {
+    let mut grid = Grid::new(20, 5, 10);
+    grid.add_prompt_mark(0);
+    grid.add_prompt_mark(2);
+
+    grid.scroll_up(3);
+    assert_eq!(grid.scrollback.len(), 3);
+    assert_eq!(grid.viewport_offset, 0);
+
+    grid.scroll_to_prompt_prev();
+    assert!(grid.viewport_offset > 0);
+
+    grid.scroll_to_prompt_next();
+    assert_eq!(grid.viewport_offset, 0);
+}
+
+#[test]
+fn test_clear_screen_rebases_and_clears_prompt_marks() {
+    let mut grid = Grid::new(20, 5, 10);
+    grid.add_prompt_mark(0);
+    grid.add_prompt_mark(5);
+    grid.scroll_up(3);
+
+    grid.clear_screen(ClearMode::All);
+    assert!(grid.prompt_marks.iter().all(|&m| m < grid.scrollback.len()));
+
+    let active_mark = grid.scrollback.len() + 1;
+    grid.add_prompt_mark(active_mark);
+    let old_sb = grid.scrollback.len();
+    grid.clear_screen(ClearMode::Saved);
+    assert_eq!(grid.scrollback.len(), 0);
+    assert!(grid.prompt_marks.contains(&(active_mark - old_sb)));
+}

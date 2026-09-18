@@ -19,6 +19,8 @@ pub enum KeyAction {
     ScrollbackDownLine,
     ScrollbackHome,
     ScrollbackEnd,
+    PromptPrev,
+    PromptNext,
     FontIncrease,
     FontDecrease,
     FontReset,
@@ -461,6 +463,16 @@ impl KeyboardHandler {
                 KeyAction::ScrollbackEnd,
                 config.scrollback_end.as_ref(),
                 &["Shift+End"][..],
+            ),
+            (
+                KeyAction::PromptPrev,
+                config.prompt_prev.as_ref(),
+                &["Ctrl+Shift+Z"][..],
+            ),
+            (
+                KeyAction::PromptNext,
+                config.prompt_next.as_ref(),
+                &["Ctrl+Shift+X"][..],
             ),
             (
                 KeyAction::FontIncrease,

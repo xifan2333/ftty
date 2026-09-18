@@ -100,7 +100,13 @@ impl Terminal {
             } else if params[0] == b"133" && params.len() >= 2 {
                 // OSC 133 ; [A|B|C|D] [; exit_code]
                 match params[1] {
-                    b"A" => self.shell_integration = Some(ShellIntegrationState::PromptStart),
+                    b"A" => {
+                        self.shell_integration = Some(ShellIntegrationState::PromptStart);
+                        if !self.grid.is_alt_screen() {
+                            let abs_line = self.grid.scrollback.len() + self.grid.cursor.row;
+                            self.grid.add_prompt_mark(abs_line);
+                        }
+                    }
                     b"B" => self.shell_integration = Some(ShellIntegrationState::CommandStart),
                     b"C" => self.shell_integration = Some(ShellIntegrationState::OutputStart),
                     b"D" => {

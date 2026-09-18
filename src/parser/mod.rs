@@ -420,6 +420,7 @@ impl Perform for Terminal {
                 self.progress = None;
                 self.active_hyperlink = None;
                 self.grid.clear_all_hyperlinks();
+                self.grid.prompt_marks.clear();
                 self.hyperlink_pool.clear();
                 self.next_hyperlink_id = 1;
                 self.kitty_keyboard_flags = 0;

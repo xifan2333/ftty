@@ -7,7 +7,7 @@ pub mod row;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use unicode_width::UnicodeWidthChar;
 
 use crate::color::Color;
@@ -40,6 +40,7 @@ pub struct Grid {
 
     pub scroll_region_top: usize,
     pub scroll_region_bottom: usize,
+    pub prompt_marks: BTreeSet<usize>,
 
     // The hidden primary screen while the alternate screen is active. Each screen owns its saved
     // cursor and placements so a resize on one cannot shift the other's coordinates.
@@ -71,6 +72,7 @@ impl Grid {
             saved_cursor: Cursor::default(),
             scroll_region_top: 0,
             scroll_region_bottom: actual_rows.saturating_sub(1),
+            prompt_marks: BTreeSet::new(),
             alt_lines: None,
             alt_cursor: None,
             alt_saved_cursor: None,
@@ -248,7 +250,118 @@ impl Grid {
                 }
             });
         }
+        if !self.prompt_marks.is_empty() {
+            let mut shifted = BTreeSet::new();
+            for &mark in &self.prompt_marks {
+                if mark > 0 {
+                    shifted.insert(mark - 1);
+                }
+            }
+            self.prompt_marks = shifted;
+        }
         Some(row)
+    }
+
+    /// Records an absolute line marker for OSC 133 semantic prompt navigation.
+    pub fn add_prompt_mark(&mut self, line: usize) {
+        if self.prompt_marks.len() >= 1024
+            && let Some(&first) = self.prompt_marks.iter().next()
+        {
+            self.prompt_marks.remove(&first);
+        }
+        self.prompt_marks.insert(line);
+    }
+
+    pub(crate) fn shift_region_marks_up(
+        &mut self,
+        top_row: usize,
+        bottom_row: usize,
+        count: usize,
+    ) {
+        if self.prompt_marks.is_empty() || count == 0 {
+            return;
+        }
+        let sb_len = self.scrollback.len();
+        let abs_top = sb_len + top_row;
+        let abs_bottom = sb_len + bottom_row;
+        let mut new_marks = BTreeSet::new();
+        for &mark in &self.prompt_marks {
+            if mark < abs_top || mark > abs_bottom {
+                new_marks.insert(mark);
+            } else if mark >= abs_top + count {
+                new_marks.insert(mark - count);
+            }
+        }
+        self.prompt_marks = new_marks;
+    }
+
+    pub(crate) fn shift_region_marks_down(
+        &mut self,
+        top_row: usize,
+        bottom_row: usize,
+        count: usize,
+    ) {
+        if self.prompt_marks.is_empty() || count == 0 {
+            return;
+        }
+        let sb_len = self.scrollback.len();
+        let abs_top = sb_len + top_row;
+        let abs_bottom = sb_len + bottom_row;
+        let mut new_marks = BTreeSet::new();
+        for &mark in &self.prompt_marks {
+            if mark < abs_top || mark > abs_bottom {
+                new_marks.insert(mark);
+            } else if mark + count <= abs_bottom {
+                new_marks.insert(mark + count);
+            }
+        }
+        self.prompt_marks = new_marks;
+    }
+
+    /// Scrolls the viewport up to the previous semantic prompt boundary.
+    pub fn scroll_to_prompt_prev(&mut self) {
+        if self.is_alt_screen() || self.prompt_marks.is_empty() {
+            return;
+        }
+        let top_line = self.scrollback.len().saturating_sub(self.viewport_offset);
+        if let Some(&mark) = self.prompt_marks.range(..top_line).next_back() {
+            let new_offset = self
+                .scrollback
+                .len()
+                .saturating_sub(mark)
+                .min(self.scrollback.len());
+            if new_offset != self.viewport_offset {
+                self.viewport_offset = new_offset;
+                self.mark_all_dirty();
+            }
+        } else if let Some(&first) = self.prompt_marks.iter().next() {
+            let new_offset = self
+                .scrollback
+                .len()
+                .saturating_sub(first)
+                .min(self.scrollback.len());
+            if new_offset != self.viewport_offset {
+                self.viewport_offset = new_offset;
+                self.mark_all_dirty();
+            }
+        }
+    }
+
+    /// Scrolls the viewport down to the next semantic prompt boundary.
+    pub fn scroll_to_prompt_next(&mut self) {
+        if self.is_alt_screen() || self.viewport_offset == 0 {
+            return;
+        }
+        let top_line = self.scrollback.len().saturating_sub(self.viewport_offset);
+        if let Some(&mark) = self.prompt_marks.range(top_line + 1..).next() {
+            let new_offset = self.scrollback.len().saturating_sub(mark);
+            if new_offset != self.viewport_offset {
+                self.viewport_offset = new_offset;
+                self.mark_all_dirty();
+            }
+        } else {
+            self.scroll_viewport_bottom();
+        }
     }
 
     pub(crate) fn push_scrollback(&mut self, row: Row) {
@@ -382,6 +495,9 @@ impl Grid {
             }
         }
 
+        if !is_full_screen {
+            self.shift_region_marks_up(self.scroll_region_top, self.scroll_region_bottom, count);
+        }
         self.lines[self.scroll_region_top..=self.scroll_region_bottom].rotate_left(count);
         for row in
             &mut self.lines[self.scroll_region_bottom + 1 - count..=self.scroll_region_bottom]
@@ -404,6 +520,7 @@ impl Grid {
             return;
         }
 
+        self.shift_region_marks_down(self.scroll_region_top, self.scroll_region_bottom, count);
         self.lines[self.scroll_region_top..=self.scroll_region_bottom].rotate_right(count);
         for row in &mut self.lines[self.scroll_region_top..self.scroll_region_top + count] {
             row.reset();
@@ -437,6 +554,8 @@ impl Grid {
                 }
             }
             ClearMode::All => {
+                let sb_len = self.scrollback.len();
+                self.prompt_marks.retain(|&m| m < sb_len);
                 for row in &mut self.lines {
                     row.reset();
                 }
@@ -446,6 +565,12 @@ impl Grid {
                 let sb_len = self.scrollback.len();
                 self.scrollback.clear();
                 self.viewport_offset = 0;
+                self.prompt_marks.retain(|&m| m >= sb_len);
+                let mut rebased = BTreeSet::new();
+                for &m in &self.prompt_marks {
+                    rebased.insert(m - sb_len);
+                }
+                self.prompt_marks = rebased;
                 // Both screens share the scrollback base, so the hidden primary's placements need
                 // the same rebase as the active screen's.
                 for placements in [&mut self.placements, &mut self.alt_placements] {
@@ -758,6 +883,7 @@ impl Grid {
             return;
         }
         let count = count.min(self.scroll_region_bottom - self.cursor.row + 1);
+        self.shift_region_marks_down(self.cursor.row, self.scroll_region_bottom, count);
         for _ in 0..count {
             self.lines.remove(self.scroll_region_bottom);
             self.lines.insert(self.cursor.row, Row::new(self.cols));
@@ -771,6 +897,7 @@ impl Grid {
             return;
         }
         let count = count.min(self.scroll_region_bottom - self.cursor.row + 1);
+        self.shift_region_marks_up(self.cursor.row, self.scroll_region_bottom, count);
         for _ in 0..count {
             self.lines.remove(self.cursor.row);
             self.lines

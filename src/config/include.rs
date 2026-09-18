@@ -133,6 +133,12 @@ pub(crate) fn merge_keybindings(dst: &mut KeybindingsConfig, src: KeybindingsCon
     if let Some(c) = src.scrollback_end {
         dst.scrollback_end = Some(c);
     }
+    if let Some(c) = src.prompt_prev {
+        dst.prompt_prev = Some(c);
+    }
+    if let Some(c) = src.prompt_next {
+        dst.prompt_next = Some(c);
+    }
     if let Some(c) = src.font_increase {
         dst.font_increase = Some(c);
     }

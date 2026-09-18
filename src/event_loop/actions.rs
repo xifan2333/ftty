@@ -147,6 +147,14 @@ impl AppState {
                 self.terminal.grid.scroll_viewport_bottom();
                 self.needs_redraw = true;
             }
+            KeyAction::PromptPrev => {
+                self.terminal.grid.scroll_to_prompt_prev();
+                self.needs_redraw = true;
+            }
+            KeyAction::PromptNext => {
+                self.terminal.grid.scroll_to_prompt_next();
+                self.needs_redraw = true;
+            }
             KeyAction::FontIncrease => {
                 let new_size = (self.font_mgr.font_size() + 1.0).min(crate::font::MAX_FONT_SIZE);
                 self.update_font_size(new_size);
