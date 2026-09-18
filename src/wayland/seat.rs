@@ -240,6 +240,17 @@ impl Dispatch<WlPointer, ()> for AppState {
                 let Some(index) = x11_button_index(button) else {
                     return;
                 };
+                if index == 0
+                    && state.keyboard.modifiers().ctrl
+                    && let Some(url_owned) = state.url_at_pointer()
+                {
+                    std::thread::spawn(move || {
+                        let _ = std::process::Command::new("xdg-open")
+                            .arg(&url_owned)
+                            .spawn();
+                    });
+                    return;
+                }
                 // Applications that requested mouse tracking own the event; Shift
                 // always overrides tracking so text can still be selected.
                 if state.report_mouse_event(index, true, false) {
@@ -258,28 +269,6 @@ impl Dispatch<WlPointer, ()> for AppState {
                 }
                 let (line, screen_row, col) =
                     state.cell_at_pointer(state.mouse_pos[0], state.mouse_pos[1]);
-
-                if state.keyboard.modifiers().ctrl {
-                    let row = state.terminal.grid.visible_line(screen_row);
-                    let cell = row.cells.get(col);
-                    let target_url = if let Some(cell) = cell
-                        && let Some(id) = cell.hyperlink_id
-                        && let Some(url) = state.terminal.hyperlink_url(id.get())
-                    {
-                        Some(url.to_string())
-                    } else {
-                        find_url_at_col(row, col).map(|(_, _, url)| url)
-                    };
-
-                    if let Some(url_owned) = target_url {
-                        std::thread::spawn(move || {
-                            let _ = std::process::Command::new("xdg-open")
-                                .arg(&url_owned)
-                                .spawn();
-                        });
-                        return;
-                    }
-                }
 
                 let same_cell = state.last_click_cell == Some((line, col));
                 if same_cell && time.saturating_sub(state.last_click_time) < 350 {
@@ -472,7 +461,8 @@ impl AppState {
                     end_col,
                 })
             } else if self.keyboard.modifiers().ctrl
-                && let Some((start_col, end_col, _)) = find_url_at_col(row, col)
+                && let Some((start_col, end_col, _)) =
+                    find_url_in_grid(&self.terminal.grid, line, screen_row, col)
             {
                 Some(HoveredHyperlinkSpan {
                     line,
@@ -488,6 +478,21 @@ impl AppState {
             self.needs_redraw = true;
             self.update_cursor_shape();
         }
+    }
+
+    /// Returns the resolved URL at the current pointer position if one exists.
+    #[must_use]
+    pub fn url_at_pointer(&self) -> Option<String> {
+        let (line, screen_row, col) = self.cell_at_pointer(self.mouse_pos[0], self.mouse_pos[1]);
+        let row = self.terminal.grid.visible_line(screen_row);
+        let cell = row.cells.get(col);
+        if let Some(cell) = cell
+            && let Some(id) = cell.hyperlink_id
+            && let Some(url) = self.terminal.hyperlink_url(id.get())
+        {
+            return Some(url.to_string());
+        }
+        find_url_in_grid(&self.terminal.grid, line, screen_row, col).map(|(_, _, url)| url)
     }
 
     /// Returns the absolute `(line, screen_row, col)` grid coordinates under the surface-relative pointer position.
@@ -552,10 +557,59 @@ impl AppState {
     }
 }
 
-/// Extracts a plaintext URL and its column span on a given row if `col` falls within it.
+/// Extracts a plaintext URL across wrapped lines in `grid` containing `(target_line, target_screen_row, target_col)`.
+/// Returns `(start_col, end_col, url)` where `start_col..=end_col` is the span on `target_line`.
 #[must_use]
-pub fn find_url_at_col(row: &crate::grid::Row, col: usize) -> Option<(usize, usize, String)> {
-    let text: String = row.cells.iter().map(|c| c.c).collect();
+pub fn find_url_in_grid(
+    grid: &crate::grid::Grid,
+    target_line: usize,
+    target_screen_row: usize,
+    target_col: usize,
+) -> Option<(usize, usize, String)> {
+    let mut start_row = target_screen_row;
+    while start_row > 0 {
+        if grid.visible_line(start_row - 1).wrapped {
+            start_row -= 1;
+        } else {
+            break;
+        }
+    }
+    let mut end_row = target_screen_row;
+    while end_row + 1 < grid.rows {
+        if grid.visible_line(end_row).wrapped {
+            end_row += 1;
+        } else {
+            break;
+        }
+    }
+
+    let mut text = String::new();
+    let mut coords: Vec<(usize, usize, usize)> = Vec::new(); // (abs_line, col, width)
+
+    for r in start_row..=end_row {
+        let line = grid.visible_line(r);
+        let abs_line = grid.scrollback.len() + r - grid.viewport_offset;
+        for (c_idx, cell) in line.cells.iter().enumerate() {
+            if cell.flags.contains(crate::grid::CellFlags::HIDDEN) {
+                text.push(' ');
+                coords.push((abs_line, c_idx, 1));
+            } else if cell
+                .flags
+                .contains(crate::grid::CellFlags::WIDE_CHAR_SPACER)
+            {
+                // Skip wide character continuation spacers
+            } else {
+                let width = if cell.flags.contains(crate::grid::CellFlags::WIDE_CHAR) {
+                    2
+                } else {
+                    1
+                };
+                text.push(cell.c);
+                coords.push((abs_line, c_idx, width));
+            }
+        }
+    }
+
     let schemes = ["https://", "http://", "file://", "gemini://"];
     for scheme in &schemes {
         let mut search_from = 0;
@@ -597,16 +651,42 @@ pub fn find_url_at_col(row: &crate::grid::Row, col: usize) -> Option<(usize, usi
                 }
             }
 
-            let start_col = text[..start].chars().count();
-            let end_col = text[..end].chars().count();
+            let start_char_idx = text[..start].chars().count();
+            let end_char_idx = text[..end].chars().count();
 
-            if col >= start_col && col < end_col && end > start + scheme.len() {
-                let url = text[start..end].to_string();
-                return Some((start_col, end_col.saturating_sub(1), url));
+            if start_char_idx < coords.len() && end_char_idx <= coords.len() {
+                let url_coords = &coords[start_char_idx..end_char_idx];
+                let is_hit = url_coords.iter().any(|&(line, c, w)| {
+                    line == target_line && target_col >= c && target_col < c + w
+                });
+
+                if is_hit && end > start + scheme.len() {
+                    let mut min_col = usize::MAX;
+                    let mut max_col = 0;
+                    for &(line, c, w) in url_coords {
+                        if line == target_line {
+                            min_col = min_col.min(c);
+                            max_col = max_col.max(c + w - 1);
+                        }
+                    }
+                    if min_col <= max_col {
+                        let url = text[start..end].to_string();
+                        return Some((min_col, max_col, url));
+                    }
+                }
             }
 
             search_from = start + scheme.len();
         }
     }
+
     None
+}
+
+/// Extracts a plaintext URL and its column span on a given row if `col` falls within it.
+#[must_use]
+pub fn find_url_at_col(row: &crate::grid::Row, col: usize) -> Option<(usize, usize, String)> {
+    let mut grid = crate::grid::Grid::new(row.cells.len(), 1, 0);
+    grid.lines[0] = row.clone();
+    find_url_in_grid(&grid, 0, 0, col)
 }

@@ -296,3 +296,58 @@ fn test_find_url_at_col() {
     // Col 45 is on "Great!" -> None
     assert_eq!(find_url_at_col(&row, 45), None);
 }
+
+#[test]
+fn test_find_url_in_grid_wrapped_lines() {
+    use crate::grid::Grid;
+    use crate::wayland::seat::find_url_in_grid;
+
+    let mut grid = Grid::new(20, 2, 0);
+    for (i, c) in "https://example.com/".chars().enumerate() {
+        grid.lines[0].cells[i].c = c;
+    }
+    grid.lines[0].wrapped = true;
+    for (i, c) in "repo/page and more".chars().enumerate() {
+        grid.lines[1].cells[i].c = c;
+    }
+
+    let hit0 = find_url_in_grid(&grid, 0, 0, 5);
+    assert!(hit0.is_some());
+    let (_, _, url0) = hit0.unwrap();
+    assert_eq!(url0, "https://example.com/repo/page");
+
+    let hit1 = find_url_in_grid(&grid, 1, 1, 2);
+    assert!(hit1.is_some());
+    let (_, _, url1) = hit1.unwrap();
+    assert_eq!(url1, "https://example.com/repo/page");
+}
+
+#[test]
+fn test_find_url_hidden_and_wide_char() {
+    use crate::grid::{CellFlags, Grid};
+    use crate::wayland::seat::find_url_in_grid;
+
+    let mut grid = Grid::new(30, 1, 0);
+    let prefix = "https://example.com/";
+    for (i, c) in prefix.chars().enumerate() {
+        grid.lines[0].cells[i].c = c;
+    }
+    grid.lines[0].cells[20].c = '文';
+    grid.lines[0].cells[20].flags = CellFlags::WIDE_CHAR;
+    grid.lines[0].cells[21].c = ' ';
+    grid.lines[0].cells[21].flags = CellFlags::WIDE_CHAR_SPACER;
+
+    let hit = find_url_in_grid(&grid, 0, 0, 5);
+    assert!(hit.is_some());
+    let (_, _, url) = hit.unwrap();
+    assert_eq!(url, "https://example.com/文");
+
+    let mut grid_hidden = Grid::new(30, 1, 0);
+    for (i, c) in "https://secret.com/page".chars().enumerate() {
+        grid_hidden.lines[0].cells[i].c = c;
+        if (8..=13).contains(&i) {
+            grid_hidden.lines[0].cells[i].flags = CellFlags::HIDDEN;
+        }
+    }
+    assert_eq!(find_url_in_grid(&grid_hidden, 0, 0, 2), None);
+}
