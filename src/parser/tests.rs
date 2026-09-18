@@ -547,3 +547,40 @@ fn test_stack_allocated_parameter_parsing_dense_sgr() {
     assert_eq!(cell.bg, Color::Rgb(10, 20, 30));
     assert_eq!(cell.underline_color, Color::Rgb(40, 50, 60));
 }
+
+#[test]
+fn test_simd_ascii_scanning_and_batch_wrap() {
+    let mut term = Terminal::new(10, 5, 100);
+    // Write 15 printable ASCII characters: 10 on line 0, wraps 5 to line 1
+    term.advance_bytes(b"0123456789ABCDE\n");
+    for (i, c) in "0123456789".chars().enumerate() {
+        assert_eq!(term.grid.lines[0].cells[i].c, c);
+    }
+    assert!(term.grid.lines[0].wrapped);
+    for (i, c) in "ABCDE".chars().enumerate() {
+        assert_eq!(term.grid.lines[1].cells[i].c, c);
+    }
+
+    // Now test with escape sequence interleaved
+    term.advance_bytes(b"\x1b[31mRED\x1b[0mNORMAL\n");
+    assert_eq!(term.grid.lines[2].cells[0].c, 'R');
+    assert_eq!(term.grid.lines[2].cells[0].fg, Color::Indexed(1));
+    assert_eq!(term.grid.lines[2].cells[3].c, 'N');
+    assert_eq!(term.grid.lines[2].cells[3].fg, Color::DefaultForeground);
+
+    // Test with non-ASCII unicode
+    term.advance_bytes("你好\n".as_bytes());
+    assert_eq!(term.grid.lines[3].cells[0].c, '你');
+}
+
+#[test]
+fn test_c1_control_split_sequence() {
+    let mut term = Terminal::new(10, 5, 100);
+    // Split CSI sequence across chunks
+    term.advance_bytes(b"\x1b[");
+    assert!(term.parser_in_escape);
+    term.advance_bytes(b"31mX");
+    assert!(!term.parser_in_escape);
+    assert_eq!(term.grid.lines[0].cells[0].c, 'X');
+    assert_eq!(term.grid.lines[0].cells[0].fg, Color::Indexed(1));
+}

@@ -92,16 +92,14 @@ pub(crate) fn push_quad(
     [[u0, v0], [u1, v1]]: [[f32; 2]; 2],
     [r, g, b, a]: [f32; 4],
 ) {
-    for [x, y, u, v] in [
-        [x0, y0, u0, v0],
-        [x1, y0, u1, v0],
-        [x0, y1, u0, v1],
-        [x1, y0, u1, v0],
-        [x1, y1, u1, v1],
-        [x0, y1, u0, v1],
-    ] {
-        vertices.extend_from_slice(&[x, y, u, v, r, g, b, a]);
-    }
+    vertices.extend_from_slice(&[
+        x0, y0, u0, v0, r, g, b, a, // vertex 0
+        x1, y0, u1, v0, r, g, b, a, // vertex 1
+        x0, y1, u0, v1, r, g, b, a, // vertex 2
+        x1, y0, u1, v0, r, g, b, a, // vertex 3
+        x1, y1, u1, v1, r, g, b, a, // vertex 4
+        x0, y1, u0, v1, r, g, b, a, // vertex 5
+    ]);
 }
 
 pub(crate) fn cursor_cell(grid: &Grid) -> Option<(usize, usize, usize)> {
@@ -161,13 +159,26 @@ pub(crate) fn build_row_backgrounds(vertices: &mut Vec<f32>, row: usize, ctx: &R
     let line = grid.visible_line(row);
     let y = pad_y + row as f32 * ch;
 
-    // Draw background and selection on this row
-    for (col, cell) in line.cells.iter().enumerate() {
-        let (_, bg) = cell_colors(cell, colors);
-        if bg != colors.background {
-            let x = pad_x + col as f32 * cw;
-            push_quad(vertices, [x, y, x + cw, y + ch], SOLID_UV, rgba(bg));
+    // Draw background and selection on this row with contiguous span merging
+    let mut col = 0;
+    while col < line.cells.len() {
+        let (_, bg) = cell_colors(&line.cells[col], colors);
+        if bg == colors.background {
+            col += 1;
+            continue;
         }
+        let start_col = col;
+        col += 1;
+        while col < line.cells.len() {
+            let (_, next_bg) = cell_colors(&line.cells[col], colors);
+            if next_bg != bg {
+                break;
+            }
+            col += 1;
+        }
+        let sx = pad_x + start_col as f32 * cw;
+        let ex = pad_x + col as f32 * cw;
+        push_quad(vertices, [sx, y, ex, y + ch], SOLID_UV, rgba(bg));
     }
     if let Some(selection) = options.selection
         && let Some((start_col, end_col)) = selection.line_span(abs_line, grid.cols)
