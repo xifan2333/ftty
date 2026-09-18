@@ -4,9 +4,16 @@ use std::cell::RefCell;
 use std::io;
 use std::path::Path;
 use std::rc::Rc;
-use std::sync::OnceLock;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use freetype::face::LoadFlag;
+
+fn ft_global_lock() -> MutexGuard<'static, ()> {
+    static FT_LOCK: Mutex<()> = Mutex::new(());
+    FT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 fn ft_library() -> io::Result<&'static freetype::Library> {
     static LIB: OnceLock<Result<freetype::Library, String>> = OnceLock::new();
@@ -51,10 +58,22 @@ impl RasterizedGlyph {
     }
 }
 
+struct FaceWrapper {
+    face: Option<freetype::Face>,
+}
+
+impl Drop for FaceWrapper {
+    fn drop(&mut self) {
+        // FreeType requires face destruction sharing an FT_Library to be serialized.
+        let _guard = ft_global_lock();
+        self.face.take();
+    }
+}
+
 /// Thread-local handle to a FreeType face with lazy outline rasterization.
 #[derive(Clone)]
 pub struct Font {
-    face: Rc<RefCell<freetype::Face>>,
+    inner: Rc<RefCell<FaceWrapper>>,
 }
 
 impl Font {
@@ -63,16 +82,19 @@ impl Font {
     /// # Errors
     /// Returns [`std::io::Error`] if the file cannot be opened or FreeType fails to parse headers.
     pub fn from_file(path: &Path, collection_index: u32) -> io::Result<Self> {
-        let face = ft_library()?
-            .new_face(path, collection_index as isize)
-            .map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("FreeType new_face failed: {e:?}"),
-                )
-            })?;
+        let lib = ft_library()?;
+        let face = {
+            let _guard = ft_global_lock();
+            lib.new_face(path, collection_index as isize)
+        }
+        .map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("FreeType new_face failed: {e:?}"),
+            )
+        })?;
         Ok(Self {
-            face: Rc::new(RefCell::new(face)),
+            inner: Rc::new(RefCell::new(FaceWrapper { face: Some(face) })),
         })
     }
 
@@ -81,16 +103,19 @@ impl Font {
     /// # Errors
     /// Returns [`std::io::Error`] if FreeType fails to parse font tables from the bytes.
     pub fn from_bytes(bytes: &[u8], collection_index: u32) -> io::Result<Self> {
-        let face = ft_library()?
-            .new_memory_face(bytes.to_vec(), collection_index as isize)
-            .map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("FreeType new_memory_face failed: {e:?}"),
-                )
-            })?;
+        let lib = ft_library()?;
+        let face = {
+            let _guard = ft_global_lock();
+            lib.new_memory_face(bytes.to_vec(), collection_index as isize)
+        }
+        .map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("FreeType new_memory_face failed: {e:?}"),
+            )
+        })?;
         Ok(Self {
-            face: Rc::new(RefCell::new(face)),
+            inner: Rc::new(RefCell::new(FaceWrapper { face: Some(face) })),
         })
     }
 
@@ -99,7 +124,12 @@ impl Font {
     /// Returns `0` if the character is not mapped (.notdef).
     #[must_use]
     pub fn lookup_glyph_index(&self, c: char) -> u16 {
-        self.face.borrow().get_char_index(c as usize).unwrap_or(0) as u16
+        let guard = self.inner.borrow();
+        guard
+            .face
+            .as_ref()
+            .and_then(|f| f.get_char_index(c as usize))
+            .unwrap_or(0) as u16
     }
 
     /// Sets the active character size on the face using 26.6 fractional units for sub-pixel precision.
@@ -112,8 +142,9 @@ impl Font {
     /// Retrieves line height and baseline ascent metrics.
     #[must_use]
     pub fn horizontal_line_metrics(&self, font_size: f32) -> Option<LineMetrics> {
-        let face = self.face.borrow();
-        Self::set_font_size(&face, font_size);
+        let guard = self.inner.borrow();
+        let face = guard.face.as_ref()?;
+        Self::set_font_size(face, font_size);
         let metrics = face.size_metrics()?;
         let ascent = (metrics.ascender as f32) / 64.0;
         let descent = (metrics.descender as f32) / 64.0;
@@ -132,13 +163,15 @@ impl Font {
     /// Retrieves advance width for a character.
     #[must_use]
     pub fn glyph_advance_width(&self, c: char, font_size: f32) -> f32 {
-        let face = self.face.borrow();
-        Self::set_font_size(&face, font_size);
-        let glyph_idx = face.get_char_index(c as usize).unwrap_or(0);
-        if face.load_glyph(glyph_idx, LoadFlag::DEFAULT).is_ok() {
-            let advance = face.glyph().advance().x;
-            if advance > 0 {
-                return (advance as f32) / 64.0;
+        let guard = self.inner.borrow();
+        if let Some(face) = &guard.face {
+            Self::set_font_size(face, font_size);
+            let glyph_idx = face.get_char_index(c as usize).unwrap_or(0);
+            if face.load_glyph(glyph_idx, LoadFlag::DEFAULT).is_ok() {
+                let advance = face.glyph().advance().x;
+                if advance > 0 {
+                    return (advance as f32) / 64.0;
+                }
             }
         }
         (font_size * 0.6).ceil().max(1.0)
@@ -147,8 +180,11 @@ impl Font {
     /// Rasterizes an indexed glyph on-demand into an 8-bit alpha mask, normalizing pitch to top-to-bottom.
     #[must_use]
     pub fn rasterize_indexed(&self, glyph_index: u16, font_size: f32) -> RasterizedGlyph {
-        let face = self.face.borrow();
-        Self::set_font_size(&face, font_size);
+        let guard = self.inner.borrow();
+        let Some(face) = &guard.face else {
+            return RasterizedGlyph::empty();
+        };
+        Self::set_font_size(face, font_size);
         let flags = LoadFlag::RENDER | LoadFlag::TARGET_LIGHT;
         if face.load_glyph(glyph_index as u32, flags).is_err() {
             return RasterizedGlyph::empty();

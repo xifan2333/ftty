@@ -194,29 +194,34 @@ impl FontManager {
         let fallback_names = &valid_families[1..];
 
         // 1. Load the primary Regular font (determines CellMetrics)
-        let primary_regular = match_family(fc, primary_name, false, false)
-            .and_then(|(path, index)| load_font_file(&path, index).ok())
-            .or_else(|| {
-                let (path, index) = match_family(fc, "monospace", false, false)?;
-                load_font_file(&path, index).ok()
-            })
+        let (primary_path, primary_index) = match_family(fc, primary_name, false, false)
+            .or_else(|| match_family(fc, "monospace", false, false))
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no monospace font found"))?;
+        let primary_regular = load_font_file(&primary_path, primary_index)?;
 
-        // 2. Compute metrics from the primary Regular font ('0' advance width & horizontal line metrics)
-        let cell_width = primary_regular
-            .glyph_advance_width('0', font_size)
-            .ceil()
-            .max(1.0) as u32;
+        // 2. Compute metrics from the primary Regular font tables
+        let metrics = parse_cell_metrics_from_file(&primary_path, primary_index, font_size)
+            .unwrap_or_else(|_| {
+                let cell_width = primary_regular
+                    .glyph_advance_width('0', font_size)
+                    .ceil()
+                    .max(1.0) as u32;
 
-        let (cell_height, ascent) = primary_regular
-            .horizontal_line_metrics(font_size)
-            .map(|line| {
-                (
-                    line.new_line_size.ceil().max(1.0) as u32,
-                    line.ascent.ceil() as i32,
-                )
-            })
-            .unwrap_or((font_size.ceil().max(1.0) as u32, font_size.ceil() as i32));
+                let (cell_height, ascent) = primary_regular
+                    .horizontal_line_metrics(font_size)
+                    .map(|line| {
+                        (
+                            line.new_line_size.ceil().max(1.0) as u32,
+                            line.ascent.ceil() as i32,
+                        )
+                    })
+                    .unwrap_or((font_size.ceil().max(1.0) as u32, font_size.ceil() as i32));
+                CellMetrics {
+                    cell_width,
+                    cell_height,
+                    ascent,
+                }
+            });
 
         // 3. User fallback regular slots maintain 1:1 index alignment with fallback_names.
         let regular_slots: Vec<Option<Font>> = fallback_names
@@ -241,11 +246,7 @@ impl FontManager {
             fallbacks: RefCell::new(FallbackCache::default()),
             families: valid_families,
             font_size,
-            metrics: CellMetrics {
-                cell_width,
-                cell_height,
-                ascent,
-            },
+            metrics,
         })
     }
 
