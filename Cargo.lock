@@ -245,6 +245,7 @@ dependencies = [
  "png",
  "serde",
  "toml",
+ "ttf-parser",
  "unicode-width",
  "vte",
  "wayland-client",

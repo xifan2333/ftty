@@ -27,6 +27,58 @@ pub struct CellMetrics {
     pub ascent: i32,
 }
 
+/// Extracts cell dimensions (width, height, ascent) from raw TrueType/OpenType font bytes in sub-milliseconds.
+#[must_use]
+pub fn parse_cell_metrics_from_bytes(
+    bytes: &[u8],
+    collection_index: u32,
+    font_size: f32,
+) -> Option<CellMetrics> {
+    let face = ttf_parser::Face::parse(bytes, collection_index).ok()?;
+    let units_per_em = face.units_per_em() as f32;
+    if units_per_em <= 0.0 {
+        return None;
+    }
+    let factor = font_size / units_per_em;
+
+    let (ascent, descent, line_gap) = (
+        face.ascender() as i32,
+        face.descender() as i32,
+        face.line_gap() as i32,
+    );
+    let new_line_size = (ascent - descent + line_gap) as f32 * factor;
+    let cell_height = new_line_size.ceil().max(1.0) as u32;
+    let cell_ascent = (ascent as f32 * factor).ceil() as i32;
+
+    let glyph_id = face.glyph_index('0').unwrap_or(ttf_parser::GlyphId(0));
+    let advance_width = face.glyph_hor_advance(glyph_id).unwrap_or(0) as f32 * factor;
+    let cell_width = advance_width.ceil().max(1.0) as u32;
+
+    Some(CellMetrics {
+        cell_width,
+        cell_height,
+        ascent: cell_ascent,
+    })
+}
+
+/// Extracts cell dimensions directly from a font file in sub-milliseconds without parsing vector glyph outlines.
+///
+/// # Errors
+/// Returns [`std::io::Error`] if the font file cannot be read or table parsing fails.
+pub fn parse_cell_metrics_from_file(
+    path: &std::path::Path,
+    collection_index: u32,
+    font_size: f32,
+) -> std::io::Result<CellMetrics> {
+    let bytes = std::fs::read(path)?;
+    parse_cell_metrics_from_bytes(&bytes, collection_index, font_size).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "failed to parse font tables for cell metrics",
+        )
+    })
+}
+
 /// Stable identity of a rasterized glyph: which face supplied it and in which style.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct FaceKey {
