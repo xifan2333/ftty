@@ -633,3 +633,28 @@ fn test_row_cache_needs_reset_on_column_or_row_change() {
     // Padding changed: must reset
     assert!(row_cache_needs_reset(24, 24, 80, 80, true));
 }
+
+#[test]
+fn test_contiguous_background_cells_merge_into_single_quad() {
+    let mut grid = Grid::new(10, 1, 0);
+    grid.cursor.visible = false;
+    for col in 2..8 {
+        grid.lines[0].cells[col].bg = Color::Rgb(50, 60, 70);
+    }
+    let fonts = FontManager::load(14.0).expect("system monospace font");
+    let atlas = GlyphAtlas::new(16, 16);
+    let mut bg_vertices = Vec::new();
+    let palette = default_256_palette();
+    let ctx = crate::render::text::RenderContext {
+        grid: &grid,
+        colors: ColorScheme::new(&palette, DEFAULT_FG, DEFAULT_BG),
+        metrics: fonts.metrics,
+        fonts: &fonts,
+        atlas: &atlas,
+        options: RenderOptions::default(),
+        cursor: None,
+    };
+    build_row_backgrounds(&mut bg_vertices, 0, &ctx);
+    // 6 contiguous cells should be merged into exactly 1 quad (48 floats)
+    assert_eq!(bg_vertices.len(), 48);
+}

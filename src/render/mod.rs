@@ -100,6 +100,7 @@ pub struct Renderer {
     pub(crate) gl: glow::Context,
     pub(crate) program: Option<glow::Program>,
     pub(crate) vbo: Option<glow::Buffer>,
+    pub(crate) vbo_capacity: usize,
     pub(crate) texture: Option<glow::Texture>,
     pub(crate) viewport: Option<glow::UniformLocation>,
     pub(crate) atlas_size: Option<glow::UniformLocation>,
@@ -163,6 +164,7 @@ impl Renderer {
             gl,
             program: None,
             vbo: None,
+            vbo_capacity: 0,
             texture: None,
             viewport: None,
             atlas_size: None,
@@ -305,7 +307,15 @@ impl Renderer {
                 self.vertices.as_ptr().cast::<u8>(),
                 std::mem::size_of_val(self.vertices.as_slice()),
             );
-            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::STREAM_DRAW);
+            if bytes.len() > self.vbo_capacity {
+                let new_cap = bytes
+                    .len()
+                    .max(self.vbo_capacity.saturating_mul(2))
+                    .max(16384);
+                gl.buffer_data_size(glow::ARRAY_BUFFER, new_cap as i32, glow::DYNAMIC_DRAW);
+                self.vbo_capacity = new_cap;
+            }
+            gl.buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, 0, bytes);
             let stride = 8 * std::mem::size_of::<f32>() as i32;
             for (index, count, offset) in [(0, 2, 0), (1, 2, 8), (2, 4, 16)] {
                 gl.enable_vertex_attrib_array(index);
@@ -417,7 +427,11 @@ impl Renderer {
             }
         }
 
+        let total_floats: usize = self.row_bg[..rows].iter().map(Vec::len).sum::<usize>()
+            + self.row_fg[..rows].iter().map(Vec::len).sum::<usize>()
+            + 192;
         self.vertices.clear();
+        self.vertices.reserve(total_floats);
         // 1. All row backgrounds first (prevents lower row background from covering upper row descenders)
         for r in 0..rows {
             self.vertices.extend_from_slice(&self.row_bg[r]);
