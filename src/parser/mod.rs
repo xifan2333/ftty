@@ -51,6 +51,11 @@ pub struct Terminal {
     pub viewport_pixels: [u16; 2],
     pub default_fg: Rgb,
     pub default_bg: Rgb,
+    pub initial_default_fg: Rgb,
+    pub initial_default_bg: Rgb,
+    pub palette: [Rgb; 256],
+    pub initial_palette: [Rgb; 256],
+    pub palette_dirty: bool,
     /// Whether bracketed paste mode (DECSET 2004) is currently enabled.
     pub bracketed_paste: bool,
     /// Whether focus reporting (DECSET 1004) is currently enabled.
@@ -116,6 +121,9 @@ fn find_printable_ascii_prefix(bytes: &[u8]) -> usize {
 impl Terminal {
     #[must_use]
     pub fn new(cols: usize, rows: usize, max_scrollback: usize) -> Self {
+        let palette = crate::color::default_256_palette();
+        let default_fg = Rgb::new(220, 220, 220);
+        let default_bg = Rgb::new(24, 24, 24);
         Self {
             grid: Grid::new(cols, rows, max_scrollback),
             active_fg: Color::DefaultForeground,
@@ -126,8 +134,13 @@ impl Terminal {
             title: String::new(),
             cell_pixels: [1, 1],
             viewport_pixels: [1, 1],
-            default_fg: Rgb::new(220, 220, 220),
-            default_bg: Rgb::new(24, 24, 24),
+            default_fg,
+            default_bg,
+            initial_default_fg: default_fg,
+            initial_default_bg: default_bg,
+            palette,
+            initial_palette: palette,
+            palette_dirty: false,
             bracketed_paste: false,
             focus_reporting: false,
             synchronized_output: false,
@@ -157,11 +170,19 @@ impl Terminal {
         let old_bg = self.default_bg;
         self.default_fg = fg;
         self.default_bg = bg;
+        self.initial_default_fg = fg;
+        self.initial_default_bg = bg;
         if self.report_color_scheme
             && Self::is_dark_background(old_bg) != Self::is_dark_background(bg)
         {
             self.send_color_scheme_report();
         }
+    }
+
+    /// Sets the base 256-color palette and saves it as initial defaults for OSC 104 reset.
+    pub fn set_palette(&mut self, palette: [Rgb; 256]) {
+        self.palette = palette;
+        self.initial_palette = palette;
     }
 
     pub(crate) const fn is_dark_background(bg: Rgb) -> bool {
@@ -422,6 +443,10 @@ impl Perform for Terminal {
                 self.grid.clear_all_hyperlinks();
                 self.grid.prompt_marks.clear();
                 self.hyperlink_pool.clear();
+                self.default_fg = self.initial_default_fg;
+                self.default_bg = self.initial_default_bg;
+                self.palette = self.initial_palette;
+                self.palette_dirty = true;
                 self.next_hyperlink_id = 1;
                 self.kitty_keyboard_flags = 0;
                 self.kitty_keyboard_stack.clear();

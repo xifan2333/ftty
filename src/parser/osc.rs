@@ -47,22 +47,78 @@ impl Terminal {
             && let Ok(title) = std::str::from_utf8(params[1])
         {
             self.title = title.to_string();
-        } else if params.len() >= 2 {
-            if params[0] == b"10" && params[1] == b"?" {
-                let fg = self.default_fg;
-                let resp = format!(
-                    "\x1b]10;rgb:{:02x}{:02x}/{:02x}{:02x}/{:02x}{:02x}\x1b\\",
-                    fg.r, fg.r, fg.g, fg.g, fg.b, fg.b
-                );
-                self.responses.push(resp.into_bytes());
-            } else if params[0] == b"11" && params[1] == b"?" {
-                let bg = self.default_bg;
-                let resp = format!(
-                    "\x1b]11;rgb:{:02x}{:02x}/{:02x}{:02x}/{:02x}{:02x}\x1b\\",
-                    bg.r, bg.r, bg.g, bg.g, bg.b, bg.b
-                );
-                self.responses.push(resp.into_bytes());
-            } else if params[0] == b"52" {
+        } else if !params.is_empty() {
+            if params[0] == b"10" && params.len() >= 2 {
+                if params[1] == b"?" {
+                    let fg = self.default_fg;
+                    let resp = format!(
+                        "\x1b]10;rgb:{:02x}{:02x}/{:02x}{:02x}/{:02x}{:02x}\x1b\\",
+                        fg.r, fg.r, fg.g, fg.g, fg.b, fg.b
+                    );
+                    self.responses.push(resp.into_bytes());
+                } else if let Ok(s) = std::str::from_utf8(params[1])
+                    && let Some(color) = crate::color::parse_color_spec(s)
+                {
+                    self.default_fg = color;
+                    self.palette_dirty = true;
+                }
+            } else if params[0] == b"11" && params.len() >= 2 {
+                if params[1] == b"?" {
+                    let bg = self.default_bg;
+                    let resp = format!(
+                        "\x1b]11;rgb:{:02x}{:02x}/{:02x}{:02x}/{:02x}{:02x}\x1b\\",
+                        bg.r, bg.r, bg.g, bg.g, bg.b, bg.b
+                    );
+                    self.responses.push(resp.into_bytes());
+                } else if let Ok(s) = std::str::from_utf8(params[1])
+                    && let Some(color) = crate::color::parse_color_spec(s)
+                {
+                    self.default_bg = color;
+                    self.palette_dirty = true;
+                }
+            } else if params[0] == b"110" {
+                self.default_fg = self.initial_default_fg;
+                self.palette_dirty = true;
+            } else if params[0] == b"111" {
+                self.default_bg = self.initial_default_bg;
+                self.palette_dirty = true;
+            } else if params[0] == b"4" && params.len() >= 3 {
+                for chunk in params[1..].as_chunks::<2>().0 {
+                    if let Ok(idx_str) = std::str::from_utf8(chunk[0])
+                        && let Ok(idx) = idx_str.parse::<usize>()
+                        && idx < 256
+                    {
+                        if chunk[1] == b"?" {
+                            let col = self.palette[idx];
+                            let resp = format!(
+                                "\x1b]4;{idx};rgb:{:02x}{:02x}/{:02x}{:02x}/{:02x}{:02x}\x1b\\",
+                                col.r, col.r, col.g, col.g, col.b, col.b
+                            );
+                            self.responses.push(resp.into_bytes());
+                        } else if let Ok(s) = std::str::from_utf8(chunk[1])
+                            && let Some(color) = crate::color::parse_color_spec(s)
+                        {
+                            self.palette[idx] = color;
+                            self.palette_dirty = true;
+                        }
+                    }
+                }
+            } else if params[0] == b"104" {
+                if params.len() == 1 {
+                    self.palette = self.initial_palette;
+                    self.palette_dirty = true;
+                } else {
+                    for param in &params[1..] {
+                        if let Ok(s) = std::str::from_utf8(param)
+                            && let Ok(idx) = s.parse::<usize>()
+                            && idx < 256
+                        {
+                            self.palette[idx] = self.initial_palette[idx];
+                            self.palette_dirty = true;
+                        }
+                    }
+                }
+            } else if params[0] == b"52" && params.len() >= 2 {
                 // OSC 52 ; [Pc] ; Pd
                 let (target, payload) = if params.len() == 2 {
                     (b"c".as_slice(), params[1])

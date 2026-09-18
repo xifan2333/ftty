@@ -27,6 +27,17 @@ impl AppState {
             }
         }
         self.keyboard.kitty_flags = self.terminal.kitty_keyboard_flags;
+        if self.terminal.palette_dirty {
+            self.terminal.palette_dirty = false;
+            self.palette = self.terminal.palette;
+            self.default_fg = self.terminal.default_fg;
+            self.default_bg = self.terminal.default_bg;
+            if let Some(renderer) = &mut self.renderer {
+                renderer.clear_cache();
+            }
+            self.terminal.grid.mark_all_dirty();
+            self.needs_redraw = true;
+        }
         if self.config.auto_scroll() && !self.terminal.grid.is_alt_screen() {
             self.terminal.grid.scroll_viewport_bottom();
         }

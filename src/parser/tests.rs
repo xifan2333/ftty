@@ -597,3 +597,60 @@ fn test_alt_screen_prompt_markers_not_recorded_in_primary() {
     assert!(!term.grid.is_alt_screen());
     assert_eq!(term.grid.prompt_marks.len(), 0);
 }
+
+#[test]
+fn test_dynamic_palette_and_colors_osc() {
+    let mut term = Terminal::new(80, 24, 100);
+    let init_fg = term.default_fg;
+    let init_bg = term.default_bg;
+    let init_p1 = term.palette[1];
+
+    // 1. Set foreground via OSC 10
+    term.advance_bytes(b"\x1b]10;#123456\x07");
+    assert_eq!(term.default_fg, Rgb::new(0x12, 0x34, 0x56));
+    assert!(term.palette_dirty);
+    term.palette_dirty = false;
+
+    // 2. Set background via OSC 11
+    term.advance_bytes(b"\x1b]11;rgb:10/20/30\x07");
+    assert_eq!(term.default_bg, Rgb::new(0x10, 0x20, 0x30));
+    assert!(term.palette_dirty);
+    term.palette_dirty = false;
+
+    // 3. Reset foreground via OSC 110
+    term.advance_bytes(b"\x1b]110\x07");
+    assert_eq!(term.default_fg, init_fg);
+    assert!(term.palette_dirty);
+    term.palette_dirty = false;
+
+    // 4. Reset background via OSC 111
+    term.advance_bytes(b"\x1b]111\x07");
+    assert_eq!(term.default_bg, init_bg);
+    assert!(term.palette_dirty);
+    term.palette_dirty = false;
+
+    // 5. Set palette color 1 via OSC 4
+    term.advance_bytes(b"\x1b]4;1;#abcdef\x07");
+    assert_eq!(term.palette[1], Rgb::new(0xab, 0xcd, 0xef));
+    assert!(term.palette_dirty);
+    term.palette_dirty = false;
+
+    // 6. Query palette color 1 via OSC 4;1;?
+    term.advance_bytes(b"\x1b]4;1;?\x07");
+    assert_eq!(
+        term.take_responses(),
+        vec![b"\x1b]4;1;rgb:abab/cdcd/efef\x1b\\".to_vec()]
+    );
+
+    // 7. Reset palette color 1 via OSC 104;1
+    term.advance_bytes(b"\x1b]104;1\x07");
+    assert_eq!(term.palette[1], init_p1);
+    assert!(term.palette_dirty);
+    term.palette_dirty = false;
+
+    // 8. Reset all palette via OSC 104
+    term.advance_bytes(b"\x1b]4;2;#112233\x07");
+    assert_eq!(term.palette[2], Rgb::new(0x11, 0x22, 0x33));
+    term.advance_bytes(b"\x1b]104\x07");
+    assert_eq!(term.palette[2], term.initial_palette[2]);
+}
