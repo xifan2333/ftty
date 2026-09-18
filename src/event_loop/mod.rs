@@ -218,6 +218,11 @@ impl AppState {
             pty_registered: false,
         })
     }
+
+    #[must_use]
+    pub(crate) fn should_register_pty(&self) -> bool {
+        !self.pty_registered && self.wayland.configured
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -324,7 +329,7 @@ pub fn run_event_loop_with_connection(
 
         // Register PTY read source exactly once after initial configure establishes
         // final tiling dimensions and creates the renderer, preventing busy-looping and SIGWINCH restarts.
-        if !app_state.pty_registered && app_state.wayland.configured {
+        if app_state.should_register_pty() {
             app_state.pty_registered = true;
             let pty_master = app_state.pty.try_clone_master()?;
             let pty_source = Generic::new(pty_master, Interest::READ, Mode::Level);
