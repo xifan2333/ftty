@@ -546,3 +546,90 @@ fn test_incremental_dirty_tracking_only_regenerates_modified_row() {
     assert!(grid.visible_line(3).dirty.get());
     assert!(!grid.visible_line(4).dirty.get());
 }
+
+#[test]
+fn test_column_resize_regenerates_row_foregrounds_and_backgrounds() {
+    let fonts = FontManager::load(14.0).expect("system monospace font");
+    let mut grid = Grid::new(10, 5, 0);
+    grid.cursor.visible = false;
+    for r in 0..5 {
+        grid.cursor.row = r;
+        grid.cursor.col = 0;
+        grid.write_char(
+            'X',
+            Color::DefaultForeground,
+            Color::Rgb(10, 20, 30),
+            CellFlags::empty(),
+        );
+    }
+
+    let mut atlas = GlyphAtlas::new(64, 64);
+    prepare_atlas(&grid, &fonts, &mut atlas, None);
+    let palette = default_256_palette();
+    let colors = ColorScheme::new(&palette, DEFAULT_FG, DEFAULT_BG);
+
+    let mut row_bg = vec![Vec::new(); 5];
+    let mut row_fg = vec![Vec::new(); 5];
+    let ctx = crate::render::text::RenderContext {
+        grid: &grid,
+        colors,
+        metrics: fonts.metrics,
+        fonts: &fonts,
+        atlas: &atlas,
+        options: RenderOptions::default(),
+        cursor: None,
+    };
+    for r in 0..5 {
+        build_row_backgrounds(&mut row_bg[r], r, &ctx);
+        build_row_foregrounds(&mut row_fg[r], r, &ctx);
+    }
+
+    // Now expand grid horizontally from 10 to 20 columns (same number of rows)
+    grid.resize(20, 5);
+    assert_eq!(grid.cols, 20);
+    assert_eq!(grid.rows, 5);
+
+    // Add content in the newly expanded column space (column 15)
+    grid.cursor.row = 2;
+    grid.cursor.col = 15;
+    grid.write_char(
+        'Y',
+        Color::DefaultForeground,
+        Color::Rgb(50, 60, 70),
+        CellFlags::empty(),
+    );
+
+    prepare_atlas(&grid, &fonts, &mut atlas, None);
+    let ctx_expanded = crate::render::text::RenderContext {
+        grid: &grid,
+        colors,
+        metrics: fonts.metrics,
+        fonts: &fonts,
+        atlas: &atlas,
+        options: RenderOptions::default(),
+        cursor: None,
+    };
+
+    // Rebuild row 2: it must generate vertices for both 'X' at col 0 and 'Y' at col 15
+    build_row_backgrounds(&mut row_bg[2], 2, &ctx_expanded);
+    build_row_foregrounds(&mut row_fg[2], 2, &ctx_expanded);
+
+    // Row 2 background must have at least 2 quads (cell 0 and cell 15 custom bg)
+    assert!(row_bg[2].len() >= 2 * 48);
+    // Row 2 foreground must have at least 2 quads ('X' and 'Y')
+    assert!(row_fg[2].len() >= 2 * 48);
+}
+
+#[test]
+fn test_row_cache_needs_reset_on_column_or_row_change() {
+    use crate::render::row_cache_needs_reset;
+
+    // Same rows, expanded columns (the exact bug case): must trigger reset
+    assert!(row_cache_needs_reset(24, 24, 80, 150, false));
+    // Same rows and columns: must not reset
+    assert!(!row_cache_needs_reset(24, 24, 80, 80, false));
+    // Changed rows: must reset
+    assert!(row_cache_needs_reset(24, 40, 80, 80, false));
+    // Padding changed: must reset
+    assert!(row_cache_needs_reset(24, 24, 80, 80, true));
+}

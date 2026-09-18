@@ -115,7 +115,19 @@ pub struct Renderer {
     pub(crate) last_viewport_offset: usize,
     pub(crate) last_hovered_span: Option<HoveredHyperlinkSpan>,
     pub(crate) last_padding: [u16; 2],
+    pub(crate) last_cols: usize,
     pub(crate) egl: EglContext,
+}
+
+#[must_use]
+pub(crate) fn row_cache_needs_reset(
+    cached_rows: usize,
+    current_rows: usize,
+    last_cols: usize,
+    current_cols: usize,
+    padding_changed: bool,
+) -> bool {
+    cached_rows != current_rows || last_cols != current_cols || padding_changed
 }
 
 impl Renderer {
@@ -124,6 +136,7 @@ impl Renderer {
         self.row_bg.clear();
         self.row_fg.clear();
         self.row_valid.clear();
+        self.last_cols = 0;
     }
 
     /// Creates a renderer after the first XDG surface configure has been acknowledged.
@@ -165,6 +178,7 @@ impl Renderer {
             last_viewport_offset: 0,
             last_hovered_span: None,
             last_padding: [0, 0],
+            last_cols: 0,
             egl,
         };
         // SAFETY: the owned EGL context is current for all initialization calls.
@@ -343,12 +357,20 @@ impl Renderer {
         let selection_changed = self.last_selection.as_ref() != options.selection;
         let hover_changed = self.last_hovered_span != options.hovered_span;
 
+        let cols_changed = self.last_cols != grid.cols;
         let rows = grid.rows.min(MAX_RENDER_CACHE_ROWS);
-        if self.row_valid.len() != rows || padding_changed {
+        if row_cache_needs_reset(
+            self.row_valid.len(),
+            rows,
+            self.last_cols,
+            grid.cols,
+            padding_changed,
+        ) {
             self.row_bg = vec![Vec::new(); rows];
             self.row_fg = vec![Vec::new(); rows];
             self.row_valid = vec![false; rows];
         }
+        self.last_cols = grid.cols;
 
         let ctx = RenderContext {
             grid,
@@ -382,6 +404,7 @@ impl Renderer {
                 || line.dirty.get()
                 || viewport_changed
                 || shape_changed
+                || cols_changed
                 || (cursor_changed && (row_has_cursor || row_had_cursor))
                 || (selection_changed && (row_has_sel || row_had_sel))
                 || (hover_changed && (row_has_hover || row_had_hover));

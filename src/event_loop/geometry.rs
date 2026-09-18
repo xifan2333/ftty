@@ -66,6 +66,9 @@ impl AppState {
         if (self.terminal.grid.cols, self.terminal.grid.rows) != (cols as usize, rows as usize) {
             self.terminal.grid.resize(cols as usize, rows as usize);
         }
+        for response in self.terminal.take_responses() {
+            self.write_pty_blocking(&response);
+        }
         Ok(())
     }
 
@@ -89,6 +92,11 @@ impl AppState {
             xdg_surface.set_window_geometry(0, 0, size[0] as i32, size[1] as i32);
         }
         self.resize_terminal()?;
+        self.terminal.synchronized_output = false;
+        self.terminal.grid.mark_all_dirty();
+        if let Some(renderer) = &mut self.renderer {
+            renderer.clear_cache();
+        }
         self.needs_redraw = true;
         // A resize must be committed even if the compositor suspended the old frame callback.
         self.frame_callback = None;
