@@ -184,3 +184,22 @@ fn test_parse_subpixel_antialiasing_config() {
     base.merge(inc);
     assert!(base.font_subpixel());
 }
+
+#[test]
+fn test_include_keybindings_prompt_navigation() {
+    let mut base = Config::default();
+    let mut inc = Config::default();
+    inc.keybindings.prompt_prev =
+        Some(crate::config::KeyCombos::Single("Ctrl+Shift+K".to_string()));
+    inc.keybindings.prompt_next =
+        Some(crate::config::KeyCombos::Single("Ctrl+Shift+J".to_string()));
+    base.merge(inc);
+    assert_eq!(
+        base.keybindings.prompt_prev.unwrap().to_combos(),
+        vec!["Ctrl+Shift+K"]
+    );
+    assert_eq!(
+        base.keybindings.prompt_next.unwrap().to_combos(),
+        vec!["Ctrl+Shift+J"]
+    );
+}

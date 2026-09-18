@@ -102,8 +102,10 @@ impl Terminal {
                 match params[1] {
                     b"A" => {
                         self.shell_integration = Some(ShellIntegrationState::PromptStart);
-                        let abs_line = self.grid.scrollback.len() + self.grid.cursor.row;
-                        self.grid.add_prompt_mark(abs_line);
+                        if !self.grid.is_alt_screen() {
+                            let abs_line = self.grid.scrollback.len() + self.grid.cursor.row;
+                            self.grid.add_prompt_mark(abs_line);
+                        }
                     }
                     b"B" => self.shell_integration = Some(ShellIntegrationState::CommandStart),
                     b"C" => self.shell_integration = Some(ShellIntegrationState::OutputStart),

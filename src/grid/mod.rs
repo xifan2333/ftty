@@ -504,6 +504,8 @@ impl Grid {
                 }
             }
             ClearMode::All => {
+                let sb_len = self.scrollback.len();
+                self.prompt_marks.retain(|&m| m < sb_len);
                 for row in &mut self.lines {
                     row.reset();
                 }
@@ -513,6 +515,12 @@ impl Grid {
                 let sb_len = self.scrollback.len();
                 self.scrollback.clear();
                 self.viewport_offset = 0;
+                self.prompt_marks.retain(|&m| m >= sb_len);
+                let mut rebased = BTreeSet::new();
+                for &m in &self.prompt_marks {
+                    rebased.insert(m - sb_len);
+                }
+                self.prompt_marks = rebased;
                 // Both screens share the scrollback base, so the hidden primary's placements need
                 // the same rebase as the active screen's.
                 for placements in [&mut self.placements, &mut self.alt_placements] {
