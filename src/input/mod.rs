@@ -200,17 +200,21 @@ impl KeyboardHandler {
 
     /// Reads at most `size` bytes from an owned Wayland keymap descriptor, then closes it.
     pub fn set_keymap_from_fd(&mut self, fd: OwnedFd, size: usize) {
+        use std::io::Seek;
+        let mut file = std::fs::File::from(fd);
+        let _ = file.rewind();
+        let max_read = (size as u64).min(2 * 1024 * 1024);
         let mut buf = Vec::new();
-        if let Err(err) = std::fs::File::from(fd)
-            .take(size as u64)
-            .read_to_end(&mut buf)
-        {
+        if let Err(err) = file.take(max_read).read_to_end(&mut buf) {
             eprintln!("ftty: failed reading keymap from fd: {err}");
             return;
         }
 
-        if let Some(pos) = buf.iter().position(|&b| b == 0) {
-            buf.truncate(pos);
+        while let Some(&0) = buf.last() {
+            buf.pop();
+        }
+        if buf.is_empty() {
+            return;
         }
         match std::str::from_utf8(&buf) {
             Ok(s) => self.set_keymap_from_string(s),

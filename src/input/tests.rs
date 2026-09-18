@@ -74,6 +74,77 @@ fn test_set_keymap_from_fd_handles_multiple_trailing_nuls_and_padding() {
 }
 
 #[test]
+fn test_set_keymap_from_fd_handles_nonzero_seek_offset() {
+    use nix::sys::memfd::{MFdFlags, memfd_create};
+    use std::io::{Seek, SeekFrom, Write};
+
+    let mut handler = KeyboardHandler::new();
+    let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+    let keymap = Keymap::new_from_names(
+        &context,
+        "",
+        "",
+        "de",
+        "",
+        None,
+        xkb::KEYMAP_COMPILE_NO_FLAGS,
+    )
+    .unwrap();
+    let bytes = keymap.get_as_string(KEYMAP_FORMAT_TEXT_V1).into_bytes();
+    let size = bytes.len();
+
+    let fd = memfd_create(c"ftty-keymap-seek-test", MFdFlags::MFD_CLOEXEC).unwrap();
+    let mut file = std::fs::File::from(fd);
+    file.write_all(&bytes).unwrap();
+    // Intentionally leave seek position at EOF (simulating un-rewound compositor memfd)
+    file.seek(SeekFrom::End(0)).unwrap();
+
+    handler.keymap = None;
+    handler.state = None;
+
+    handler.set_keymap_from_fd(file.into(), size);
+
+    assert!(handler.keymap.is_some());
+    assert!(handler.state.is_some());
+    // German QWERTZ layout maps physical keycode 21 (Y on US layout) to 'z'
+    assert_eq!(handler.handle_key(21), Some(b"z".to_vec()));
+}
+
+#[test]
+fn test_set_keymap_from_fd_oversized_advertised_size_does_not_abort() {
+    use nix::sys::memfd::{MFdFlags, memfd_create};
+    use std::io::Write;
+
+    let mut handler = KeyboardHandler::new();
+    let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+    let keymap = Keymap::new_from_names(
+        &context,
+        "",
+        "",
+        "de",
+        "",
+        None,
+        xkb::KEYMAP_COMPILE_NO_FLAGS,
+    )
+    .unwrap();
+    let bytes = keymap.get_as_string(KEYMAP_FORMAT_TEXT_V1).into_bytes();
+
+    let fd = memfd_create(c"ftty-keymap-oversized-test", MFdFlags::MFD_CLOEXEC).unwrap();
+    let mut file = std::fs::File::from(fd);
+    file.write_all(&bytes).unwrap();
+
+    handler.keymap = None;
+    handler.state = None;
+
+    // Pass a huge advertised size (e.g. 500MB) with a small real descriptor
+    handler.set_keymap_from_fd(file.into(), 500 * 1024 * 1024);
+
+    assert!(handler.keymap.is_some());
+    assert!(handler.state.is_some());
+    assert_eq!(handler.handle_key(21), Some(b"z".to_vec()));
+}
+
+#[test]
 fn test_keyboard_handler_initialization() {
     let handler = KeyboardHandler::new();
     assert!(handler.keymap.is_some());
