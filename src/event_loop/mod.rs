@@ -238,6 +238,15 @@ pub fn run_event_loop(mut app_state: AppState) -> Result<(), FttyError> {
         .map_err(|e| WaylandError::Dispatch(e.to_string()))?;
     conn.flush()
         .map_err(|e| WaylandError::Dispatch(e.to_string()))?;
+
+    // Pre-warm EGL display, context, and shaders if window surface is ready
+    if let Some(surface) = &app_state.wayland.surface {
+        let size = [app_state.wayland.width, app_state.wayland.height];
+        if let Ok(renderer) = Renderer::new(surface, &conn, size) {
+            app_state.renderer = Some(renderer);
+        }
+    }
+
     run_event_loop_with_connection(app_state, conn, event_queue)
 }
 
