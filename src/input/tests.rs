@@ -60,10 +60,17 @@ fn test_set_keymap_from_fd_handles_multiple_trailing_nuls_and_padding() {
     let mut file = std::fs::File::from(fd);
     file.write_all(&bytes).unwrap();
     file.rewind().unwrap();
+
+    // Reset handler state to verify new keymap is loaded and active
+    handler.keymap = None;
+    handler.state = None;
+
     handler.set_keymap_from_fd(file.into(), size);
 
     assert!(handler.keymap.is_some());
     assert!(handler.state.is_some());
+    // French AZERTY layout maps physical keycode 16 (Q on US layout) to 'a'
+    assert_eq!(handler.handle_key(16), Some(b"a".to_vec()));
 }
 
 #[test]
