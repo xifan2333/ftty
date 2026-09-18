@@ -234,9 +234,8 @@ impl AppState {
         config: Config,
         config_path: Option<PathBuf>,
     ) -> Result<Self, FttyError> {
-        let uninit_font = FontManager::uninitialized(&config.font_families(), config.font_size());
-        let mut state =
-            Self::with_font_and_config(terminal, pty, uninit_font, config, config_path)?;
+        let fast_font = FontManager::fast_init(&config.font_families(), config.font_size());
+        let mut state = Self::with_font_and_config(terminal, pty, fast_font, config, config_path)?;
         state.font_worker = Some(font_worker);
         Ok(state)
     }

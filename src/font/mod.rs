@@ -292,17 +292,35 @@ impl FontManager {
         })
     }
 
-    /// Constructs an uninitialized `FontManager` with approximate metrics before font parsing completes.
+    /// Quickly discovers the primary font and reads its exact `CellMetrics` via zero-copy TTF parsing
+    /// in sub-milliseconds without parsing vector glyph outlines.
     #[must_use]
-    pub fn uninitialized(families: &[String], font_size: f32) -> Self {
+    pub fn fast_init(families: &[String], font_size: f32) -> Self {
         let valid_families = if families.is_empty() {
             vec!["monospace".to_string()]
         } else {
             families.to_vec()
         };
-        let cw = (font_size * 0.6).ceil().max(1.0) as u32;
-        let ch = (font_size * 1.2).ceil().max(1.0) as u32;
-        let ascent = (font_size * 0.8).ceil() as i32;
+        let primary_name = &valid_families[0];
+        let fc = fontconfig();
+        let exact_metrics = fc
+            .and_then(|fc| {
+                match_family(fc, primary_name, false, false)
+                    .or_else(|| match_family(fc, "monospace", false, false))
+            })
+            .and_then(|(path, index)| parse_cell_metrics_from_file(&path, index, font_size).ok());
+
+        let metrics = exact_metrics.unwrap_or_else(|| {
+            let cw = (font_size * 0.6).ceil().max(1.0) as u32;
+            let ch = (font_size * 1.2).ceil().max(1.0) as u32;
+            let ascent = (font_size * 0.8).ceil() as i32;
+            CellMetrics {
+                cell_width: cw,
+                cell_height: ch,
+                ascent,
+            }
+        });
+
         Self {
             regular: None,
             regular_slots: Vec::new(),
@@ -312,12 +330,14 @@ impl FontManager {
             fallbacks: Arc::new(Mutex::new(FallbackCache::default())),
             families: valid_families,
             font_size,
-            metrics: CellMetrics {
-                cell_width: cw,
-                cell_height: ch,
-                ascent,
-            },
+            metrics,
         }
+    }
+
+    /// Constructs an uninitialized `FontManager` with approximate metrics before font parsing completes.
+    #[must_use]
+    pub fn uninitialized(families: &[String], font_size: f32) -> Self {
+        Self::fast_init(families, font_size)
     }
 
     /// Returns `true` if the primary font face has been loaded and initialized.
