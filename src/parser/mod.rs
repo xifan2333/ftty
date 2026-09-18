@@ -158,18 +158,18 @@ impl Terminal {
         self.default_fg = fg;
         self.default_bg = bg;
         if self.report_color_scheme
-            && self.is_dark_background(old_bg) != self.is_dark_background(bg)
+            && Self::is_dark_background(old_bg) != Self::is_dark_background(bg)
         {
             self.send_color_scheme_report();
         }
     }
 
-    fn is_dark_background(&self, bg: Rgb) -> bool {
+    pub(crate) const fn is_dark_background(bg: Rgb) -> bool {
         (bg.r as u32 * 299 + bg.g as u32 * 587 + bg.b as u32 * 114) / 1000 < 128
     }
 
     pub(crate) fn send_color_scheme_report(&mut self) {
-        let code = if self.is_dark_background(self.default_bg) {
+        let code = if Self::is_dark_background(self.default_bg) {
             1
         } else {
             2
