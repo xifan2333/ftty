@@ -163,6 +163,7 @@ impl Dispatch<WlKeyboard, ()> for AppState {
                 state
                     .keyboard
                     .update_modifiers(mods_depressed, mods_latched, mods_locked, group);
+                state.update_hover_state();
             }
             _ => {}
         }
@@ -259,12 +260,18 @@ impl Dispatch<WlPointer, ()> for AppState {
                     state.cell_at_pointer(state.mouse_pos[0], state.mouse_pos[1]);
 
                 if state.keyboard.modifiers().ctrl {
-                    let cell = state.terminal.grid.visible_line(screen_row).cells.get(col);
-                    if let Some(cell) = cell
+                    let row = state.terminal.grid.visible_line(screen_row);
+                    let cell = row.cells.get(col);
+                    let target_url = if let Some(cell) = cell
                         && let Some(id) = cell.hyperlink_id
                         && let Some(url) = state.terminal.hyperlink_url(id.get())
                     {
-                        let url_owned = url.to_string();
+                        Some(url.to_string())
+                    } else {
+                        find_url_at_col(row, col).map(|(_, _, url)| url)
+                    };
+
+                    if let Some(url_owned) = target_url {
                         std::thread::spawn(move || {
                             let _ = std::process::Command::new("xdg-open")
                                 .arg(&url_owned)
@@ -459,6 +466,14 @@ impl AppState {
                 {
                     end_col += 1;
                 }
+                Some(HoveredHyperlinkSpan {
+                    line,
+                    start_col,
+                    end_col,
+                })
+            } else if self.keyboard.modifiers().ctrl
+                && let Some((start_col, end_col, _)) = find_url_at_col(row, col)
+            {
                 Some(HoveredHyperlinkSpan {
                     line,
                     start_col,
