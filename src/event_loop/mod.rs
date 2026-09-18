@@ -79,6 +79,7 @@ pub struct AppState {
     pub(crate) sync_output_start: Option<std::time::Instant>,
     pub(crate) last_sync_gen: u64,
     pub(crate) pty_registered: bool,
+    pub(crate) needs_trim: bool,
 }
 
 impl AppState {
@@ -215,6 +216,7 @@ impl AppState {
             sync_output_start: None,
             last_sync_gen: 0,
             pty_registered: false,
+            needs_trim: false,
         })
     }
 
@@ -379,6 +381,7 @@ pub fn run_event_loop_with_connection(
 
                     if total_read > 0 {
                         state.needs_redraw = true;
+                        state.needs_trim = true;
                         state.update_ime_cursor_area();
                     }
                     Ok(calloop::PostAction::Continue)
@@ -445,6 +448,10 @@ pub fn run_event_loop_with_connection(
                 app_state.frame_callback = Some(surface.frame(&qh, ()));
             }
             renderer.present()?;
+            if app_state.needs_trim {
+                app_state.needs_trim = false;
+                trim_memory();
+            }
             let _ = app_state
                 .wayland
                 .transition_window_to(crate::wayland::WindowState::Active);
@@ -457,6 +464,8 @@ pub fn run_event_loop_with_connection(
 
     app_state.render_error.map_or(Ok(()), Err)
 }
+
+pub use crate::pty::trim_memory;
 
 #[cfg(test)]
 mod tests;

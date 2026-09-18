@@ -141,6 +141,8 @@ fn main() {
         std::process::exit(1);
     }
 
+    ftty::trim_memory();
+
     if let Err(e) = run_event_loop_with_connection(app_state, conn, event_queue) {
         eprintln!("ftty error: {e}");
         std::process::exit(1);
