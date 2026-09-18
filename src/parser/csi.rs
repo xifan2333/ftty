@@ -136,8 +136,11 @@ impl Terminal {
                             if enabled {
                                 self.responses.push(
                                     format!(
-                                        "\x1b[4;{};{}t",
-                                        self.viewport_pixels[1], self.viewport_pixels[0]
+                                        "\x1b[48;{};{};{};{}t",
+                                        self.grid.rows,
+                                        self.grid.cols,
+                                        self.viewport_pixels[1],
+                                        self.viewport_pixels[0]
                                     )
                                     .into_bytes(),
                                 );

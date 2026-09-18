@@ -333,11 +333,17 @@ fn test_mode_2048_window_size_notifications() {
 
     term.advance_bytes(b"\x1b[?2048h");
     assert!(term.report_window_size);
-    assert_eq!(term.take_responses(), vec![b"\x1b[4;600;800t".to_vec()]);
+    assert_eq!(
+        term.take_responses(),
+        vec![b"\x1b[48;24;80;600;800t".to_vec()]
+    );
 
     // Resizing geometry emits notification
     term.set_geometry([10, 20], [1024, 768]);
-    assert_eq!(term.take_responses(), vec![b"\x1b[4;768;1024t".to_vec()]);
+    assert_eq!(
+        term.take_responses(),
+        vec![b"\x1b[48;24;80;768;1024t".to_vec()]
+    );
 
     term.advance_bytes(b"\x1b[?2048l");
     assert!(!term.report_window_size);
