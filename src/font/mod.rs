@@ -9,6 +9,7 @@ mod tests;
 
 use std::cell::RefCell;
 use std::io;
+use std::path::PathBuf;
 
 use fontconfig::Fontconfig;
 
@@ -114,6 +115,8 @@ pub struct FontManager {
     chains: RefCell<[Option<StyleChain>; 4]>,
     fallbacks: RefCell<FallbackCache>,
     families: Vec<String>,
+    primary_path: PathBuf,
+    primary_index: u32,
     font_size: f32,
     pub metrics: CellMetrics,
 }
@@ -245,6 +248,8 @@ impl FontManager {
             chains: RefCell::new([Some(regular), None, None, None]),
             fallbacks: RefCell::new(FallbackCache::default()),
             families: valid_families,
+            primary_path,
+            primary_index,
             font_size,
             metrics,
         })
@@ -298,30 +303,36 @@ impl FontManager {
         }
         self.font_size = new_size;
 
-        let cell_width = self
-            .regular
-            .primary
-            .glyph_advance_width('0', new_size)
-            .ceil()
-            .max(1.0) as u32;
+        if let Ok(metrics) =
+            parse_cell_metrics_from_file(&self.primary_path, self.primary_index, new_size)
+        {
+            self.metrics = metrics;
+        } else {
+            let cell_width = self
+                .regular
+                .primary
+                .glyph_advance_width('0', new_size)
+                .ceil()
+                .max(1.0) as u32;
 
-        let (cell_height, ascent) = self
-            .regular
-            .primary
-            .horizontal_line_metrics(new_size)
-            .map(|line| {
-                (
-                    line.new_line_size.ceil().max(1.0) as u32,
-                    line.ascent.ceil() as i32,
-                )
-            })
-            .unwrap_or((new_size.ceil().max(1.0) as u32, new_size.ceil() as i32));
+            let (cell_height, ascent) = self
+                .regular
+                .primary
+                .horizontal_line_metrics(new_size)
+                .map(|line| {
+                    (
+                        line.new_line_size.ceil().max(1.0) as u32,
+                        line.ascent.ceil() as i32,
+                    )
+                })
+                .unwrap_or((new_size.ceil().max(1.0) as u32, new_size.ceil() as i32));
 
-        self.metrics = CellMetrics {
-            cell_width,
-            cell_height,
-            ascent,
-        };
+            self.metrics = CellMetrics {
+                cell_width,
+                cell_height,
+                ascent,
+            };
+        }
 
         true
     }
