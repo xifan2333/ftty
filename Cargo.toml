@@ -51,11 +51,14 @@ xkbcommon = { version = "0.9", features = ["wayland"] }
 # `unsafe` is confined to the audited FFI modules (`render`, `pty`), which opt back in
 # with an explicit `allow` so every other module is guaranteed safe Rust.
 unsafe_code = "deny"
+unused = "deny"
 
 [lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"
 undocumented_unsafe_blocks = "deny"
+unused_self = "deny"
+redundant_clone = "deny"
 
 [profile.release]
 opt-level = 3
