@@ -7,6 +7,7 @@ use crate::font::atlas::{GlyphAtlas, Shelf};
 use crate::font::fallback::{
     FallbackCache, MAX_RESOLVED_CACHE, fontconfig, load_font_bytes, load_font_file, match_family,
 };
+use crate::font::{parse_cell_metrics_from_bytes, parse_cell_metrics_from_file};
 use crate::grid::CellFlags;
 
 fn fonts() -> &'static FontManager {
@@ -336,5 +337,30 @@ fn test_styled_chain_and_fallback_prewarm() {
         assert!(face.horizontal_line_metrics(14.0).is_some());
         let key = fonts.face_key('A', flags);
         assert_eq!(key.glyph, face.lookup_glyph_index('A'));
+    }
+}
+
+#[test]
+fn test_ttf_parser_metrics_match_fontdue() {
+    let font_size = 14.0;
+    let fonts = fonts();
+    let fc = fontconfig().expect("fontconfig initialized");
+    let (path, index) = match_family(fc, "monospace", false, false).expect("match monospace");
+    let parsed = parse_cell_metrics_from_file(&path, index, font_size).expect("parse ttf metrics");
+
+    assert!((parsed.cell_width as i32 - fonts.metrics.cell_width as i32).abs() <= 1);
+    assert!((parsed.cell_height as i32 - fonts.metrics.cell_height as i32).abs() <= 1);
+    assert!((parsed.ascent - fonts.metrics.ascent).abs() <= 1);
+}
+
+#[test]
+fn rejects_invalid_font_sizes_in_cell_metrics_parser() {
+    let fc = fontconfig().expect("fontconfig initialized");
+    let (path, index) = match_family(fc, "monospace", false, false).expect("match monospace");
+    let bytes = std::fs::read(&path).expect("read font file");
+
+    for invalid in [0.0, -1.0, 5.9, 72.1, f32::NAN, f32::INFINITY] {
+        assert!(parse_cell_metrics_from_bytes(&bytes, index, invalid).is_none());
+        assert!(parse_cell_metrics_from_file(&path, index, invalid).is_err());
     }
 }
