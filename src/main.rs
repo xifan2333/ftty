@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use ftty::{AppState, Config, Pty, Terminal, run_event_loop};
+use ftty::{AppState, Config, Pty, Terminal, run_event_loop_with_connection};
 
 fn print_help() {
     println!(
@@ -64,6 +64,30 @@ fn main() {
         }
     };
 
+    let has_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty())
+        || std::env::var_os("WAYLAND_SOCKET").is_some_and(|v| !v.is_empty());
+
+    if !has_wayland {
+        println!(
+            "ftty v{} - Minimalist Wayland Terminal Emulator",
+            env!("CARGO_PKG_VERSION")
+        );
+        println!("No active Wayland compositor detected. Core initialized successfully.");
+        return;
+    }
+
+    let conn = match wayland_client::Connection::connect_to_env() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("ftty: failed to connect to Wayland: {e}");
+            std::process::exit(1);
+        }
+    };
+    let event_queue = conn.new_event_queue();
+    let qh = event_queue.handle();
+    conn.display().get_registry(&qh, ());
+    let _ = conn.flush();
+
     let font_families = config.font_families();
     let font_size = config.font_size();
     let font_thread = std::thread::Builder::new()
@@ -105,19 +129,7 @@ fn main() {
         }
     };
 
-    let has_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty())
-        || std::env::var_os("WAYLAND_SOCKET").is_some_and(|v| !v.is_empty());
-
-    if !has_wayland {
-        println!(
-            "ftty v{} - Minimalist Wayland Terminal Emulator",
-            env!("CARGO_PKG_VERSION")
-        );
-        println!("No active Wayland compositor detected. Core initialized successfully.");
-        return;
-    }
-
-    if let Err(e) = run_event_loop(app_state) {
+    if let Err(e) = run_event_loop_with_connection(app_state, conn, event_queue) {
         eprintln!("ftty error: {e}");
         std::process::exit(1);
     }
