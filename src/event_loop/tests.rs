@@ -358,6 +358,28 @@ fn test_cell_at_pointer_calculation() {
 }
 
 #[test]
+fn test_fractional_scale_pointer_and_state() {
+    let term = Terminal::new(80, 24, 100);
+    let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
+    let mut app = AppState::new(term, pty).expect("AppState new");
+
+    assert_eq!(app.wayland.scale_factor, 1.0);
+    assert_eq!(app.wayland.preferred_scale_120, 120);
+
+    app.wayland.scale_factor = 1.5;
+    app.wayland.preferred_scale_120 = 180;
+
+    let scale = 1.5;
+    let logical_cw = f64::from(app.font_mgr.metrics.cell_width) / scale;
+    let logical_ch = f64::from(app.font_mgr.metrics.cell_height) / scale;
+
+    let (line, screen_row, col) = app.cell_at_pointer(logical_cw * 4.5, logical_ch * 2.5);
+    assert_eq!(col, 4);
+    assert_eq!(screen_row, 2);
+    assert_eq!(line, 2);
+}
+
+#[test]
 fn test_font_chain_reload_and_zoom_preserves_fallbacks() {
     let temp_dir = std::env::temp_dir().join(format!("ftty_font_chain_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&temp_dir);

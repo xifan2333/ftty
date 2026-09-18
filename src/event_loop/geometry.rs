@@ -73,23 +73,31 @@ impl AppState {
     }
 
     pub(crate) fn configure_renderer(&mut self, connection: &Connection) -> Result<(), FttyError> {
-        let size = self
+        let logical_size = self
             .pending_size
             .take()
             .unwrap_or([self.wayland.width, self.wayland.height]);
+        let factor = self.wayland.scale_factor;
+        let physical_size = [
+            (logical_size[0] as f64 * factor).round().max(1.0) as u32,
+            (logical_size[1] as f64 * factor).round().max(1.0) as u32,
+        ];
         if let Some(renderer) = &mut self.renderer {
-            renderer.resize(size)?;
+            renderer.resize(physical_size)?;
         } else {
             let surface = self
                 .wayland
                 .surface
                 .as_ref()
                 .ok_or(WaylandError::WindowNotCreated)?;
-            self.renderer = Some(Renderer::new(surface, connection, size)?);
+            self.renderer = Some(Renderer::new(surface, connection, physical_size)?);
         }
-        [self.wayland.width, self.wayland.height] = size;
+        [self.wayland.width, self.wayland.height] = logical_size;
         if let Some(xdg_surface) = &self.wayland.xdg_surface {
-            xdg_surface.set_window_geometry(0, 0, size[0] as i32, size[1] as i32);
+            xdg_surface.set_window_geometry(0, 0, logical_size[0] as i32, logical_size[1] as i32);
+        }
+        if let Some(viewport) = &self.wayland.viewport {
+            viewport.set_destination(logical_size[0] as i32, logical_size[1] as i32);
         }
         self.resize_terminal()?;
         self.terminal.synchronized_output = false;
@@ -101,5 +109,33 @@ impl AppState {
         // A resize must be committed even if the compositor suspended the old frame callback.
         self.frame_callback = None;
         Ok(())
+    }
+
+    /// Initializes `wp_fractional_scale_v1` on the window surface if the manager is bound.
+    pub fn try_init_fractional_scale(&mut self, qh: &wayland_client::QueueHandle<Self>) {
+        self.wayland.init_fractional_scale(qh);
+    }
+
+    /// Initializes `wp_viewport` on the window surface if viewporter is bound.
+    pub fn try_init_viewport(&mut self, qh: &wayland_client::QueueHandle<Self>) {
+        self.wayland.init_viewport(qh);
+    }
+
+    /// Handles Wayland fractional scale updates from `wp_fractional_scale_v1`.
+    pub fn handle_preferred_scale(&mut self, scale_120: u32, connection: &Connection) {
+        let factor = scale_120 as f64 / 120.0;
+        if (self.wayland.scale_factor - factor).abs() > 0.001 {
+            self.wayland.scale_factor = factor;
+            self.wayland.preferred_scale_120 = scale_120;
+
+            let base_font_size = self.config.font_size();
+            let scaled_font_size = (base_font_size * factor as f32).max(crate::font::MIN_FONT_SIZE);
+            self.update_font_size(scaled_font_size);
+
+            if let Err(e) = self.configure_renderer(connection) {
+                self.render_error = Some(e);
+                self.running = false;
+            }
+        }
     }
 }

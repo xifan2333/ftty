@@ -498,8 +498,9 @@ impl AppState {
     /// Returns the absolute `(line, screen_row, col)` grid coordinates under the surface-relative pointer position.
     #[must_use]
     pub fn cell_at_pointer(&self, surface_x: f64, surface_y: f64) -> (usize, usize, usize) {
-        let cw = f64::from(self.font_mgr.metrics.cell_width);
-        let ch = f64::from(self.font_mgr.metrics.cell_height);
+        let scale = self.wayland.scale_factor.max(0.1);
+        let cw = f64::from(self.font_mgr.metrics.cell_width) / scale;
+        let ch = f64::from(self.font_mgr.metrics.cell_height) / scale;
         let pad_x = f64::from(self.config.padding_x());
         let pad_y = f64::from(self.config.padding_y());
 

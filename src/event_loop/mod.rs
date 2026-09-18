@@ -433,12 +433,17 @@ pub fn run_event_loop_with_connection(
                 Some(&app_state.selection),
             )
             .with_hovered_span(app_state.hovered_span);
+            let factor = app_state.wayland.scale_factor;
+            let physical_size = [
+                (app_state.wayland.width as f64 * factor).round().max(1.0) as u32,
+                (app_state.wayland.height as f64 * factor).round().max(1.0) as u32,
+            ];
             renderer.render_grid(
                 &app_state.terminal.grid,
                 colors,
                 &app_state.font_mgr,
                 &mut app_state.atlas,
-                [app_state.wayland.width, app_state.wayland.height],
+                physical_size,
                 options,
             )?;
             if let Some(surface) = &app_state.wayland.surface {
@@ -446,6 +451,12 @@ pub fn run_event_loop_with_connection(
                     xdg_surface.set_window_geometry(
                         0,
                         0,
+                        app_state.wayland.width as i32,
+                        app_state.wayland.height as i32,
+                    );
+                }
+                if let Some(viewport) = &app_state.wayland.viewport {
+                    viewport.set_destination(
                         app_state.wayland.width as i32,
                         app_state.wayland.height as i32,
                     );
