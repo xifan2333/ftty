@@ -117,6 +117,7 @@ pub struct Renderer {
     pub(crate) last_hovered_span: Option<HoveredHyperlinkSpan>,
     pub(crate) last_padding: [u16; 2],
     pub(crate) last_cols: usize,
+    pub(crate) last_preedit: Option<crate::input::ime::Preedit>,
     pub(crate) egl: EglContext,
 }
 
@@ -138,7 +139,8 @@ impl Renderer {
         self.row_fg.clear();
         self.row_valid.clear();
         self.last_cols = 0;
-        self.vertices.clear();
+        self.vertices = Vec::new();
+        self.last_preedit = None;
     }
 
     /// Creates a renderer after the first XDG surface configure has been acknowledged.
@@ -182,6 +184,7 @@ impl Renderer {
             last_hovered_span: None,
             last_padding: [0, 0],
             last_cols: 0,
+            last_preedit: None,
             egl,
         };
         // SAFETY: the owned EGL context is current for all initialization calls.
@@ -439,9 +442,12 @@ impl Renderer {
             }
         }
 
+        let preedit_changed = self.last_preedit.as_ref() != options.preedit;
+
         let overlays_changed = cursor_changed
             || selection_changed
             || hover_changed
+            || preedit_changed
             || viewport_changed
             || shape_changed
             || cols_changed
@@ -468,6 +474,7 @@ impl Renderer {
         self.last_cursor = cursor;
         self.last_selection = options.selection.cloned();
         self.last_hovered_span = options.hovered_span;
+        self.last_preedit = options.preedit.cloned();
     }
 }
 
