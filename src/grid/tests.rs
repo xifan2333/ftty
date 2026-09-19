@@ -662,23 +662,21 @@ fn test_horizontal_shrink_and_grow_pads_with_default_cells() {
     }
     assert_eq!(grid.visible_line(0).cells[16].c, '5');
 
-    // Shrink horizontally to 5 columns: excess columns truncated
+    // Shrink horizontally to 5 columns: line reflows and wraps across rows
     grid.resize(5, 2);
     assert_eq!(grid.cols, 5);
     assert_eq!(grid.visible_line(0).cells.len(), 5);
-    assert_eq!(grid.visible_line(0).cells[0].c, 'H');
-    assert_eq!(grid.visible_line(0).cells[4].c, 'o');
 
-    // Grow horizontally back to 20 columns: expanded columns are clean defaults without stale resurrection
+    // Grow horizontally back to 20 columns: wrapped rows unwrap and restore the full string
     grid.resize(20, 2);
     assert_eq!(grid.cols, 20);
     assert_eq!(grid.visible_line(0).cells.len(), 20);
-    let prefix: String = grid.visible_line(0).cells[..5]
+    let full: String = grid.visible_line(0).cells[..17]
         .iter()
         .map(|c| c.c)
         .collect();
-    assert_eq!(prefix, "Hello");
-    for cell in &grid.visible_line(0).cells[5..] {
+    assert_eq!(full, "Hello World 12345");
+    for cell in &grid.visible_line(0).cells[17..] {
         assert_eq!(cell.c, ' ');
     }
 }
@@ -705,14 +703,23 @@ fn test_horizontal_shrink_clears_split_wide_character() {
             .contains(CellFlags::WIDE_CHAR_SPACER)
     );
 
-    // Shrink to 5 columns: separates WIDE_CHAR from its spacer at col 5
+    // Shrink to 5 columns: wraps rather than splitting the 2-column wide character
     grid.resize(5, 1);
-    assert_eq!(grid.visible_line(0).cells[4], crate::grid::Cell::default());
+    assert_eq!(grid.cols, 5);
 
-    // Grow back to 10 columns: no orphaned wide-character flag survives
+    // Grow back to 10 columns: unwraps and preserves the wide character intact
     grid.resize(10, 1);
-    assert_eq!(grid.visible_line(0).cells[4], crate::grid::Cell::default());
-    assert_eq!(grid.visible_line(0).cells[5], crate::grid::Cell::default());
+    assert_eq!(grid.visible_line(0).cells[4].c, '你');
+    assert!(
+        grid.visible_line(0).cells[4]
+            .flags
+            .contains(CellFlags::WIDE_CHAR)
+    );
+    assert!(
+        grid.visible_line(0).cells[5]
+            .flags
+            .contains(CellFlags::WIDE_CHAR_SPACER)
+    );
 }
 
 #[test]
@@ -960,4 +967,51 @@ fn test_clear_screen_rebases_and_clears_prompt_marks() {
     grid.clear_screen(ClearMode::Saved);
     assert_eq!(grid.scrollback.len(), 0);
     assert!(grid.prompt_marks.contains(&(active_mark - old_sb)));
+}
+
+#[test]
+fn test_shrink_and_expand_preserves_long_lines_without_truncation() {
+    let mut grid = Grid::new(80, 5, 100);
+    let line1 = "Permissions Size User Date Modified Name";
+    let line2 = "drwxr-xr-x     - xifan 14 Sep 02:31 Code";
+
+    for c in line1.chars() {
+        grid.write_char(
+            c,
+            Color::DefaultForeground,
+            Color::DefaultBackground,
+            CellFlags::empty(),
+        );
+    }
+    grid.newline();
+    grid.cursor.col = 0;
+
+    for c in line2.chars() {
+        grid.write_char(
+            c,
+            Color::DefaultForeground,
+            Color::DefaultBackground,
+            CellFlags::empty(),
+        );
+    }
+
+    // Shrink horizontally to 25 columns (as in user screenshot)
+    grid.resize(25, 10);
+    assert_eq!(grid.cols, 25);
+
+    // Expand back to 80 columns: text must unwrap and be 100% preserved without any truncation
+    grid.resize(80, 5);
+    assert_eq!(grid.cols, 80);
+
+    let read_l1: String = grid.visible_line(0).cells[..line1.len()]
+        .iter()
+        .map(|c| c.c)
+        .collect();
+    assert_eq!(read_l1, line1);
+
+    let read_l2: String = grid.visible_line(1).cells[..line2.len()]
+        .iter()
+        .map(|c| c.c)
+        .collect();
+    assert_eq!(read_l2, line2);
 }

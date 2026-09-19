@@ -155,7 +155,10 @@ impl Selection {
 
             let mut line_str = String::new();
             for cell in &row.cells[start_col..end_col] {
-                if !cell.flags.contains(CellFlags::WIDE_CHAR_SPACER) {
+                if !cell
+                    .flags
+                    .intersects(CellFlags::WIDE_CHAR_SPACER | CellFlags::WRAP_SPACER)
+                {
                     line_str.push(cell.c);
                 }
             }

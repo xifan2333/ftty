@@ -17,7 +17,7 @@ pub(crate) fn visible_glyph(cell: &Cell) -> bool {
         && cell.c != KITTY_PLACEHOLDER
         && !cell
             .flags
-            .intersects(CellFlags::HIDDEN | CellFlags::WIDE_CHAR_SPACER)
+            .intersects(CellFlags::HIDDEN | CellFlags::WIDE_CHAR_SPACER | CellFlags::WRAP_SPACER)
 }
 
 pub(crate) fn prepare_atlas(
@@ -239,7 +239,7 @@ pub(crate) fn build_row_foregrounds(vertices: &mut Vec<f32>, row: usize, ctx: &R
     for (col, cell) in line.cells.iter().enumerate() {
         if cell
             .flags
-            .intersects(CellFlags::HIDDEN | CellFlags::WIDE_CHAR_SPACER)
+            .intersects(CellFlags::HIDDEN | CellFlags::WIDE_CHAR_SPACER | CellFlags::WRAP_SPACER)
         {
             continue;
         }
