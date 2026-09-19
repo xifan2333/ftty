@@ -109,6 +109,8 @@ pub struct Renderer {
     pub(crate) has_dual_source: bool,
     pub(crate) image_textures: HashMap<u32, (glow::Texture, u32, u32, u64)>,
     pub(crate) vertices: Vec<f32>,
+    pub(crate) static_vertices_len: usize,
+    pub(crate) vbo_full_upload: bool,
     pub(crate) row_bg: Vec<Vec<f32>>,
     pub(crate) row_fg: Vec<Vec<f32>>,
     pub(crate) row_valid: Vec<bool>,
@@ -142,6 +144,8 @@ impl Renderer {
         self.row_valid.clear();
         self.last_cols = 0;
         self.vertices = Vec::new();
+        self.static_vertices_len = 0;
+        self.vbo_full_upload = true;
         self.last_preedit = None;
     }
 
@@ -182,6 +186,8 @@ impl Renderer {
             has_dual_source,
             image_textures: HashMap::new(),
             vertices: Vec::with_capacity(8192),
+            static_vertices_len: 0,
+            vbo_full_upload: true,
             row_bg: Vec::new(),
             row_fg: Vec::new(),
             row_valid: Vec::new(),
@@ -327,7 +333,20 @@ impl Renderer {
                 self.vertices.as_ptr().cast::<u8>(),
                 std::mem::size_of_val(self.vertices.as_slice()),
             );
-            Self::upload_vbo(gl, self.vbo, &mut self.vbo_capacity, bytes);
+            if self.vbo_full_upload || bytes.len() > self.vbo_capacity {
+                Self::upload_vbo(gl, self.vbo, &mut self.vbo_capacity, bytes);
+            } else {
+                let static_offset = self.static_vertices_len * std::mem::size_of::<f32>();
+                if static_offset < bytes.len() {
+                    let overlay_bytes = &bytes[static_offset..];
+                    gl.bind_buffer(glow::ARRAY_BUFFER, self.vbo);
+                    gl.buffer_sub_data_u8_slice(
+                        glow::ARRAY_BUFFER,
+                        static_offset as i32,
+                        overlay_bytes,
+                    );
+                }
+            }
             let stride = 8 * std::mem::size_of::<f32>() as i32;
             for (index, count, offset) in [(0, 2, 0), (1, 2, 8), (2, 4, 16)] {
                 gl.enable_vertex_attrib_array(index);
@@ -372,7 +391,7 @@ impl Renderer {
             .map_err(|e| RenderError::Gl(format!("{e:?}")))
     }
 
-    fn build_incremental_vertices(
+    pub(crate) fn build_incremental_vertices(
         &mut self,
         grid: &Grid,
         colors: ColorScheme<'_>,
@@ -409,6 +428,8 @@ impl Renderer {
             self.row_bg = vec![Vec::new(); rows];
             self.row_fg = vec![Vec::new(); rows];
             self.row_valid = vec![false; rows];
+            self.static_vertices_len = 0;
+            self.vbo_full_upload = true;
         }
         self.last_cols = grid.cols;
 
@@ -441,12 +462,15 @@ impl Renderer {
                 .last_hovered_span
                 .is_some_and(|span| span.line == abs_line);
 
+            let cursor_affects_row =
+                grid.cursor.shape == CursorShape::Block && (row_has_cursor || row_had_cursor);
+
             let needs_regen = !self.row_valid[r]
                 || line.dirty.get()
                 || viewport_changed
                 || shape_changed
                 || cols_changed
-                || (cursor_changed && (row_has_cursor || row_had_cursor))
+                || (cursor_changed && cursor_affects_row)
                 || (selection_changed && (row_has_sel || row_had_sel))
                 || (hover_changed && (row_has_hover || row_had_hover));
 
@@ -470,7 +494,7 @@ impl Renderer {
             || cols_changed
             || padding_changed;
 
-        if any_row_regenerated || overlays_changed || self.vertices.is_empty() {
+        if any_row_regenerated || self.static_vertices_len == 0 {
             let total_floats: usize = self.row_bg[..rows].iter().map(Vec::len).sum::<usize>()
                 + self.row_fg[..rows].iter().map(Vec::len).sum::<usize>()
                 + 192;
@@ -484,8 +508,14 @@ impl Renderer {
             for r in 0..rows {
                 self.vertices.extend_from_slice(&self.row_fg[r]);
             }
+            self.static_vertices_len = self.vertices.len();
             // 3. Dynamic overlays (cursor, preedit)
             build_dynamic_overlays(&mut self.vertices, &ctx);
+            self.vbo_full_upload = true;
+        } else if overlays_changed {
+            self.vertices.truncate(self.static_vertices_len);
+            build_dynamic_overlays(&mut self.vertices, &ctx);
+            self.vbo_full_upload = false;
         }
 
         self.last_cursor = cursor;
