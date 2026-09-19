@@ -40,7 +40,6 @@
 # Multi-font fallback chain: primary monospace face, followed by CJK and Emoji fallbacks
 family = ["JetBrainsMono Nerd Font", "Noto Sans CJK SC", "Noto Color Emoji"]
 size = 14.0
-subpixel = true
 
 [window]
 # Surface padding: [x, y] or uniform scalar N (window dimensions are managed by the WM)

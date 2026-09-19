@@ -100,7 +100,13 @@ impl AppState {
                 .surface
                 .as_ref()
                 .ok_or(WaylandError::WindowNotCreated)?;
-            self.renderer = Some(Renderer::new(surface, connection, physical_size)?);
+            let renderer = Renderer::new(surface, connection, physical_size)?;
+            // Automatically align font rasterization mode with GPU dual-source blending capability
+            if !renderer.has_dual_source && self.font_mgr.subpixel {
+                self.font_mgr.subpixel = false;
+                self.atlas.clear();
+            }
+            self.renderer = Some(renderer);
         }
         [self.wayland.width, self.wayland.height] = logical_size;
         if let Some(xdg_surface) = &self.wayland.xdg_surface {
