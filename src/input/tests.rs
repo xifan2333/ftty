@@ -324,3 +324,70 @@ fn test_kitty_keyboard_encoding() {
     handler.pop_kitty_flags(5);
     assert_eq!(handler.kitty_flags, 0);
 }
+
+#[test]
+fn test_kitty_arrow_and_functional_keys_encoding() {
+    let mut handler = KeyboardHandler::new();
+    handler.set_kitty_mode(KittyKeyboardFlags::DISAMBIGUATE, 1);
+
+    // Arrow keys: Up (103), Down (108), Left (105), Right (106)
+    assert_eq!(
+        handler.handle_key_event(103, true, false),
+        Some(b"\x1b[A".to_vec())
+    );
+    assert_eq!(
+        handler.handle_key_event(108, true, false),
+        Some(b"\x1b[B".to_vec())
+    );
+    assert_eq!(
+        handler.handle_key_event(106, true, false),
+        Some(b"\x1b[C".to_vec())
+    );
+    assert_eq!(
+        handler.handle_key_event(105, true, false),
+        Some(b"\x1b[D".to_vec())
+    );
+
+    // Modified arrow keys: Shift+Up (1;2A), Ctrl+Down (1;5B)
+    handler.update_modifiers(1, 0, 0, 0); // Shift (1 << 0)
+    assert_eq!(
+        handler.handle_key_event(103, true, false),
+        Some(b"\x1b[1;2A".to_vec())
+    );
+
+    handler.update_modifiers(4, 0, 0, 0); // Ctrl (1 << 2)
+    assert_eq!(
+        handler.handle_key_event(108, true, false),
+        Some(b"\x1b[1;5B".to_vec())
+    );
+    handler.update_modifiers(0, 0, 0, 0);
+
+    // Functional tilde and letter keys: Home (102), End (107), PageUp (104), PageDown (109), Delete (111)
+    assert_eq!(
+        handler.handle_key_event(102, true, false),
+        Some(b"\x1b[H".to_vec())
+    );
+    assert_eq!(
+        handler.handle_key_event(107, true, false),
+        Some(b"\x1b[F".to_vec())
+    );
+    assert_eq!(
+        handler.handle_key_event(104, true, false),
+        Some(b"\x1b[5~".to_vec())
+    );
+    assert_eq!(
+        handler.handle_key_event(109, true, false),
+        Some(b"\x1b[6~".to_vec())
+    );
+    assert_eq!(
+        handler.handle_key_event(111, true, false),
+        Some(b"\x1b[3~".to_vec())
+    );
+
+    // Release events with REPORT_EVENT_TYPES: Up release = \x1b[1;1:3A
+    handler.set_kitty_mode(KittyKeyboardFlags::REPORT_EVENT_TYPES, 2);
+    assert_eq!(
+        handler.handle_key_event(103, false, false),
+        Some(b"\x1b[1;1:3A".to_vec())
+    );
+}
