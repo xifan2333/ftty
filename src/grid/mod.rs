@@ -18,6 +18,7 @@ pub use row::{Cell, CellFlags, ClearMode, Cursor, CursorShape, Row};
 
 pub(crate) const MAX_PLACEMENTS: usize = 1024;
 pub(crate) const MAX_STORED_IMAGES: usize = 256;
+pub(crate) const MAX_ROW_POOL_CAPACITY: usize = 64;
 
 /// 2D Screen grid with scrollback history and alternate screen support.
 #[derive(Debug, Clone)]
@@ -48,6 +49,9 @@ pub struct Grid {
     pub(crate) alt_cursor: Option<Cursor>,
     pub(crate) alt_saved_cursor: Option<Cursor>,
     pub(crate) alt_placements: Vec<ImagePlacement>,
+
+    // Recycling pool for evicted or discarded rows to eliminate Vec<Cell> allocations.
+    pub(crate) row_pool: Vec<Row>,
 }
 
 impl Grid {
@@ -77,12 +81,38 @@ impl Grid {
             alt_cursor: None,
             alt_saved_cursor: None,
             alt_placements: Vec::new(),
+            row_pool: Vec::new(),
         }
     }
 
     #[must_use]
     pub fn is_alt_screen(&self) -> bool {
         self.alt_lines.is_some()
+    }
+
+    /// Recycles a discarded row into the row buffer pool if capacity allows.
+    ///
+    /// If the pool reaches [`MAX_ROW_POOL_CAPACITY`], the incoming row is dropped without allocation.
+    /// Cell reset is deferred until checkout via [`alloc_row`] or rotation reset to avoid double clears.
+    pub(crate) fn recycle_row(&mut self, row: Row) {
+        if self.row_pool.len() < MAX_ROW_POOL_CAPACITY {
+            self.row_pool.push(row);
+        }
+    }
+
+    /// Obtains a row from the buffer pool or allocates a new one, ensuring the returned
+    /// row matches `cols` and has all cells reset to default.
+    #[must_use]
+    pub(crate) fn alloc_row(&mut self, cols: usize) -> Row {
+        if let Some(mut row) = self.row_pool.pop() {
+            if row.cells.len() != cols {
+                row.resize(cols);
+            }
+            row.reset();
+            row
+        } else {
+            Row::new(cols)
+        }
     }
 
     pub fn add_image(&mut self, image: ImageData) {
@@ -366,10 +396,13 @@ impl Grid {
 
     pub(crate) fn push_scrollback(&mut self, row: Row) {
         if self.max_scrollback == 0 {
+            self.recycle_row(row);
             return;
         }
-        if self.scrollback.len() >= self.max_scrollback {
-            self.evict_oldest_scrollback_row();
+        if self.scrollback.len() >= self.max_scrollback
+            && let Some(evicted) = self.evict_oldest_scrollback_row()
+        {
+            self.recycle_row(evicted);
         }
         self.scrollback.push_back(row);
         // If user is currently viewing history, keep the view anchored on the same lines
@@ -478,7 +511,10 @@ impl Grid {
         if is_full_screen && self.max_scrollback > 0 {
             for i in 0..count {
                 if self.scrollback.len() >= self.max_scrollback {
-                    if let Some(recycled) = self.evict_oldest_scrollback_row() {
+                    if let Some(mut recycled) = self.evict_oldest_scrollback_row() {
+                        if recycled.cells.len() != self.cols {
+                            recycled.resize(self.cols);
+                        }
                         let old = std::mem::replace(&mut self.lines[i], recycled);
                         self.scrollback.push_back(old);
                         if self.viewport_offset > 0 {
@@ -488,7 +524,7 @@ impl Grid {
                         }
                     }
                 } else {
-                    let fresh = Row::new(self.cols);
+                    let fresh = self.alloc_row(self.cols);
                     let old = std::mem::replace(&mut self.lines[i], fresh);
                     self.push_scrollback(old);
                 }
@@ -563,7 +599,9 @@ impl Grid {
             }
             ClearMode::Saved => {
                 let sb_len = self.scrollback.len();
-                self.scrollback.clear();
+                while let Some(row) = self.scrollback.pop_front() {
+                    self.recycle_row(row);
+                }
                 self.viewport_offset = 0;
                 self.prompt_marks.retain(|&m| m >= sb_len);
                 let mut rebased = BTreeSet::new();
@@ -886,8 +924,10 @@ impl Grid {
         let count = count.min(self.scroll_region_bottom - self.cursor.row + 1);
         self.shift_region_marks_down(self.cursor.row, self.scroll_region_bottom, count);
         for _ in 0..count {
-            self.lines.remove(self.scroll_region_bottom);
-            self.lines.insert(self.cursor.row, Row::new(self.cols));
+            let removed = self.lines.remove(self.scroll_region_bottom);
+            self.recycle_row(removed);
+            let new_row = self.alloc_row(self.cols);
+            self.lines.insert(self.cursor.row, new_row);
         }
         self.mark_all_dirty();
     }
@@ -900,9 +940,10 @@ impl Grid {
         let count = count.min(self.scroll_region_bottom - self.cursor.row + 1);
         self.shift_region_marks_up(self.cursor.row, self.scroll_region_bottom, count);
         for _ in 0..count {
-            self.lines.remove(self.cursor.row);
-            self.lines
-                .insert(self.scroll_region_bottom, Row::new(self.cols));
+            let removed = self.lines.remove(self.cursor.row);
+            self.recycle_row(removed);
+            let new_row = self.alloc_row(self.cols);
+            self.lines.insert(self.scroll_region_bottom, new_row);
         }
         self.mark_all_dirty();
     }

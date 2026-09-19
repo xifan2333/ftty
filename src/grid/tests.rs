@@ -1,6 +1,6 @@
 use crate::color::Color;
 use crate::grid::diacritics::KITTY_PLACEHOLDER;
-use crate::grid::{CellFlags, ClearMode, Grid, Row};
+use crate::grid::{Cell, CellFlags, ClearMode, Grid, MAX_ROW_POOL_CAPACITY, Row};
 use crate::kitty::{ImageData, ImagePlacement};
 
 #[test]
@@ -1117,5 +1117,89 @@ fn test_reflow_preserves_image_placeholders() {
     assert_eq!(
         grid.visible_line(0).placeholders.as_ref().unwrap().get(&0),
         Some(&(42, 99, 1))
+    );
+}
+
+#[test]
+fn test_row_pool_recycling_on_continuous_scrolling() {
+    let mut grid = Grid::new(80, 24, 100);
+
+    // Scroll 100,000 lines: exceeds max_scrollback by a factor of 1000x
+    for i in 0..100_000 {
+        grid.write_char(
+            'X',
+            Color::DefaultForeground,
+            Color::DefaultBackground,
+            CellFlags::empty(),
+        );
+        grid.scroll_up(1);
+        if i % 1000 == 0 {
+            // Pool capacity must remain bounded to at most rows.max(64)
+            assert!(grid.row_pool.len() <= grid.rows.max(64));
+        }
+    }
+
+    assert_eq!(grid.scrollback.len(), 100);
+    // Incoming rows taken from pool must be cleanly reset
+    for line in &grid.lines {
+        for cell in &line.cells {
+            if cell.c != 'X' {
+                assert_eq!(*cell, Cell::default());
+            }
+        }
+    }
+}
+
+#[test]
+fn test_row_pool_alloc_and_resize() {
+    let mut grid = Grid::new(80, 24, 100);
+
+    let mut dirty_row = Row::new(80);
+    dirty_row.cells[0].c = 'Z';
+    dirty_row.wrapped = true;
+    dirty_row.placeholders = Some(std::collections::HashMap::from([(0, (1, 2, 3))]));
+    grid.recycle_row(dirty_row);
+
+    assert_eq!(grid.row_pool.len(), 1);
+
+    // Allocate row with different column size (e.g. 120)
+    let allocated = grid.alloc_row(120);
+    assert_eq!(grid.row_pool.len(), 0);
+    assert_eq!(allocated.cells.len(), 120);
+    assert!(!allocated.wrapped);
+    assert!(allocated.placeholders.as_ref().is_none_or(|m| m.is_empty()));
+    assert_eq!(allocated.cells[0], Cell::default());
+    assert!(allocated.dirty.get());
+}
+
+#[test]
+fn test_clear_saved_scrollback_populates_row_pool() {
+    let mut grid = Grid::new(80, 10, 50);
+    for _ in 0..30 {
+        grid.scroll_up(1);
+    }
+    assert_eq!(grid.scrollback.len(), 30);
+
+    grid.clear_screen(ClearMode::Saved);
+    assert_eq!(grid.scrollback.len(), 0);
+    // Rows evicted by ClearMode::Saved must populate row_pool up to capacity
+    assert!(grid.row_pool.len() >= 30);
+    assert!(grid.row_pool.len() <= MAX_ROW_POOL_CAPACITY);
+}
+
+#[test]
+fn test_row_pool_bounded_on_tall_grid_shrink_without_scrollback() {
+    let mut grid = Grid::new(80, 1000, 0);
+    grid.cursor.row = 999;
+
+    // Shrink from 1000 rows to 5 rows with zero scrollback
+    grid.resize(80, 5);
+    assert_eq!(grid.rows, 5);
+    assert_eq!(grid.lines.len(), 5);
+    assert!(
+        grid.row_pool.len() <= MAX_ROW_POOL_CAPACITY,
+        "pool length {} must not exceed MAX_ROW_POOL_CAPACITY {}",
+        grid.row_pool.len(),
+        MAX_ROW_POOL_CAPACITY
     );
 }
