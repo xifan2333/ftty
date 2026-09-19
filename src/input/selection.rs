@@ -33,6 +33,16 @@ pub struct Selection {
     pub kind: SelectionType,
 }
 
+impl Default for Selection {
+    fn default() -> Self {
+        Self {
+            start: SelectionPoint::new(0, 0),
+            end: SelectionPoint::new(0, 0),
+            kind: SelectionType::Simple,
+        }
+    }
+}
+
 impl Selection {
     #[must_use]
     pub fn new(start: SelectionPoint, end: SelectionPoint, kind: SelectionType) -> Self {
@@ -47,6 +57,11 @@ impl Selection {
         } else {
             (self.end, self.start)
         }
+    }
+
+    /// Clears the selection by resetting start and end to (0, 0).
+    pub fn clear(&mut self) {
+        *self = Self::default();
     }
 
     /// Checks whether the selection spans zero characters.

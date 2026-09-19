@@ -35,6 +35,8 @@ pub(crate) fn shift_placements(placements: &mut Vec<ImagePlacement>, amount: usi
     });
 }
 
+type ReflowCell = (crate::grid::Cell, Option<(u16, u16, u8)>);
+
 impl Grid {
     /// Resizes the grid dimensions.
     ///
@@ -182,10 +184,19 @@ impl Grid {
         let old_cursor_col = self.cursor.col;
         let old_saved_cursor_col = self.saved_cursor.col;
 
+        let old_total_rows = self.scrollback.len() + self.lines.len();
+        let old_view_top = if self.viewport_offset > 0 {
+            Some(old_total_rows.saturating_sub(self.lines.len() + self.viewport_offset))
+        } else {
+            None
+        };
+
         let mut logical_lines: Vec<LogicalLine> = Vec::new();
-        let mut current_cells: Vec<crate::grid::Cell> = Vec::new();
+        let mut current_cells: Vec<ReflowCell> = Vec::new();
         let mut current_cursor_offset: Option<usize> = None;
         let mut current_saved_cursor_offset: Option<usize> = None;
+        let mut current_view_top_offset: Option<usize> = None;
+        let mut current_placements: Vec<(usize, ImagePlacement)> = Vec::new();
         let mut current_has_prompt_mark = false;
 
         for (abs_row, row) in self.scrollback.iter().chain(self.lines.iter()).enumerate() {
@@ -193,8 +204,15 @@ impl Grid {
                 current_has_prompt_mark = true;
             }
 
+            for p in &self.placements {
+                if p.line == abs_row {
+                    current_placements.push((current_cells.len(), p.clone()));
+                }
+            }
+
             let is_cursor_row = abs_row == old_cursor_abs;
             let is_saved_cursor_row = abs_row == old_saved_cursor_abs;
+            let is_view_top_row = Some(abs_row) == old_view_top;
 
             let trailing_content = row
                 .cells
@@ -206,7 +224,8 @@ impl Grid {
                 && abs_row > old_saved_cursor_abs
                 && trailing_content == 0
                 && !row.wrapped
-                && !current_has_prompt_mark;
+                && !current_has_prompt_mark
+                && current_placements.is_empty();
             if is_trailing_blank {
                 continue;
             }
@@ -237,7 +256,25 @@ impl Grid {
                 if is_saved_cursor_row && col_idx == old_saved_cursor_col {
                     current_saved_cursor_offset = Some(current_cells.len());
                 }
-                current_cells.push(*cell);
+                if is_view_top_row && current_view_top_offset.is_none() {
+                    current_view_top_offset = Some(current_cells.len());
+                }
+                let ph = row
+                    .placeholders
+                    .as_ref()
+                    .and_then(|m| m.get(&col_idx))
+                    .copied();
+                current_cells.push((*cell, ph));
+            }
+
+            if is_cursor_row && current_cursor_offset.is_none() {
+                current_cursor_offset = Some(current_cells.len());
+            }
+            if is_saved_cursor_row && current_saved_cursor_offset.is_none() {
+                current_saved_cursor_offset = Some(current_cells.len());
+            }
+            if is_view_top_row && current_view_top_offset.is_none() {
+                current_view_top_offset = Some(current_cells.len());
             }
 
             if !row.wrapped {
@@ -245,6 +282,8 @@ impl Grid {
                     cells: std::mem::take(&mut current_cells),
                     cursor_offset: current_cursor_offset.take(),
                     saved_cursor_offset: current_saved_cursor_offset.take(),
+                    view_top_offset: current_view_top_offset.take(),
+                    placements: std::mem::take(&mut current_placements),
                     has_prompt_mark: current_has_prompt_mark,
                 });
                 current_has_prompt_mark = false;
@@ -254,11 +293,14 @@ impl Grid {
         if !current_cells.is_empty()
             || current_cursor_offset.is_some()
             || current_saved_cursor_offset.is_some()
+            || !current_placements.is_empty()
         {
             logical_lines.push(LogicalLine {
                 cells: current_cells,
                 cursor_offset: current_cursor_offset,
                 saved_cursor_offset: current_saved_cursor_offset,
+                view_top_offset: current_view_top_offset,
+                placements: current_placements,
                 has_prompt_mark: current_has_prompt_mark,
             });
         }
@@ -266,8 +308,10 @@ impl Grid {
         // Rewrap each logical line into rows of width new_cols
         let mut new_all_rows: std::collections::VecDeque<Row> = std::collections::VecDeque::new();
         let mut new_prompt_marks = std::collections::BTreeSet::new();
+        let mut new_placements: Vec<ImagePlacement> = Vec::new();
         let mut new_cursor_pos: Option<(usize, usize)> = None;
         let mut new_saved_cursor_pos: Option<(usize, usize)> = None;
+        let mut new_view_top_row: Option<usize> = None;
 
         for lline in logical_lines {
             if lline.cells.is_empty() {
@@ -281,6 +325,13 @@ impl Grid {
                 if lline.saved_cursor_offset.is_some() {
                     new_saved_cursor_pos = Some((row_idx, 0));
                 }
+                if lline.view_top_offset.is_some() && new_view_top_row.is_none() {
+                    new_view_top_row = Some(row_idx);
+                }
+                for (_, mut p) in lline.placements {
+                    p.line = row_idx;
+                    new_placements.push(p);
+                }
                 new_all_rows.push_back(Row::new(new_cols));
                 continue;
             }
@@ -293,8 +344,9 @@ impl Grid {
 
                 // Prevent splitting wide characters at the wrap boundary
                 let actual_len = if !is_last_chunk
-                    && chunk_len > 0
+                    && chunk_len > 1
                     && lline.cells[offset + chunk_len - 1]
+                        .0
                         .flags
                         .contains(crate::grid::CellFlags::WIDE_CHAR)
                 {
@@ -320,9 +372,33 @@ impl Grid {
                 {
                     new_saved_cursor_pos = Some((row_idx, (sco - offset).min(new_cols - 1)));
                 }
+                if let Some(vto) = lline.view_top_offset
+                    && vto >= offset
+                    && (vto < offset + actual_len || (is_last_chunk && vto >= offset))
+                    && new_view_top_row.is_none()
+                {
+                    new_view_top_row = Some(row_idx);
+                }
+                for (pl_offset, p) in &lline.placements {
+                    if *pl_offset >= offset
+                        && (*pl_offset < offset + actual_len
+                            || (is_last_chunk && *pl_offset >= offset))
+                    {
+                        let mut p_mapped = p.clone();
+                        p_mapped.line = row_idx;
+                        new_placements.push(p_mapped);
+                    }
+                }
 
                 let mut row = Row::new(new_cols);
-                row.cells[..actual_len].copy_from_slice(&lline.cells[offset..offset + actual_len]);
+                for (i, (cell, ph)) in lline.cells[offset..offset + actual_len].iter().enumerate() {
+                    row.cells[i] = *cell;
+                    if let Some(coord) = ph {
+                        row.placeholders
+                            .get_or_insert_with(std::collections::HashMap::new)
+                            .insert(i, *coord);
+                    }
+                }
                 if actual_len < chunk_len {
                     for cell in &mut row.cells[actual_len..chunk_len] {
                         cell.flags |= crate::grid::CellFlags::WRAP_SPACER;
@@ -341,18 +417,35 @@ impl Grid {
         }
 
         let total_count = new_all_rows.len();
-        let scrollback_count = total_count.saturating_sub(new_rows);
+        let cursor_target_row = new_cursor_pos.map_or(total_count.saturating_sub(1), |(r, _)| r);
 
-        self.lines.clear();
-        self.lines.extend(new_all_rows.drain(scrollback_count..));
+        let scrollback_count = if total_count > new_rows {
+            let needed = total_count - new_rows;
+            let rows_below_cursor = total_count
+                .saturating_sub(1)
+                .saturating_sub(cursor_target_row);
+            let from_bottom = needed.min(rows_below_cursor);
+            let from_top = needed - from_bottom;
 
-        self.scrollback.clear();
-        self.scrollback.extend(new_all_rows);
+            new_all_rows.truncate(total_count - from_bottom);
+            self.lines.clear();
+            self.lines.extend(new_all_rows.split_off(from_top));
+            self.scrollback.clear();
+            self.scrollback.extend(new_all_rows);
+            from_top
+        } else {
+            self.lines.clear();
+            self.lines.extend(new_all_rows);
+            self.scrollback.clear();
+            0
+        };
 
         // Enforce max scrollback capacity
+        let mut discarded_from_scrollback = 0;
         if self.scrollback.len() > self.max_scrollback {
             let excess = self.scrollback.len() - self.max_scrollback;
             self.scrollback.drain(0..excess);
+            discarded_from_scrollback = excess;
             let mut shifted = std::collections::BTreeSet::new();
             for &m in &new_prompt_marks {
                 if m >= excess {
@@ -362,13 +455,26 @@ impl Grid {
             new_prompt_marks = shifted;
         }
 
+        // Update placements
+        let total_screen_lines = self.scrollback.len() + new_rows;
+        new_placements.retain_mut(|p| {
+            if p.line < discarded_from_scrollback {
+                false
+            } else {
+                p.line -= discarded_from_scrollback;
+                p.line < total_screen_lines
+            }
+        });
+        self.placements = new_placements;
+
         // Apply updated cursor
         let max_row = new_rows.saturating_sub(1);
         let max_col = new_cols.saturating_sub(1);
 
         if let Some((abs_row, col)) = new_cursor_pos {
-            if abs_row >= scrollback_count {
-                self.cursor.row = (abs_row - scrollback_count).min(max_row);
+            let adjusted_row = abs_row.saturating_sub(discarded_from_scrollback);
+            if adjusted_row >= scrollback_count {
+                self.cursor.row = (adjusted_row - scrollback_count).min(max_row);
             } else {
                 self.cursor.row = 0;
             }
@@ -379,8 +485,9 @@ impl Grid {
         }
 
         if let Some((abs_row, col)) = new_saved_cursor_pos {
-            if abs_row >= scrollback_count {
-                self.saved_cursor.row = (abs_row - scrollback_count).min(max_row);
+            let adjusted_row = abs_row.saturating_sub(discarded_from_scrollback);
+            if adjusted_row >= scrollback_count {
+                self.saved_cursor.row = (adjusted_row - scrollback_count).min(max_row);
             } else {
                 self.saved_cursor.row = 0;
             }
@@ -395,14 +502,27 @@ impl Grid {
         self.rows = new_rows;
         self.scroll_region_top = 0;
         self.scroll_region_bottom = max_row;
-        self.viewport_offset = self.viewport_offset.min(self.scrollback.len());
+
+        if let Some(vtr) = new_view_top_row {
+            let adjusted_vtr = vtr.saturating_sub(discarded_from_scrollback);
+            self.viewport_offset = self
+                .scrollback
+                .len()
+                .saturating_sub(adjusted_vtr)
+                .min(self.scrollback.len());
+        } else {
+            self.viewport_offset = 0;
+        }
+
         self.mark_all_dirty();
     }
 }
 
 struct LogicalLine {
-    cells: Vec<crate::grid::Cell>,
+    cells: Vec<ReflowCell>,
     cursor_offset: Option<usize>,
     saved_cursor_offset: Option<usize>,
+    view_top_offset: Option<usize>,
+    placements: Vec<(usize, ImagePlacement)>,
     has_prompt_mark: bool,
 }

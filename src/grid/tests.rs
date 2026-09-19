@@ -1015,3 +1015,107 @@ fn test_shrink_and_expand_preserves_long_lines_without_truncation() {
         .collect();
     assert_eq!(read_l2, line2);
 }
+
+#[test]
+fn test_reflow_shrink_to_one_column_preserves_wide_characters() {
+    let mut grid = Grid::new(10, 2, 100);
+    grid.write_char(
+        '你',
+        Color::DefaultForeground,
+        Color::DefaultBackground,
+        CellFlags::empty(),
+    );
+    grid.write_char(
+        '好',
+        Color::DefaultForeground,
+        Color::DefaultBackground,
+        CellFlags::empty(),
+    );
+
+    // Shrink to 1 column: wide characters cannot fit on a single column, but must not be deleted
+    grid.resize(1, 10);
+    assert_eq!(grid.cols, 1);
+
+    // Expand back to 10 columns: both wide characters must be fully restored
+    grid.resize(10, 2);
+    assert_eq!(grid.cols, 10);
+    assert_eq!(grid.visible_line(0).cells[0].c, '你');
+    assert_eq!(grid.visible_line(0).cells[2].c, '好');
+}
+
+#[test]
+fn test_reflow_exact_width_cursor_tracking() {
+    let mut grid = Grid::new(5, 2, 100);
+    for c in "12345".chars() {
+        grid.write_char(
+            c,
+            Color::DefaultForeground,
+            Color::DefaultBackground,
+            CellFlags::empty(),
+        );
+    }
+    // Cursor is right at the boundary (deferred wrap at col 5)
+    assert_eq!(grid.cursor.col, 5);
+
+    // Resize to 10 columns: cursor must follow the logical line ending rather than jumping
+    grid.resize(10, 2);
+    assert_eq!(grid.cols, 10);
+    assert_eq!(grid.cursor.row, 0);
+    assert_eq!(grid.cursor.col, 5);
+}
+
+#[test]
+fn test_reflow_combined_resize_preserves_cursor_row_on_screen() {
+    let mut grid = Grid::new(20, 10, 100);
+    for r in 0..8 {
+        grid.cursor.row = r;
+        grid.cursor.col = 0;
+        grid.write_char(
+            'A',
+            Color::DefaultForeground,
+            Color::DefaultBackground,
+            CellFlags::empty(),
+        );
+    }
+    // Place cursor in middle of content (row 4)
+    grid.cursor.row = 4;
+    grid.cursor.col = 5;
+
+    // Simultaneously shrink width and height: cursor row must remain on the visible screen
+    grid.resize(10, 4);
+    assert_eq!(grid.cols, 10);
+    assert_eq!(grid.rows, 4);
+    assert!(
+        grid.cursor.row < 4,
+        "cursor row {} must be within new screen height 4",
+        grid.cursor.row
+    );
+}
+
+#[test]
+fn test_reflow_preserves_image_placeholders() {
+    let mut grid = Grid::new(20, 2, 100);
+    grid.write_char(
+        KITTY_PLACEHOLDER,
+        Color::DefaultForeground,
+        Color::DefaultBackground,
+        CellFlags::empty(),
+    );
+    grid.lines[0].placeholders = Some(std::collections::HashMap::from([(0, (42, 99, 1))]));
+
+    // Resize narrower
+    grid.resize(10, 2);
+    assert_eq!(grid.visible_line(0).cells[0].c, KITTY_PLACEHOLDER);
+    assert_eq!(
+        grid.visible_line(0).placeholders.as_ref().unwrap().get(&0),
+        Some(&(42, 99, 1))
+    );
+
+    // Resize wider
+    grid.resize(25, 2);
+    assert_eq!(grid.visible_line(0).cells[0].c, KITTY_PLACEHOLDER);
+    assert_eq!(
+        grid.visible_line(0).placeholders.as_ref().unwrap().get(&0),
+        Some(&(42, 99, 1))
+    );
+}
