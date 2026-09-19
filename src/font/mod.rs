@@ -64,6 +64,7 @@ pub struct FontManager {
     families: Vec<String>,
     font_size: f32,
     pub subpixel: bool,
+    pub bgr: bool,
     pub metrics: CellMetrics,
 }
 
@@ -124,7 +125,7 @@ impl FontManager {
     /// # Errors
     /// Returns an error for an invalid size, missing font, or unreadable font data.
     pub fn load_with_families(families: &[String], font_size: f32) -> io::Result<Self> {
-        Self::load_with_families_and_subpixel(families, font_size, false)
+        Self::load_with_families_and_subpixel(families, font_size, true)
     }
 
     /// Discovers and loads an ordered list of font families with explicit subpixel setting.
@@ -172,6 +173,7 @@ impl FontManager {
                 families: valid_families,
                 font_size,
                 subpixel,
+                bgr: false,
                 metrics: cached.metrics,
             });
         }
@@ -227,6 +229,7 @@ impl FontManager {
             families: valid_families,
             font_size,
             subpixel,
+            bgr: false,
             metrics,
         })
     }
@@ -362,9 +365,12 @@ impl FontManager {
         let num_configured = (1 + chain.fallbacks.len()) as u16;
 
         if key.face == 0 {
-            return chain
-                .primary
-                .rasterize_indexed(key.glyph, self.font_size, self.subpixel);
+            return chain.primary.rasterize_indexed(
+                key.glyph,
+                self.font_size,
+                self.subpixel,
+                self.bgr,
+            );
         }
         if key.face < num_configured {
             let fallback_idx = (key.face - 1) as usize;
@@ -372,6 +378,7 @@ impl FontManager {
                 key.glyph,
                 self.font_size,
                 self.subpixel,
+                self.bgr,
             );
         }
 
@@ -379,13 +386,15 @@ impl FontManager {
         drop(binding);
         let fallbacks = self.fallbacks.borrow();
         match fallbacks.faces.get(fallback_idx) {
-            Some(face) => face
-                .font
-                .rasterize_indexed(key.glyph, self.font_size, self.subpixel),
-            None => self
-                .regular
-                .primary
-                .rasterize_indexed(0, self.font_size, self.subpixel),
+            Some(face) => {
+                face.font
+                    .rasterize_indexed(key.glyph, self.font_size, self.subpixel, self.bgr)
+            }
+            None => {
+                self.regular
+                    .primary
+                    .rasterize_indexed(0, self.font_size, self.subpixel, self.bgr)
+            }
         }
     }
 }

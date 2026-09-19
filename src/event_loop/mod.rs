@@ -103,8 +103,31 @@ impl AppState {
         pty: Pty,
         config_path: Option<PathBuf>,
     ) -> Result<Self, FttyError> {
-        let config = Config::load_from_path_or_default(config_path.as_deref())?;
+        let config = if cfg!(test) && config_path.is_none() {
+            Config::default()
+        } else {
+            Config::load_from_path_or_default(config_path.as_deref())?
+        };
         Self::with_loaded_config(terminal, pty, config, config_path)
+    }
+
+    /// Returns `true` if the reported Wayland output geometry supports horizontal LCD subpixel rendering.
+    #[must_use]
+    pub fn is_subpixel_preferred(&self) -> bool {
+        matches!(
+            self.wayland
+                .output_subpixel
+                .unwrap_or(wayland_client::protocol::wl_output::Subpixel::HorizontalRgb),
+            wayland_client::protocol::wl_output::Subpixel::HorizontalRgb
+                | wayland_client::protocol::wl_output::Subpixel::HorizontalBgr
+        )
+    }
+
+    /// Returns `true` if the reported Wayland output geometry has a BGR horizontal subpixel layout.
+    #[must_use]
+    pub fn is_bgr_subpixel(&self) -> bool {
+        self.wayland.output_subpixel
+            == Some(wayland_client::protocol::wl_output::Subpixel::HorizontalBgr)
     }
 
     /// Creates a new `AppState` with terminal, PTY, pre-loaded configuration, and optional configuration path.
@@ -117,11 +140,8 @@ impl AppState {
         config: Config,
         config_path: Option<PathBuf>,
     ) -> Result<Self, FttyError> {
-        let font_mgr = FontManager::load_with_families_and_subpixel(
-            &config.font_families(),
-            config.font_size(),
-            config.font_subpixel(),
-        )?;
+        let font_mgr =
+            FontManager::load_with_families(&config.font_families(), config.font_size())?;
         Self::with_font_and_config(terminal, pty, font_mgr, config, config_path)
     }
 

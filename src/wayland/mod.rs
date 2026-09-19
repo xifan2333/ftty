@@ -16,9 +16,15 @@ pub use window::WindowState;
 
 use wayland_client::QueueHandle;
 use wayland_client::protocol::{
-    wl_compositor::WlCompositor, wl_data_device::WlDataDevice,
-    wl_data_device_manager::WlDataDeviceManager, wl_data_offer::WlDataOffer,
-    wl_data_source::WlDataSource, wl_keyboard::WlKeyboard, wl_pointer::WlPointer, wl_seat::WlSeat,
+    wl_compositor::WlCompositor,
+    wl_data_device::WlDataDevice,
+    wl_data_device_manager::WlDataDeviceManager,
+    wl_data_offer::WlDataOffer,
+    wl_data_source::WlDataSource,
+    wl_keyboard::WlKeyboard,
+    wl_output::{Subpixel, WlOutput},
+    wl_pointer::WlPointer,
+    wl_seat::WlSeat,
     wl_surface::WlSurface,
 };
 use wayland_protocols::wp::cursor_shape::v1::client::{
@@ -72,6 +78,9 @@ pub struct WaylandState {
     pub xdg_surface: Option<XdgSurface>,
     pub xdg_toplevel: Option<XdgToplevel>,
 
+    pub outputs: Vec<WlOutput>,
+    pub output_subpixel: Option<Subpixel>,
+
     pub width: u32,
     pub height: u32,
     pub configured: bool,
@@ -87,6 +96,7 @@ impl WaylandState {
             height: 480,
             scale_factor: 1.0,
             preferred_scale_120: 120,
+            output_subpixel: Some(Subpixel::HorizontalRgb),
             ..Default::default()
         }
     }
