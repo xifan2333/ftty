@@ -186,21 +186,21 @@ fn test_parse_subpixel_antialiasing_config() {
         size = 14.0
     "#;
     let config: Config = toml::from_str(toml_default).unwrap();
-    assert!(!config.font_subpixel());
+    assert!(config.font_subpixel());
 
-    let toml_enabled = r#"
+    let toml_disabled = r#"
         [font]
         size = 14.0
-        subpixel = true
+        subpixel = false
     "#;
-    let config_subpixel: Config = toml::from_str(toml_enabled).unwrap();
-    assert!(config_subpixel.font_subpixel());
+    let config_disabled: Config = toml::from_str(toml_disabled).unwrap();
+    assert!(!config_disabled.font_subpixel());
 
     let mut base = Config::default();
     let mut inc = Config::default();
-    inc.font.subpixel = Some(true);
+    inc.font.subpixel = Some(false);
     base.merge(inc);
-    assert!(base.font_subpixel());
+    assert!(!base.font_subpixel());
 }
 
 #[test]

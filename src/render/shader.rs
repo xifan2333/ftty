@@ -20,6 +20,8 @@ void main() {
 "#;
 
 pub const FRAGMENT_SHADER: &str = r#"
+#extension GL_EXT_blend_func_extended : enable
+
 #ifdef GL_FRAGMENT_PRECISION_HIGH
 precision highp float;
 varying highp vec2 v_tex_coords;
@@ -27,17 +29,35 @@ varying highp vec2 v_tex_coords;
 precision mediump float;
 varying mediump vec2 v_tex_coords;
 #endif
+
 varying lowp vec4 v_color;
 uniform sampler2D u_texture;
-// 0 = single-channel glyph coverage, 1 = RGBA kitty image placement.
+// 0 = glyph/background placement, 1 = RGBA kitty image placement.
 uniform int u_image_mode;
+// 0 = standard alpha blending, 1 = dual-source subpixel blending.
+uniform int u_subpixel_mode;
+
 void main() {
     if (u_image_mode == 1) {
         vec4 texel = texture2D(u_texture, v_tex_coords);
+#if defined(GL_EXT_blend_func_extended)
+        gl_FragColor = vec4(texel.rgb, 1.0);
+        gl_SecondaryFragColorEXT = vec4(texel.a * v_color.a);
+#else
         gl_FragColor = vec4(texel.rgb, texel.a * v_color.a);
+#endif
     } else {
-        float alpha = v_tex_coords.x < 0.0 ? 1.0 : texture2D(u_texture, v_tex_coords).a;
-        gl_FragColor = vec4(v_color.rgb, v_color.a * alpha);
+        vec4 mask = v_tex_coords.x < 0.0 ? vec4(1.0) : texture2D(u_texture, v_tex_coords);
+#if defined(GL_EXT_blend_func_extended)
+        gl_FragColor = vec4(v_color.rgb, 1.0);
+        if (u_subpixel_mode == 1) {
+            gl_SecondaryFragColorEXT = mask * v_color.a;
+        } else {
+            gl_SecondaryFragColorEXT = vec4(mask.a * v_color.a);
+        }
+#else
+        gl_FragColor = vec4(v_color.rgb, v_color.a * mask.a);
+#endif
     }
 }
 "#;

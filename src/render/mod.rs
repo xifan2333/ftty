@@ -105,6 +105,8 @@ pub struct Renderer {
     pub(crate) viewport: Option<glow::UniformLocation>,
     pub(crate) atlas_size: Option<glow::UniformLocation>,
     pub(crate) image_mode: Option<glow::UniformLocation>,
+    pub(crate) subpixel_mode: Option<glow::UniformLocation>,
+    pub(crate) has_dual_source: bool,
     pub(crate) image_textures: HashMap<u32, (glow::Texture, u32, u32, u64)>,
     pub(crate) vertices: Vec<f32>,
     pub(crate) row_bg: Vec<Vec<f32>>,
@@ -163,6 +165,10 @@ impl Renderer {
                     })
             })
         };
+        let exts = gl.supported_extensions();
+        let has_dual_source = exts.contains("GL_EXT_blend_func_extended")
+            || exts.contains("GL_ARB_blend_func_extended");
+
         let mut renderer = Self {
             gl,
             program: None,
@@ -172,6 +178,8 @@ impl Renderer {
             viewport: None,
             atlas_size: None,
             image_mode: None,
+            subpixel_mode: None,
+            has_dual_source,
             image_textures: HashMap::new(),
             vertices: Vec::with_capacity(8192),
             row_bg: Vec::new(),
@@ -207,6 +215,7 @@ impl Renderer {
             renderer.viewport = gl.get_uniform_location(program, "u_viewport");
             renderer.atlas_size = gl.get_uniform_location(program, "u_atlas_size");
             renderer.image_mode = gl.get_uniform_location(program, "u_image_mode");
+            renderer.subpixel_mode = gl.get_uniform_location(program, "u_subpixel_mode");
             gl.use_program(Some(program));
             gl.uniform_1_i32(gl.get_uniform_location(program, "u_texture").as_ref(), 0);
             gl.active_texture(glow::TEXTURE0);
@@ -218,12 +227,16 @@ impl Renderer {
                 gl.tex_parameter_i32(glow::TEXTURE_2D, parameter, glow::CLAMP_TO_EDGE as i32);
             }
             gl.enable(glow::BLEND);
-            gl.blend_func_separate(
-                glow::SRC_ALPHA,
-                glow::ONE_MINUS_SRC_ALPHA,
-                glow::ONE,
-                glow::ONE_MINUS_SRC_ALPHA,
-            );
+            if renderer.has_dual_source {
+                gl.blend_func(glow::SRC1_COLOR, glow::ONE_MINUS_SRC1_COLOR);
+            } else {
+                gl.blend_func_separate(
+                    glow::SRC_ALPHA,
+                    glow::ONE_MINUS_SRC_ALPHA,
+                    glow::ONE,
+                    glow::ONE_MINUS_SRC_ALPHA,
+                );
+            }
         }
         Ok(renderer)
     }
@@ -287,11 +300,11 @@ impl Renderer {
                 gl.tex_image_2d(
                     glow::TEXTURE_2D,
                     0,
-                    glow::ALPHA as i32,
+                    glow::RGBA as i32,
                     atlas.width as i32,
                     atlas.height as i32,
                     0,
-                    glow::ALPHA,
+                    glow::RGBA,
                     glow::UNSIGNED_BYTE,
                     glow::PixelUnpackData::Slice(Some(&atlas.pixels)),
                 );
@@ -299,6 +312,10 @@ impl Renderer {
             }
             gl.use_program(self.program);
             gl.uniform_1_i32(self.image_mode.as_ref(), 0);
+            gl.uniform_1_i32(
+                self.subpixel_mode.as_ref(),
+                i32::from(fonts.subpixel && self.has_dual_source),
+            );
             gl.uniform_2_f32(self.viewport.as_ref(), width as f32, height as f32);
             gl.uniform_2_f32(
                 self.atlas_size.as_ref(),

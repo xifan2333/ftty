@@ -168,6 +168,7 @@ impl Renderer {
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(tex));
             gl.uniform_1_i32(self.image_mode.as_ref(), 1);
+            gl.uniform_1_i32(self.subpixel_mode.as_ref(), 0);
             gl.uniform_2_f32(self.atlas_size.as_ref(), img_w, img_h);
 
             let bytes = std::slice::from_raw_parts(

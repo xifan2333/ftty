@@ -149,6 +149,19 @@ fn image_fragment_shader_preserves_rgba_channels() {
 }
 
 #[test]
+fn subpixel_fragment_shader_supports_dual_source_blending() {
+    // Regression guard: fragment shader must declare GL_EXT_blend_func_extended support
+    // and secondary color output for WezTerm-grade 3-channel LCD subpixel antialiasing.
+    assert!(FRAGMENT_SHADER.contains("GL_EXT_blend_func_extended"));
+    assert!(FRAGMENT_SHADER.contains("gl_SecondaryFragColorEXT"));
+    assert!(FRAGMENT_SHADER.contains("u_subpixel_mode"));
+    // Secondary coverage must be modulated by vertex alpha so translucent quads (e.g. selection)
+    // and dimmed glyphs are properly attenuated under dual-source blending.
+    assert!(FRAGMENT_SHADER.contains("mask * v_color.a"));
+    assert!(FRAGMENT_SHADER.contains("mask.a * v_color.a"));
+}
+
+#[test]
 fn invalid_native_dimensions_are_rejected() {
     for size in [[0, 1], [1, 0], [u32::MAX, 1], [1, u32::MAX]] {
         assert!(native_size(size).is_err());

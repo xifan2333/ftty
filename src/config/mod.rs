@@ -309,7 +309,7 @@ impl Config {
 
     #[must_use]
     pub fn font_subpixel(&self) -> bool {
-        self.font.subpixel.unwrap_or(false)
+        self.font.subpixel.unwrap_or(true)
     }
 
     #[must_use]
