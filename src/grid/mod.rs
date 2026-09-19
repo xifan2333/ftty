@@ -156,8 +156,13 @@ impl Grid {
                 .chain(self.alt_placements.iter())
                 .map(|p| p.image_id)
                 .collect();
-            // Virtual image IDs stay alive while a placeholder on either screen references them.
-            for row in self.lines.iter().chain(self.alt_lines.iter().flatten()) {
+            // Virtual image IDs stay alive while a placeholder on either screen or scrollback references them.
+            for row in self
+                .lines
+                .iter()
+                .chain(self.alt_lines.iter().flatten())
+                .chain(self.scrollback.iter())
+            {
                 for cell in &row.cells {
                     if cell.c != KITTY_PLACEHOLDER {
                         continue;

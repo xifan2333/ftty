@@ -283,6 +283,36 @@ fn virtual_placement_images_are_preserved_across_evictions() {
     );
 }
 
+#[test]
+fn scrollback_virtual_placement_images_are_preserved_across_evictions() {
+    let mut grid = Grid::new(80, 24, 100);
+    grid.virtual_placements.insert(100, (10, 10));
+    grid.write_char(
+        KITTY_PLACEHOLDER,
+        Color::Rgb(0, 0, 100),
+        Color::DefaultBackground,
+        CellFlags::empty(),
+    );
+
+    // Scroll lines up so the placeholder moves into scrollback history
+    grid.scroll_up(5);
+    assert_eq!(grid.scrollback.len(), 5);
+
+    for id in 1..=260 {
+        grid.add_image(ImageData {
+            id,
+            width: 1,
+            height: 1,
+            rgba: Some(vec![0, 0, 0, 0]),
+        });
+    }
+
+    assert!(
+        grid.images.contains_key(&100),
+        "virtual image 100 in scrollback must be preserved across eviction"
+    );
+}
+
 /// Writes `count` rows labelled `R0`, `R1`, … and leaves the cursor on the last one.
 fn fill_rows(grid: &mut Grid, count: usize) {
     for row in 0..count {
