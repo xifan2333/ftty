@@ -70,8 +70,10 @@ impl AppState {
         // The kernel only signals SIGWINCH on an actual change, so this is safe to repeat.
         self.pty
             .resize(cols, rows, viewport_pixels[0], viewport_pixels[1])?;
-        for response in self.terminal.take_responses() {
-            self.write_pty_blocking(&response);
+        if !self.terminal.responses.is_empty() {
+            for response in self.terminal.take_responses() {
+                self.write_pty_blocking(&response);
+            }
         }
         Ok(())
     }

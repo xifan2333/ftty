@@ -10,7 +10,6 @@ mod tests;
 
 use std::cell::RefCell;
 use std::io;
-use std::path::PathBuf;
 
 use fontconfig::Fontconfig;
 
@@ -26,61 +25,6 @@ pub struct CellMetrics {
     pub cell_width: u32,
     pub cell_height: u32,
     pub ascent: i32,
-}
-
-/// Extracts cell dimensions (width, height, ascent) from raw TrueType/OpenType font bytes in sub-milliseconds.
-#[must_use]
-pub fn parse_cell_metrics_from_bytes(
-    bytes: &[u8],
-    collection_index: u32,
-    font_size: f32,
-) -> Option<CellMetrics> {
-    if !font_size.is_finite() || font_size < MIN_FONT_SIZE || font_size > MAX_FONT_SIZE {
-        return None;
-    }
-    let face = ttf_parser::Face::parse(bytes, collection_index).ok()?;
-    let units_per_em = face.units_per_em() as f32;
-    if units_per_em <= 0.0 {
-        return None;
-    }
-    let factor = font_size / units_per_em;
-
-    let (ascent, descent, line_gap) = (
-        face.ascender() as i32,
-        face.descender() as i32,
-        face.line_gap() as i32,
-    );
-    let new_line_size = (ascent - descent + line_gap) as f32 * factor;
-    let cell_height = new_line_size.ceil().max(1.0) as u32;
-    let cell_ascent = (ascent as f32 * factor).ceil() as i32;
-
-    let glyph_id = face.glyph_index('0').unwrap_or(ttf_parser::GlyphId(0));
-    let advance_width = face.glyph_hor_advance(glyph_id).unwrap_or(0) as f32 * factor;
-    let cell_width = advance_width.ceil().max(1.0) as u32;
-
-    Some(CellMetrics {
-        cell_width,
-        cell_height,
-        ascent: cell_ascent,
-    })
-}
-
-/// Extracts cell dimensions directly from a font file in sub-milliseconds without parsing vector glyph outlines.
-///
-/// # Errors
-/// Returns [`std::io::Error`] if the font file cannot be read or table parsing fails.
-pub fn parse_cell_metrics_from_file(
-    path: &std::path::Path,
-    collection_index: u32,
-    font_size: f32,
-) -> std::io::Result<CellMetrics> {
-    let bytes = std::fs::read(path)?;
-    parse_cell_metrics_from_bytes(&bytes, collection_index, font_size).ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "failed to parse font tables for cell metrics",
-        )
-    })
 }
 
 /// Stable identity of a rasterized glyph: which face supplied it and in which style.
@@ -118,8 +62,6 @@ pub struct FontManager {
     chains: RefCell<[Option<StyleChain>; 4]>,
     fallbacks: RefCell<FallbackCache>,
     families: Vec<String>,
-    primary_path: PathBuf,
-    primary_index: u32,
     font_size: f32,
     pub subpixel: bool,
     pub metrics: CellMetrics,
@@ -228,8 +170,6 @@ impl FontManager {
                 chains: RefCell::new([Some(regular), None, None, None]),
                 fallbacks: RefCell::new(FallbackCache::default()),
                 families: valid_families,
-                primary_path: cached.primary.path,
-                primary_index: cached.primary.index,
                 font_size,
                 subpixel,
                 metrics: cached.metrics,
@@ -249,28 +189,7 @@ impl FontManager {
         let primary_regular = load_font_file(&primary_path, primary_index)?;
 
         // 2. Compute metrics from the primary Regular font tables
-        let metrics = parse_cell_metrics_from_file(&primary_path, primary_index, font_size)
-            .unwrap_or_else(|_| {
-                let cell_width = primary_regular
-                    .glyph_advance_width('0', font_size)
-                    .ceil()
-                    .max(1.0) as u32;
-
-                let (cell_height, ascent) = primary_regular
-                    .horizontal_line_metrics(font_size)
-                    .map(|line| {
-                        (
-                            line.new_line_size.ceil().max(1.0) as u32,
-                            line.ascent.ceil() as i32,
-                        )
-                    })
-                    .unwrap_or((font_size.ceil().max(1.0) as u32, font_size.ceil() as i32));
-                CellMetrics {
-                    cell_width,
-                    cell_height,
-                    ascent,
-                }
-            });
+        let metrics = primary_regular.compute_cell_metrics(font_size);
 
         // 3. User fallback regular slots maintain 1:1 index alignment with fallback_names.
         let mut fallback_entries = Vec::with_capacity(fallback_names.len());
@@ -306,8 +225,6 @@ impl FontManager {
             chains: RefCell::new([Some(regular), None, None, None]),
             fallbacks: RefCell::new(FallbackCache::default()),
             families: valid_families,
-            primary_path,
-            primary_index,
             font_size,
             subpixel,
             metrics,
@@ -361,38 +278,7 @@ impl FontManager {
             return false;
         }
         self.font_size = new_size;
-
-        if let Ok(metrics) =
-            parse_cell_metrics_from_file(&self.primary_path, self.primary_index, new_size)
-        {
-            self.metrics = metrics;
-        } else {
-            let cell_width = self
-                .regular
-                .primary
-                .glyph_advance_width('0', new_size)
-                .ceil()
-                .max(1.0) as u32;
-
-            let (cell_height, ascent) = self
-                .regular
-                .primary
-                .horizontal_line_metrics(new_size)
-                .map(|line| {
-                    (
-                        line.new_line_size.ceil().max(1.0) as u32,
-                        line.ascent.ceil() as i32,
-                    )
-                })
-                .unwrap_or((new_size.ceil().max(1.0) as u32, new_size.ceil() as i32));
-
-            self.metrics = CellMetrics {
-                cell_width,
-                cell_height,
-                ascent,
-            };
-        }
-
+        self.metrics = self.regular.primary.compute_cell_metrics(new_size);
         true
     }
 

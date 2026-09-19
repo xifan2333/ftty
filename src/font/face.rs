@@ -181,6 +181,27 @@ impl Font {
         (font_size * 0.6).ceil().max(1.0)
     }
 
+    /// Computes cell dimensions (cell_width, cell_height, ascent) for the active font at the given size.
+    #[must_use]
+    pub fn compute_cell_metrics(&self, font_size: f32) -> crate::font::CellMetrics {
+        let cell_width = self.glyph_advance_width('0', font_size).ceil().max(1.0) as u32;
+        let (cell_height, ascent) = self
+            .horizontal_line_metrics(font_size)
+            .map(|line| {
+                (
+                    line.new_line_size.ceil().max(1.0) as u32,
+                    line.ascent.ceil() as i32,
+                )
+            })
+            .unwrap_or((font_size.ceil().max(1.0) as u32, font_size.ceil() as i32));
+
+        crate::font::CellMetrics {
+            cell_width,
+            cell_height,
+            ascent,
+        }
+    }
+
     /// Rasterizes an indexed glyph on-demand into an alpha mask or LCD subpixel bitmap, normalizing pitch to top-to-bottom.
     #[must_use]
     pub fn rasterize_indexed(
