@@ -68,8 +68,16 @@ fn test_sgr_formatting() {
 #[test]
 fn test_osc_title() {
     let mut term = TestTerm::new(80, 24, 100);
+    assert!(!term.title_dirty);
     term.advance_bytes(b"\x1b]0;ftty terminal\x07");
     assert_eq!(term.title, "ftty terminal");
+    assert!(term.title_dirty);
+
+    // Empty title clears the title and sets title_dirty so Wayland can restore default
+    term.title_dirty = false;
+    term.advance_bytes(b"\x1b]0;\x07");
+    assert_eq!(term.title, "");
+    assert!(term.title_dirty);
 }
 
 #[test]

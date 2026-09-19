@@ -40,10 +40,16 @@ impl AppState {
             self.terminal.grid.mark_all_dirty();
             self.needs_redraw = true;
         }
-        if !self.terminal.title.is_empty() && self.terminal.title != self.wayland.title {
+        if self.terminal.title_dirty {
+            self.terminal.title_dirty = false;
             self.wayland.title = self.terminal.title.clone();
             if let Some(toplevel) = &self.wayland.xdg_toplevel {
-                toplevel.set_title(self.wayland.title.clone());
+                let title = if self.wayland.title.is_empty() {
+                    "ftty"
+                } else {
+                    &self.wayland.title
+                };
+                toplevel.set_title(title.to_string());
             }
         }
         if self.config.auto_scroll() && !self.terminal.grid.is_alt_screen() {

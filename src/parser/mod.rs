@@ -46,6 +46,7 @@ pub struct Terminal {
     pub active_flags: CellFlags,
     pub mouse: MouseState,
     pub title: String,
+    pub title_dirty: bool,
     /// Cell size in physical pixels, reported back through `CSI 16 t`.
     pub cell_pixels: [u16; 2],
     /// Text-area size in physical pixels, reported back through `CSI 14 t`.
@@ -157,6 +158,7 @@ impl Terminal {
             active_flags: CellFlags::empty(),
             mouse: MouseState::default(),
             title: String::new(),
+            title_dirty: false,
             cell_pixels: [1, 1],
             viewport_pixels: [1, 1],
             default_fg,
@@ -595,6 +597,8 @@ impl Perform for Terminal {
                 self.grid.clear_all_hyperlinks();
                 self.grid.prompt_marks.clear();
                 self.hyperlink_pool.clear();
+                self.title.clear();
+                self.title_dirty = true;
                 self.default_fg = self.initial_default_fg;
                 self.default_bg = self.initial_default_bg;
                 self.palette = self.initial_palette;

@@ -47,6 +47,7 @@ impl Terminal {
             && let Ok(title) = std::str::from_utf8(params[1])
         {
             self.title = title.to_string();
+            self.title_dirty = true;
         } else if !params.is_empty() {
             if params[0] == b"10" && params.len() >= 2 {
                 if params[1] == b"?" {
