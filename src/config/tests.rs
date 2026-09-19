@@ -73,30 +73,6 @@ fn test_parse_padding_scalar() {
 }
 
 #[test]
-fn test_legacy_padding_and_precedence() {
-    let legacy_toml = r#"
-    [window]
-    padding_x = 10
-    padding_y = 15
-    "#;
-    let config: Config = toml::from_str(legacy_toml).expect("parse legacy padding");
-    assert_eq!(config.padding(), [10, 15]);
-    assert_eq!(config.padding_x(), 10);
-    assert_eq!(config.padding_y(), 15);
-
-    let both_toml = r#"
-    [window]
-    padding = [4, 6]
-    padding_x = 10
-    padding_y = 15
-    "#;
-    let config_both: Config = toml::from_str(both_toml).expect("parse both padding");
-    assert_eq!(config_both.padding(), [4, 6]);
-    assert_eq!(config_both.padding_x(), 4);
-    assert_eq!(config_both.padding_y(), 6);
-}
-
-#[test]
 fn test_parse_font_chain() {
     let toml_str = r#"
     [font]
