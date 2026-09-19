@@ -19,16 +19,12 @@ pub(crate) fn push_solid_quad(
     if x1 <= x0 || y1 <= y0 {
         return;
     }
-    for [x, y, u, v] in [
-        [x0, y0, SOLID_UV[0][0], SOLID_UV[0][1]],
-        [x1, y0, SOLID_UV[1][0], SOLID_UV[0][1]],
-        [x0, y1, SOLID_UV[0][0], SOLID_UV[1][1]],
-        [x1, y0, SOLID_UV[1][0], SOLID_UV[0][1]],
-        [x1, y1, SOLID_UV[1][0], SOLID_UV[1][1]],
-        [x0, y1, SOLID_UV[0][0], SOLID_UV[1][1]],
-    ] {
-        vertices.extend_from_slice(&[x, y, u, v, color[0], color[1], color[2], color[3]]);
-    }
+    let [u, v] = [SOLID_UV[0][0], SOLID_UV[0][1]];
+    let [r, g, b, a] = color;
+    vertices.extend_from_slice(&[
+        x0, y0, u, v, r, g, b, a, x1, y0, u, v, r, g, b, a, x0, y1, u, v, r, g, b, a, x1, y0, u, v,
+        r, g, b, a, x1, y1, u, v, r, g, b, a, x0, y1, u, v, r, g, b, a,
+    ]);
 }
 
 /// Pushes an arbitrary solid convex quadrilateral (two triangles) with `SOLID_UV`.
@@ -41,18 +37,13 @@ pub(crate) fn push_solid_poly_quad(
     p3: [f32; 2],
     color: [f32; 4],
 ) {
-    for [x, y] in [p0, p1, p2, p1, p3, p2] {
-        vertices.extend_from_slice(&[
-            x,
-            y,
-            SOLID_UV[0][0],
-            SOLID_UV[0][1],
-            color[0],
-            color[1],
-            color[2],
-            color[3],
-        ]);
-    }
+    let [u, v] = [SOLID_UV[0][0], SOLID_UV[0][1]];
+    let [r, g, b, a] = color;
+    vertices.extend_from_slice(&[
+        p0[0], p0[1], u, v, r, g, b, a, p1[0], p1[1], u, v, r, g, b, a, p2[0], p2[1], u, v, r, g,
+        b, a, p1[0], p1[1], u, v, r, g, b, a, p3[0], p3[1], u, v, r, g, b, a, p2[0], p2[1], u, v,
+        r, g, b, a,
+    ]);
 }
 
 /// Approximates a circular ring sector between inner and outer radii using segmented quads.
@@ -870,6 +861,9 @@ pub fn render_procedural_glyph(
     ch: f32,
     color: [f32; 4],
 ) -> bool {
+    if !is_procedural_glyph(c) {
+        return false;
+    }
     if render_block_element(vertices, c, x, y, width, ch, color) {
         return true;
     }
