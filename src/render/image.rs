@@ -178,7 +178,12 @@ impl Renderer {
                 vertices.as_ptr().cast::<u8>(),
                 std::mem::size_of_val(vertices),
             );
-            crate::render::Renderer::upload_vbo(gl, self.vbo, &mut self.vbo_capacity, bytes);
+            crate::render::Renderer::upload_vbo(
+                gl,
+                self.image_vbo,
+                &mut self.image_vbo_capacity,
+                bytes,
+            );
 
             let stride = 8 * std::mem::size_of::<f32>() as i32;
             for (index, count, offset) in [(0, 2, 0), (1, 2, 8), (2, 4, 16)] {

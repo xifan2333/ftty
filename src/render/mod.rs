@@ -101,6 +101,8 @@ pub struct Renderer {
     pub(crate) program: Option<glow::Program>,
     pub(crate) vbo: Option<glow::Buffer>,
     pub(crate) vbo_capacity: usize,
+    pub(crate) image_vbo: Option<glow::Buffer>,
+    pub(crate) image_vbo_capacity: usize,
     pub(crate) texture: Option<glow::Texture>,
     pub(crate) viewport: Option<glow::UniformLocation>,
     pub(crate) atlas_size: Option<glow::UniformLocation>,
@@ -178,6 +180,8 @@ impl Renderer {
             program: None,
             vbo: None,
             vbo_capacity: 0,
+            image_vbo: None,
+            image_vbo_capacity: 0,
             texture: None,
             viewport: None,
             atlas_size: None,
@@ -206,6 +210,12 @@ impl Renderer {
             let program = create_program(&renderer.gl)?;
             renderer.program = Some(program);
             renderer.vbo = Some(
+                renderer
+                    .gl
+                    .create_buffer()
+                    .map_err(RenderError::BufferCreation)?,
+            );
+            renderer.image_vbo = Some(
                 renderer
                     .gl
                     .create_buffer()
@@ -536,6 +546,9 @@ impl Drop for Renderer {
                 }
                 if let Some(vbo) = self.vbo {
                     self.gl.delete_buffer(vbo);
+                }
+                if let Some(image_vbo) = self.image_vbo {
+                    self.gl.delete_buffer(image_vbo);
                 }
                 if let Some(texture) = self.texture {
                     self.gl.delete_texture(texture);
