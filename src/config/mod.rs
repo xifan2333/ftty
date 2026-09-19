@@ -18,8 +18,6 @@ pub use include::{Include, default_config_path, resolve_path};
 
 const DEFAULT_FONT_FAMILY: &str = "monospace";
 const DEFAULT_FONT_SIZE: f32 = 14.0;
-const DEFAULT_COLUMNS: u16 = 80;
-const DEFAULT_ROWS: u16 = 24;
 const DEFAULT_FOREGROUND: Rgb = Rgb::new(220, 220, 220);
 const DEFAULT_BACKGROUND: Rgb = Rgb::new(24, 24, 24);
 
@@ -49,12 +47,27 @@ pub struct FontConfig {
     pub subpixel: Option<bool>,
 }
 
+/// Padding configuration: either a uniform scalar `padding = 4` or an array `padding = [4, 2]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum Padding {
+    Uniform(u16),
+    Axes([u16; 2]),
+}
+
+impl Padding {
+    #[must_use]
+    pub const fn to_axes(self) -> [u16; 2] {
+        match self {
+            Self::Uniform(v) => [v, v],
+            Self::Axes([x, y]) => [x, y],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub struct WindowConfig {
-    pub columns: Option<u16>,
-    pub rows: Option<u16>,
-    pub padding_x: Option<u16>,
-    pub padding_y: Option<u16>,
+    pub padding: Option<Padding>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
@@ -215,17 +228,8 @@ impl Config {
             self.font.subpixel = Some(subpixel);
         }
 
-        if let Some(cols) = other.window.columns {
-            self.window.columns = Some(cols);
-        }
-        if let Some(rows) = other.window.rows {
-            self.window.rows = Some(rows);
-        }
-        if let Some(px) = other.window.padding_x {
-            self.window.padding_x = Some(px);
-        }
-        if let Some(py) = other.window.padding_y {
-            self.window.padding_y = Some(py);
+        if let Some(p) = other.window.padding {
+            self.window.padding = Some(p);
         }
 
         if let Some(shape) = other.cursor.shape {
@@ -309,23 +313,18 @@ impl Config {
     }
 
     #[must_use]
-    pub fn columns(&self) -> u16 {
-        self.window.columns.unwrap_or(DEFAULT_COLUMNS)
-    }
-
-    #[must_use]
-    pub fn rows(&self) -> u16 {
-        self.window.rows.unwrap_or(DEFAULT_ROWS)
+    pub fn padding(&self) -> [u16; 2] {
+        self.window.padding.map_or([0, 0], Padding::to_axes)
     }
 
     #[must_use]
     pub fn padding_x(&self) -> u16 {
-        self.window.padding_x.unwrap_or(0)
+        self.padding()[0]
     }
 
     #[must_use]
     pub fn padding_y(&self) -> u16 {
-        self.window.padding_y.unwrap_or(0)
+        self.padding()[1]
     }
 
     #[must_use]

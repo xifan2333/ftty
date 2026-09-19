@@ -9,8 +9,7 @@ fn test_default_config_values() {
     let config = Config::default();
     assert_eq!(config.font_family(), "monospace");
     assert_eq!(config.font_size(), 14.0);
-    assert_eq!(config.columns(), 80);
-    assert_eq!(config.rows(), 24);
+    assert_eq!(config.padding(), [0, 0]);
     assert_eq!(config.cursor_shape(), CursorShape::Block);
     assert_eq!(config.foreground(), Rgb::new(220, 220, 220));
     assert_eq!(config.background(), Rgb::new(24, 24, 24));
@@ -20,12 +19,11 @@ fn test_default_config_values() {
 fn test_parse_basic_toml() {
     let toml_str = r##"
     [font]
-    family = "JetBrains Mono"
+    family = ["JetBrains Mono", "Noto Sans CJK SC", "Noto Color Emoji"]
     size = 16.5
 
     [window]
-    columns = 100
-    rows = 30
+    padding = [4, 6]
 
     [cursor]
     shape = "beam"
@@ -41,10 +39,18 @@ fn test_parse_basic_toml() {
 
     let config: Config = toml::from_str(toml_str).expect("parse toml");
     assert_eq!(config.font_family(), "JetBrains Mono");
-    assert_eq!(config.font_families(), vec!["JetBrains Mono"]);
+    assert_eq!(
+        config.font_families(),
+        vec![
+            "JetBrains Mono".to_string(),
+            "Noto Sans CJK SC".to_string(),
+            "Noto Color Emoji".to_string(),
+        ]
+    );
     assert_eq!(config.font_size(), 16.5);
-    assert_eq!(config.columns(), 100);
-    assert_eq!(config.rows(), 30);
+    assert_eq!(config.padding(), [4, 6]);
+    assert_eq!(config.padding_x(), 4);
+    assert_eq!(config.padding_y(), 6);
     assert_eq!(config.cursor_shape(), CursorShape::Beam);
     assert_eq!(config.foreground(), Rgb::new(255, 255, 255));
     assert_eq!(config.background(), Rgb::new(0, 0, 0));
@@ -52,6 +58,18 @@ fn test_parse_basic_toml() {
     let palette = config.build_palette();
     assert_eq!(palette[1], Rgb::new(255, 0, 0));
     assert_eq!(palette[9], Rgb::new(255, 85, 85));
+}
+
+#[test]
+fn test_parse_padding_scalar() {
+    let toml_str = r#"
+    [window]
+    padding = 8
+    "#;
+    let config: Config = toml::from_str(toml_str).expect("parse padding scalar");
+    assert_eq!(config.padding(), [8, 8]);
+    assert_eq!(config.padding_x(), 8);
+    assert_eq!(config.padding_y(), 8);
 }
 
 #[test]
