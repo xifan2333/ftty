@@ -33,16 +33,18 @@
 `ftty` loads its configuration from `$XDG_CONFIG_HOME/ftty/ftty.toml` (or `~/.config/ftty/ftty.toml`). All settings support dynamic hot-reloading via `SIGUSR1` or configuration `include` directives.
 
 ```toml
+# Include modular themes via relative path
+# include = ["themes/catppuccin-mocha.toml"]
+
 [font]
-family = "monospace"
+# Multi-font fallback chain: primary monospace face, followed by CJK and Emoji fallbacks
+family = ["JetBrainsMono Nerd Font", "Noto Sans CJK SC", "Noto Color Emoji"]
 size = 14.0
-subpixel = false
+subpixel = true
 
 [window]
-columns = 80
-rows = 24
-padding_x = 0
-padding_y = 0
+# Surface padding: [x, y] or uniform scalar N (window dimensions are managed by the WM)
+padding = [4, 4]
 
 [clipboard]
 # OSC 52 remote clipboard security policies:

@@ -111,8 +111,7 @@ fn test_app_state_reload_config() {
         &config_path,
         r##"
         [window]
-        padding_x = 20
-        padding_y = 20
+        padding = [20, 20]
 
         [cursor]
         shape = "underline"
