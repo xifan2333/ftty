@@ -10,7 +10,11 @@ attribute vec2 a_tex_coords;
 attribute vec4 a_color;
 uniform vec2 u_viewport;
 uniform vec2 u_atlas_size;
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+varying highp vec2 v_tex_coords;
+#else
 varying mediump vec2 v_tex_coords;
+#endif
 varying lowp vec4 v_color;
 void main() {
     v_tex_coords = a_tex_coords / u_atlas_size;
@@ -20,8 +24,13 @@ void main() {
 "#;
 
 pub const FRAGMENT_SHADER: &str = r#"
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+varying highp vec2 v_tex_coords;
+#else
 precision mediump float;
 varying mediump vec2 v_tex_coords;
+#endif
 varying lowp vec4 v_color;
 uniform sampler2D u_texture;
 // 0 = single-channel glyph coverage, 1 = RGBA kitty image placement.
