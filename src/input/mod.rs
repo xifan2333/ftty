@@ -358,6 +358,9 @@ impl KeyboardHandler {
             keysyms::KEY_F10 => KittyKey::Tilde(21),
             keysyms::KEY_F11 => KittyKey::Tilde(23),
             keysyms::KEY_F12 => KittyKey::Tilde(24),
+            keysyms::KEY_F13..=keysyms::KEY_F35 => {
+                KittyKey::Unicode(57376 + (sym - keysyms::KEY_F13))
+            }
             keysyms::KEY_Caps_Lock => KittyKey::Unicode(57358),
             keysyms::KEY_Scroll_Lock => KittyKey::Unicode(57359),
             keysyms::KEY_Num_Lock => KittyKey::Unicode(57360),
@@ -381,7 +384,7 @@ impl KeyboardHandler {
         let is_functional = matches!(key_format, KittyKey::Letter(_) | KittyKey::Tilde(_));
         let is_special_disambiguated = matches!(
             key_format,
-            KittyKey::Unicode(13 | 9 | 127 | 27 | 57358..=57363)
+            KittyKey::Unicode(13 | 9 | 127 | 27 | 57358..=57398)
         );
 
         let report_types = self.kitty_flags & KittyKeyboardFlags::REPORT_EVENT_TYPES != 0;

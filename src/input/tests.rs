@@ -390,4 +390,21 @@ fn test_kitty_arrow_and_functional_keys_encoding() {
         handler.handle_key_event(103, false, false),
         Some(b"\x1b[1;1:3A".to_vec())
     );
+
+    // Higher function keys F13 (57376) and F35 (57398) boundaries
+    let f13_bytes = handler.encode_kitty_key(
+        xkbcommon::xkb::keysyms::KEY_F13,
+        xkbcommon::xkb::Keycode::new(0),
+        crate::input::Modifiers::default(),
+        1,
+    );
+    assert_eq!(f13_bytes, Some(b"\x1b[57376u".to_vec()));
+
+    let f35_bytes = handler.encode_kitty_key(
+        xkbcommon::xkb::keysyms::KEY_F35,
+        xkbcommon::xkb::Keycode::new(0),
+        crate::input::Modifiers::default(),
+        1,
+    );
+    assert_eq!(f35_bytes, Some(b"\x1b[57398u".to_vec()));
 }
