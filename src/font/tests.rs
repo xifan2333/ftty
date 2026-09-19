@@ -449,7 +449,9 @@ fn test_srgb_optical_alpha_transfer_table() {
     assert_eq!(LINEAR_TO_SRGB[64], 137);
 
     // Rasterization must apply the sRGB table and boost anti-aliased edge coverage
-    let fonts = FontManager::load(14.0).expect("load font");
+    let fonts =
+        FontManager::load_with_families_and_subpixel(&["monospace".to_string()], 14.0, false)
+            .expect("load font");
     let key = fonts.face_key('M', CellFlags::empty());
     let glyph = fonts.rasterize(key);
     assert!(glyph.width > 0 && glyph.height > 0);

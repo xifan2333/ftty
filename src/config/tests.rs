@@ -180,27 +180,19 @@ fn test_circular_include_rejection() {
 }
 
 #[test]
-fn test_parse_subpixel_antialiasing_config() {
+fn test_parse_font_size_and_family() {
     let toml_default = r#"
         [font]
         size = 14.0
     "#;
     let config: Config = toml::from_str(toml_default).unwrap();
-    assert!(config.font_subpixel());
-
-    let toml_disabled = r#"
-        [font]
-        size = 14.0
-        subpixel = false
-    "#;
-    let config_disabled: Config = toml::from_str(toml_disabled).unwrap();
-    assert!(!config_disabled.font_subpixel());
+    assert_eq!(config.font_size(), 14.0);
 
     let mut base = Config::default();
     let mut inc = Config::default();
-    inc.font.subpixel = Some(false);
+    inc.font.size = Some(16.0);
     base.merge(inc);
-    assert!(!base.font_subpixel());
+    assert_eq!(base.font_size(), 16.0);
 }
 
 #[test]

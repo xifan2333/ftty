@@ -90,17 +90,14 @@ fn main() {
     let _ = conn.flush();
 
     // Step 2: Load font manager synchronously with 100% fidelity
-    let font_mgr = match ftty::FontManager::load_with_families_and_subpixel(
-        &config.font_families(),
-        config.font_size(),
-        config.font_subpixel(),
-    ) {
-        Ok(fm) => fm,
-        Err(e) => {
-            eprintln!("ftty: failed to load fonts: {e}");
-            std::process::exit(1);
-        }
-    };
+    let font_mgr =
+        match ftty::FontManager::load_with_families(&config.font_families(), config.font_size()) {
+            Ok(fm) => fm,
+            Err(e) => {
+                eprintln!("ftty: failed to load fonts: {e}");
+                std::process::exit(1);
+            }
+        };
 
     let cols = 80;
     let rows = 24;

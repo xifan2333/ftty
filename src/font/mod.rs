@@ -124,7 +124,7 @@ impl FontManager {
     /// # Errors
     /// Returns an error for an invalid size, missing font, or unreadable font data.
     pub fn load_with_families(families: &[String], font_size: f32) -> io::Result<Self> {
-        Self::load_with_families_and_subpixel(families, font_size, false)
+        Self::load_with_families_and_subpixel(families, font_size, true)
     }
 
     /// Discovers and loads an ordered list of font families with explicit subpixel setting.
