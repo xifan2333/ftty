@@ -11,8 +11,10 @@ impl AppState {
             return;
         }
         self.terminal.advance_bytes(text);
-        for response in self.terminal.take_responses() {
-            self.write_pty_blocking(&response);
+        if !self.terminal.responses.is_empty() {
+            for response in self.terminal.take_responses() {
+                self.write_pty_blocking(&response);
+            }
         }
         if let Some(pending) = self.terminal.take_pending_clipboard() {
             match pending {
