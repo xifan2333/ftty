@@ -58,6 +58,7 @@ impl AppState {
             saturating_u16(phys_height.saturating_sub(u32::from(pad_y) * 2)),
         ];
         if (self.terminal.grid.cols, self.terminal.grid.rows) != (cols as usize, rows as usize) {
+            self.selection.clear();
             self.terminal.grid.resize(cols as usize, rows as usize);
         }
         self.terminal.set_geometry(

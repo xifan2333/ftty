@@ -23,6 +23,7 @@ bitflags::bitflags! {
         const UNDERLINE_CURLY = 1 << 10;
         const UNDERLINE_DOTTED = 1 << 11;
         const UNDERLINE_DASHED = 1 << 12;
+        const WRAP_SPACER = 1 << 13;
     }
 }
 
