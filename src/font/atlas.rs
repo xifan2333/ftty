@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::font::{FontManager, RasterizedGlyph, style_index};
 use crate::grid::CellFlags;
 
-pub const MAX_ATLAS_SIZE: u32 = 2048;
+pub const MAX_ATLAS_SIZE: u32 = 1024;
 pub const INITIAL_ATLAS_SIZE: u32 = 512;
 
 /// Pixel coordinates stay valid when the atlas grows.

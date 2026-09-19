@@ -10,11 +10,7 @@ attribute vec2 a_tex_coords;
 attribute vec4 a_color;
 uniform vec2 u_viewport;
 uniform vec2 u_atlas_size;
-#ifdef GL_FRAGMENT_PRECISION_HIGH
 varying highp vec2 v_tex_coords;
-#else
-varying mediump vec2 v_tex_coords;
-#endif
 varying lowp vec4 v_color;
 void main() {
     v_tex_coords = a_tex_coords / u_atlas_size;
