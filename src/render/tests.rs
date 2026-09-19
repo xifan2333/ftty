@@ -4,8 +4,8 @@ use crate::grid::{Cell, CellFlags, Grid};
 use crate::input::ime::Preedit;
 use crate::render::shader::FRAGMENT_SHADER;
 use crate::render::text::{
-    KITTY_PLACEHOLDER, SELECTION_BG, build_row_backgrounds, build_row_foregrounds, build_vertices,
-    cell_colors, cursor_cell, prepare_atlas,
+    KITTY_PLACEHOLDER, SELECTION_BG, build_dynamic_overlays, build_row_backgrounds,
+    build_row_foregrounds, build_vertices, cell_colors, cursor_cell, prepare_atlas,
 };
 use crate::render::{
     ColorScheme, DEFAULT_BG, DEFAULT_FG, HoveredHyperlinkSpan, RenderOptions, native_size,
@@ -695,4 +695,88 @@ fn test_preedit_overlay_vertex_regeneration() {
         RenderOptions::new([0, 0], Some(&preedit1), None),
     );
     assert!(!vertices.is_empty());
+}
+
+#[test]
+fn test_dynamic_overlay_separation_and_layering() {
+    let mut grid = Grid::new(10, 2, 0);
+    grid.cursor.visible = true;
+    grid.cursor.shape = crate::grid::CursorShape::Beam;
+    grid.lines[0].cells[0].c = 'A';
+    grid.lines[0].cells[0].bg = Color::Rgb(10, 20, 30);
+
+    let fonts = FontManager::load(14.0).expect("system monospace font");
+    let mut atlas = GlyphAtlas::new(32, 32);
+    prepare_atlas(&grid, &fonts, &mut atlas, None);
+
+    let palette = default_256_palette();
+    let colors = ColorScheme::new(&palette, DEFAULT_FG, DEFAULT_BG);
+    let cursor = cursor_cell(&grid);
+    let ctx = crate::render::text::RenderContext {
+        grid: &grid,
+        colors,
+        metrics: fonts.metrics,
+        fonts: &fonts,
+        atlas: &atlas,
+        options: RenderOptions::default(),
+        cursor,
+    };
+
+    // 1. Build row backgrounds and foregrounds
+    let mut row_bg = Vec::new();
+    let mut row_fg = Vec::new();
+    build_row_backgrounds(&mut row_bg, 0, &ctx);
+    build_row_foregrounds(&mut row_fg, 0, &ctx);
+
+    let mut vertices = Vec::new();
+    vertices.extend_from_slice(&row_bg);
+    vertices.extend_from_slice(&row_fg);
+    let static_len = vertices.len();
+
+    // 2. Append dynamic overlays (Beam cursor)
+    build_dynamic_overlays(&mut vertices, &ctx);
+    assert_eq!(vertices.len(), static_len + 48);
+
+    // 3. Truncating tail restores static vertices exactly
+    vertices.truncate(static_len);
+    assert_eq!(vertices.len(), static_len);
+
+    // 4. When cursor hidden, overlay appends 0 floats
+    let ctx_hidden = crate::render::text::RenderContext {
+        grid: &grid,
+        colors,
+        metrics: fonts.metrics,
+        fonts: &fonts,
+        atlas: &atlas,
+        options: RenderOptions::default(),
+        cursor: None,
+    };
+    build_dynamic_overlays(&mut vertices, &ctx_hidden);
+    assert_eq!(vertices.len(), static_len);
+}
+
+#[test]
+fn test_underline_cursor_overlay_quad_count() {
+    let mut grid = Grid::new(10, 2, 0);
+    grid.cursor.visible = true;
+    grid.cursor.shape = crate::grid::CursorShape::Underline;
+
+    let fonts = FontManager::load(14.0).expect("system monospace font");
+    let atlas = GlyphAtlas::new(16, 16);
+    let palette = default_256_palette();
+    let colors = ColorScheme::new(&palette, DEFAULT_FG, DEFAULT_BG);
+    let cursor = cursor_cell(&grid);
+    let ctx = crate::render::text::RenderContext {
+        grid: &grid,
+        colors,
+        metrics: fonts.metrics,
+        fonts: &fonts,
+        atlas: &atlas,
+        options: RenderOptions::default(),
+        cursor,
+    };
+
+    let mut overlay_vertices = Vec::new();
+    build_dynamic_overlays(&mut overlay_vertices, &ctx);
+    assert_eq!(overlay_vertices.len(), 48);
 }
