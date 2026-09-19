@@ -4,6 +4,7 @@ use wayland_client::protocol::{
     wl_callback::{self, WlCallback},
     wl_compositor::WlCompositor,
     wl_data_device_manager::WlDataDeviceManager,
+    wl_output::{self, WlOutput},
     wl_registry::{self, WlRegistry},
     wl_seat::WlSeat,
     wl_surface::WlSurface,
@@ -83,6 +84,10 @@ impl Dispatch<WlRegistry, ()> for AppState {
                     state.wayland.viewporter = Some(viewporter);
                     state.try_init_viewport(qh);
                 }
+                "wl_output" => {
+                    let output = registry.bind::<WlOutput, _, _>(name, version.min(4), qh, ());
+                    state.wayland.outputs.push(output);
+                }
                 _ => {}
             }
         }
@@ -98,6 +103,32 @@ impl Dispatch<WlCompositor, ()> for AppState {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
+    }
+}
+
+impl Dispatch<WlOutput, ()> for AppState {
+    fn event(
+        state: &mut Self,
+        _proxy: &WlOutput,
+        event: wl_output::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let wl_output::Event::Geometry { subpixel, .. } = event
+            && let wayland_client::WEnum::Value(sub) = subpixel
+        {
+            state.wayland.output_subpixel = Some(sub);
+            let enable_subpixel = state.is_subpixel_preferred()
+                && state.renderer.as_ref().is_some_and(|r| r.has_dual_source);
+            let bgr = state.is_bgr_subpixel();
+            if state.font_mgr.subpixel != enable_subpixel || state.font_mgr.bgr != bgr {
+                state.font_mgr.subpixel = enable_subpixel;
+                state.font_mgr.bgr = bgr;
+                state.atlas.clear();
+                state.needs_redraw = true;
+            }
+        }
     }
 }
 

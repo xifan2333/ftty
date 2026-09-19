@@ -111,6 +111,25 @@ impl AppState {
         Self::with_loaded_config(terminal, pty, config, config_path)
     }
 
+    /// Returns `true` if the reported Wayland output geometry supports horizontal LCD subpixel rendering.
+    #[must_use]
+    pub fn is_subpixel_preferred(&self) -> bool {
+        matches!(
+            self.wayland
+                .output_subpixel
+                .unwrap_or(wayland_client::protocol::wl_output::Subpixel::HorizontalRgb),
+            wayland_client::protocol::wl_output::Subpixel::HorizontalRgb
+                | wayland_client::protocol::wl_output::Subpixel::HorizontalBgr
+        )
+    }
+
+    /// Returns `true` if the reported Wayland output geometry has a BGR horizontal subpixel layout.
+    #[must_use]
+    pub fn is_bgr_subpixel(&self) -> bool {
+        self.wayland.output_subpixel
+            == Some(wayland_client::protocol::wl_output::Subpixel::HorizontalBgr)
+    }
+
     /// Creates a new `AppState` with terminal, PTY, pre-loaded configuration, and optional configuration path.
     ///
     /// # Errors

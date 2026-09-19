@@ -25,7 +25,7 @@ fn font_metrics_and_rasterization() {
     let glyph_idx = fonts.regular().lookup_glyph_index('M');
     let raster = fonts
         .regular()
-        .rasterize_indexed(glyph_idx, fonts.font_size, false);
+        .rasterize_indexed(glyph_idx, fonts.font_size, false, false);
     assert!(raster.width > 0 && raster.height > 0);
     assert!(raster.pixels.iter().any(|&pixel| pixel != 0));
 }

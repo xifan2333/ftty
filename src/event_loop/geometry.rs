@@ -101,9 +101,12 @@ impl AppState {
                 .as_ref()
                 .ok_or(WaylandError::WindowNotCreated)?;
             let renderer = Renderer::new(surface, connection, physical_size)?;
-            // Automatically align font rasterization mode with GPU dual-source blending capability
-            if !renderer.has_dual_source && self.font_mgr.subpixel {
-                self.font_mgr.subpixel = false;
+            // Automatically align font rasterization mode with GPU dual-source blending and output subpixel layout
+            let enable_subpixel = renderer.has_dual_source && self.is_subpixel_preferred();
+            let bgr = self.is_bgr_subpixel();
+            if self.font_mgr.subpixel != enable_subpixel || self.font_mgr.bgr != bgr {
+                self.font_mgr.subpixel = enable_subpixel;
+                self.font_mgr.bgr = bgr;
                 self.atlas.clear();
             }
             self.renderer = Some(renderer);

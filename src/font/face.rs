@@ -232,6 +232,7 @@ impl Font {
         glyph_index: u16,
         font_size: f32,
         subpixel: bool,
+        bgr: bool,
     ) -> RasterizedGlyph {
         let guard = self.inner.borrow();
         let Some(face) = &guard.face else {
@@ -279,8 +280,9 @@ impl Font {
                         let g = LINEAR_TO_SRGB[buffer[src_idx + 1] as usize];
                         let b = LINEAR_TO_SRGB[buffer[src_idx + 2] as usize];
                         let a = r.max(g).max(b);
+                        let (r_out, b_out) = if bgr { (b, r) } else { (r, b) };
                         let dst_idx = dst_row + (x as usize) * 4;
-                        pixels[dst_idx..dst_idx + 4].copy_from_slice(&[r, g, b, a]);
+                        pixels[dst_idx..dst_idx + 4].copy_from_slice(&[r_out, g, b_out, a]);
                     }
                 }
             }
