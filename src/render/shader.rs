@@ -49,12 +49,11 @@ void main() {
     } else {
         vec4 mask = v_tex_coords.x < 0.0 ? vec4(1.0) : texture2D(u_texture, v_tex_coords);
 #if defined(GL_EXT_blend_func_extended)
+        gl_FragColor = vec4(v_color.rgb, 1.0);
         if (u_subpixel_mode == 1) {
-            gl_FragColor = v_color;
-            gl_SecondaryFragColorEXT = mask;
+            gl_SecondaryFragColorEXT = mask * v_color.a;
         } else {
-            gl_FragColor = v_color;
-            gl_SecondaryFragColorEXT = vec4(mask.a);
+            gl_SecondaryFragColorEXT = vec4(mask.a * v_color.a);
         }
 #else
         gl_FragColor = vec4(v_color.rgb, v_color.a * mask.a);

@@ -155,6 +155,10 @@ fn subpixel_fragment_shader_supports_dual_source_blending() {
     assert!(FRAGMENT_SHADER.contains("GL_EXT_blend_func_extended"));
     assert!(FRAGMENT_SHADER.contains("gl_SecondaryFragColorEXT"));
     assert!(FRAGMENT_SHADER.contains("u_subpixel_mode"));
+    // Secondary coverage must be modulated by vertex alpha so translucent quads (e.g. selection)
+    // and dimmed glyphs are properly attenuated under dual-source blending.
+    assert!(FRAGMENT_SHADER.contains("mask * v_color.a"));
+    assert!(FRAGMENT_SHADER.contains("mask.a * v_color.a"));
 }
 
 #[test]
