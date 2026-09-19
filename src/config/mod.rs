@@ -68,8 +68,6 @@ impl Padding {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub struct WindowConfig {
     pub padding: Option<Padding>,
-    pub padding_x: Option<u16>,
-    pub padding_y: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
@@ -233,12 +231,6 @@ impl Config {
         if let Some(p) = other.window.padding {
             self.window.padding = Some(p);
         }
-        if let Some(px) = other.window.padding_x {
-            self.window.padding_x = Some(px);
-        }
-        if let Some(py) = other.window.padding_y {
-            self.window.padding_y = Some(py);
-        }
 
         if let Some(shape) = other.cursor.shape {
             self.cursor.shape = Some(shape);
@@ -322,14 +314,7 @@ impl Config {
 
     #[must_use]
     pub fn padding(&self) -> [u16; 2] {
-        if let Some(p) = self.window.padding {
-            p.to_axes()
-        } else {
-            [
-                self.window.padding_x.unwrap_or(0),
-                self.window.padding_y.unwrap_or(0),
-            ]
-        }
+        self.window.padding.map_or([0, 0], Padding::to_axes)
     }
 
     #[must_use]
