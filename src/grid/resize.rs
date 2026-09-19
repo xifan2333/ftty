@@ -94,11 +94,15 @@ impl Grid {
 
             let remaining_blanks = needed - pull_from_scrollback;
             for _ in 0..remaining_blanks {
-                self.lines.push(Row::new(new_cols));
+                let row = self.alloc_row(new_cols);
+                self.lines.push(row);
             }
-            if let Some(alt) = &mut self.alt_lines {
+            if self.alt_lines.is_some() {
                 for _ in old_rows..new_rows {
-                    alt.push(Row::new(new_cols));
+                    let row = self.alloc_row(new_cols);
+                    if let Some(alt) = &mut self.alt_lines {
+                        alt.push(row);
+                    }
                 }
             }
         } else if new_rows < old_rows {
@@ -444,7 +448,11 @@ impl Grid {
         let mut discarded_from_scrollback = 0;
         if self.scrollback.len() > self.max_scrollback {
             let excess = self.scrollback.len() - self.max_scrollback;
-            self.scrollback.drain(0..excess);
+            for _ in 0..excess {
+                if let Some(row) = self.scrollback.pop_front() {
+                    self.recycle_row(row);
+                }
+            }
             discarded_from_scrollback = excess;
             let mut shifted = std::collections::BTreeSet::new();
             for &m in &new_prompt_marks {
