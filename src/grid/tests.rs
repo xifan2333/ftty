@@ -273,7 +273,7 @@ fn virtual_placement_images_are_preserved_across_evictions() {
             id,
             width: 1,
             height: 1,
-            rgba: vec![0, 0, 0, 0],
+            rgba: Some(vec![0, 0, 0, 0]),
         });
     }
 
@@ -524,7 +524,7 @@ fn hidden_primary_images_survive_cache_eviction() {
         id: 42,
         width: 1,
         height: 1,
-        rgba: vec![0, 0, 0, 0],
+        rgba: Some(vec![0, 0, 0, 0]),
     };
     grid.add_image(image);
     grid.add_placement(ImagePlacement {
@@ -546,7 +546,7 @@ fn hidden_primary_images_survive_cache_eviction() {
             id,
             width: 1,
             height: 1,
-            rgba: vec![0, 0, 0, 0],
+            rgba: Some(vec![0, 0, 0, 0]),
         });
     }
     grid.exit_alt_screen();
@@ -1202,4 +1202,43 @@ fn test_row_pool_bounded_on_tall_grid_shrink_without_scrollback() {
         grid.row_pool.len(),
         MAX_ROW_POOL_CAPACITY
     );
+}
+
+#[test]
+fn test_image_data_byte_size_and_rgba_take() {
+    let mut image = ImageData::new(1, 100, 100, vec![0; 40000]);
+    assert_eq!(image.byte_size(), 40000);
+    assert!(image.rgba.is_some());
+    let taken = image.rgba.take();
+    assert_eq!(taken.unwrap().len(), 40000);
+    assert!(image.rgba.is_none());
+    assert_eq!(image.byte_size(), 40000);
+}
+
+#[test]
+fn test_stored_images_byte_budget_eviction() {
+    let mut grid = Grid::new(80, 24, 100);
+
+    // Each image is 2048 x 2048 x 4 bytes = 16 MB
+    // With a 64 MB cap, at most 4 images can be stored simultaneously.
+    for id in 1..=6 {
+        grid.add_image(ImageData {
+            id,
+            width: 2048,
+            height: 2048,
+            rgba: None,
+        });
+    }
+
+    assert!(
+        grid.total_image_bytes() <= crate::grid::MAX_STORED_IMAGE_BYTES,
+        "total bytes {} must not exceed MAX_STORED_IMAGE_BYTES {}",
+        grid.total_image_bytes(),
+        crate::grid::MAX_STORED_IMAGE_BYTES
+    );
+    // Oldest images (1 and 2) must have been evicted by LRU
+    assert!(!grid.images.contains_key(&1));
+    assert!(!grid.images.contains_key(&2));
+    assert!(grid.images.contains_key(&5));
+    assert!(grid.images.contains_key(&6));
 }

@@ -258,7 +258,7 @@ impl Renderer {
     /// Returns an error if the context cannot be made current or dimensions are invalid.
     pub fn render_grid(
         &mut self,
-        grid: &Grid,
+        grid: &mut Grid,
         colors: ColorScheme<'_>,
         fonts: &FontManager,
         atlas: &mut GlyphAtlas,

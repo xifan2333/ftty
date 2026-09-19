@@ -72,7 +72,11 @@ impl KittyParser {
         }
 
         self.filter_internal(incoming);
-        let text = self.clean_scratch.clone();
+        let text = if self.clean_scratch.is_empty() {
+            Vec::new()
+        } else {
+            self.clean_scratch.clone()
+        };
         self.clean_scratch.clear();
         let events = std::mem::take(&mut self.events_scratch);
         (text, events)
