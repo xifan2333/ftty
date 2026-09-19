@@ -131,14 +131,13 @@ impl Grid {
                 if !active_retains {
                     shift_placements(&mut self.placements, from_top);
                     if from_top > 0 {
-                        self.prompt_marks.retain_mut(|m| {
-                            if *m < from_top {
-                                false
-                            } else {
-                                *m -= from_top;
-                                true
+                        let mut shifted = std::collections::BTreeSet::new();
+                        for &m in &self.prompt_marks {
+                            if m >= from_top {
+                                shifted.insert(m - from_top);
                             }
-                        });
+                        }
+                        self.prompt_marks = shifted;
                     }
                 }
             }

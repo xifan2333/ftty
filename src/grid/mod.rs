@@ -7,7 +7,7 @@ pub mod row;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use unicode_width::UnicodeWidthChar;
 
 use crate::color::Color;
@@ -40,7 +40,7 @@ pub struct Grid {
 
     pub scroll_region_top: usize,
     pub scroll_region_bottom: usize,
-    pub prompt_marks: Vec<usize>,
+    pub prompt_marks: BTreeSet<usize>,
 
     // The hidden primary screen while the alternate screen is active. Each screen owns its saved
     // cursor and placements so a resize on one cannot shift the other's coordinates.
@@ -72,7 +72,7 @@ impl Grid {
             saved_cursor: Cursor::default(),
             scroll_region_top: 0,
             scroll_region_bottom: actual_rows.saturating_sub(1),
-            prompt_marks: Vec::new(),
+            prompt_marks: BTreeSet::new(),
             alt_lines: None,
             alt_cursor: None,
             alt_saved_cursor: None,
@@ -251,32 +251,25 @@ impl Grid {
             });
         }
         if !self.prompt_marks.is_empty() {
-            self.prompt_marks.retain_mut(|m| {
-                if *m == 0 {
-                    false
-                } else {
-                    *m -= 1;
-                    true
+            let mut shifted = BTreeSet::new();
+            for &mark in &self.prompt_marks {
+                if mark > 0 {
+                    shifted.insert(mark - 1);
                 }
-            });
+            }
+            self.prompt_marks = shifted;
         }
         Some(row)
     }
 
     /// Records an absolute line marker for OSC 133 semantic prompt navigation.
     pub fn add_prompt_mark(&mut self, line: usize) {
-        match self.prompt_marks.binary_search(&line) {
-            Ok(_) => {}
-            Err(idx) => {
-                if self.prompt_marks.len() >= 1024 {
-                    self.prompt_marks.remove(0);
-                    let insert_idx = idx.saturating_sub(1);
-                    self.prompt_marks.insert(insert_idx, line);
-                } else {
-                    self.prompt_marks.insert(idx, line);
-                }
-            }
+        if self.prompt_marks.len() >= 1024
+            && let Some(&first) = self.prompt_marks.iter().next()
+        {
+            self.prompt_marks.remove(&first);
         }
+        self.prompt_marks.insert(line);
     }
 
     pub(crate) fn shift_region_marks_up(
@@ -291,16 +284,15 @@ impl Grid {
         let sb_len = self.scrollback.len();
         let abs_top = sb_len + top_row;
         let abs_bottom = sb_len + bottom_row;
-        self.prompt_marks.retain_mut(|m| {
-            if *m < abs_top || *m > abs_bottom {
-                true
-            } else if *m >= abs_top + count {
-                *m -= count;
-                true
-            } else {
-                false
+        let mut new_marks = BTreeSet::new();
+        for &mark in &self.prompt_marks {
+            if mark < abs_top || mark > abs_bottom {
+                new_marks.insert(mark);
+            } else if mark >= abs_top + count {
+                new_marks.insert(mark - count);
             }
-        });
+        }
+        self.prompt_marks = new_marks;
     }
 
     pub(crate) fn shift_region_marks_down(
@@ -315,16 +307,15 @@ impl Grid {
         let sb_len = self.scrollback.len();
         let abs_top = sb_len + top_row;
         let abs_bottom = sb_len + bottom_row;
-        self.prompt_marks.retain_mut(|m| {
-            if *m < abs_top || *m > abs_bottom {
-                true
-            } else if *m + count <= abs_bottom {
-                *m += count;
-                true
-            } else {
-                false
+        let mut new_marks = BTreeSet::new();
+        for &mark in &self.prompt_marks {
+            if mark < abs_top || mark > abs_bottom {
+                new_marks.insert(mark);
+            } else if mark + count <= abs_bottom {
+                new_marks.insert(mark + count);
             }
-        });
+        }
+        self.prompt_marks = new_marks;
     }
 
     /// Scrolls the viewport up to the previous semantic prompt boundary.
@@ -333,7 +324,7 @@ impl Grid {
             return;
         }
         let top_line = self.scrollback.len().saturating_sub(self.viewport_offset);
-        if let Some(&mark) = self.prompt_marks.iter().rev().find(|&&m| m < top_line) {
+        if let Some(&mark) = self.prompt_marks.range(..top_line).next_back() {
             let new_offset = self
                 .scrollback
                 .len()
@@ -343,7 +334,7 @@ impl Grid {
                 self.viewport_offset = new_offset;
                 self.mark_all_dirty();
             }
-        } else if let Some(&first) = self.prompt_marks.first() {
+        } else if let Some(&first) = self.prompt_marks.iter().next() {
             let new_offset = self
                 .scrollback
                 .len()
@@ -362,7 +353,7 @@ impl Grid {
             return;
         }
         let top_line = self.scrollback.len().saturating_sub(self.viewport_offset);
-        if let Some(&mark) = self.prompt_marks.iter().find(|&&m| m > top_line) {
+        if let Some(&mark) = self.prompt_marks.range(top_line + 1..).next() {
             let new_offset = self.scrollback.len().saturating_sub(mark);
             if new_offset != self.viewport_offset {
                 self.viewport_offset = new_offset;
@@ -574,14 +565,12 @@ impl Grid {
                 let sb_len = self.scrollback.len();
                 self.scrollback.clear();
                 self.viewport_offset = 0;
-                self.prompt_marks.retain_mut(|m| {
-                    if *m < sb_len {
-                        false
-                    } else {
-                        *m -= sb_len;
-                        true
-                    }
-                });
+                self.prompt_marks.retain(|&m| m >= sb_len);
+                let mut rebased = BTreeSet::new();
+                for &m in &self.prompt_marks {
+                    rebased.insert(m - sb_len);
+                }
+                self.prompt_marks = rebased;
                 // Both screens share the scrollback base, so the hidden primary's placements need
                 // the same rebase as the active screen's.
                 for placements in [&mut self.placements, &mut self.alt_placements] {
