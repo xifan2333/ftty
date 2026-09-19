@@ -100,6 +100,28 @@ pub struct Terminal {
 #[inline(always)]
 fn find_printable_ascii_prefix(bytes: &[u8]) -> usize {
     let mut i = 0;
+    while i + 16 <= bytes.len() {
+        let chunk0 = u64::from_le_bytes(match bytes[i..i + 8].try_into() {
+            Ok(arr) => arr,
+            Err(_) => break,
+        });
+        let chunk1 = u64::from_le_bytes(match bytes[i + 8..i + 16].try_into() {
+            Ok(arr) => arr,
+            Err(_) => break,
+        });
+        let lo0 = chunk0.wrapping_sub(0x2020_2020_2020_2020);
+        let hi0 = 0x7e7e_7e7e_7e7e_7e7e_u64.wrapping_sub(chunk0);
+        let lo1 = chunk1.wrapping_sub(0x2020_2020_2020_2020);
+        let hi1 = 0x7e7e_7e7e_7e7e_7e7e_u64.wrapping_sub(chunk1);
+        if (((lo0 | hi0) | (lo1 | hi1)) & 0x8080_8080_8080_8080) != 0 {
+            for j in 0..16 {
+                if !(0x20..=0x7e).contains(&bytes[i + j]) {
+                    return i + j;
+                }
+            }
+        }
+        i += 16;
+    }
     while i + 8 <= bytes.len() {
         let chunk = u64::from_le_bytes(match bytes[i..i + 8].try_into() {
             Ok(arr) => arr,

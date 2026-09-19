@@ -658,3 +658,28 @@ fn test_contiguous_background_cells_merge_into_single_quad() {
     // 6 contiguous cells should be merged into exactly 1 quad (48 floats)
     assert_eq!(bg_vertices.len(), 48);
 }
+
+#[test]
+fn test_preedit_overlay_vertex_regeneration() {
+    let fonts = FontManager::load(14.0).expect("system monospace font");
+    let grid = Grid::new(80, 24, 0);
+    let mut atlas = GlyphAtlas::new(64, 64);
+    let preedit1 = Preedit {
+        text: "hello".to_string(),
+        cursor_begin: 0,
+        cursor_end: 5,
+    };
+    prepare_atlas(&grid, &fonts, &mut atlas, Some(&preedit1));
+
+    let mut vertices = Vec::new();
+    build_vertices(
+        &mut vertices,
+        &grid,
+        ColorScheme::new(&default_256_palette(), DEFAULT_FG, DEFAULT_BG),
+        fonts.metrics,
+        &fonts,
+        &atlas,
+        RenderOptions::new([0, 0], Some(&preedit1), None),
+    );
+    assert!(!vertices.is_empty());
+}
