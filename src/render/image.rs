@@ -47,7 +47,7 @@ impl Renderer {
         for (id, img) in &mut grid.images {
             if !self.image_textures.contains_key(id) {
                 let ver = grid.image_versions.get(id).copied().unwrap_or(0);
-                if let Some(rgba) = img.rgba.take() {
+                if let Some(rgba) = &img.rgba {
                     // SAFETY: draw holds this renderer's current EGL context. New textures
                     // belong to it, and decoded RGBA pixels remain borrowed for the upload.
                     unsafe {
@@ -83,10 +83,11 @@ impl Renderer {
                                 0,
                                 glow::RGBA,
                                 glow::UNSIGNED_BYTE,
-                                glow::PixelUnpackData::Slice(Some(&rgba)),
+                                glow::PixelUnpackData::Slice(Some(rgba)),
                             );
                             self.image_textures
                                 .insert(*id, (tex, img.width, img.height, ver));
+                            img.rgba = None;
                         }
                     }
                 }

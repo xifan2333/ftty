@@ -135,6 +135,11 @@ impl Grid {
 
     pub fn add_image(&mut self, image: ImageData) {
         let id = image.id;
+        if image.byte_size() > MAX_STORED_IMAGE_BYTES {
+            self.remove_image_internal(id);
+            return;
+        }
+
         self.image_lru.retain(|&k| k != id);
         self.image_lru.push(id);
         self.images.insert(id, image);

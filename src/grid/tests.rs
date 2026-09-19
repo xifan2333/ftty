@@ -1242,3 +1242,17 @@ fn test_stored_images_byte_budget_eviction() {
     assert!(grid.images.contains_key(&5));
     assert!(grid.images.contains_key(&6));
 }
+
+#[test]
+fn test_single_oversized_image_rejected_without_exceeding_budget() {
+    let mut grid = Grid::new(80, 24, 100);
+    // 5000 x 5000 x 4 bytes = 100 MB > 64 MB cap
+    grid.add_image(ImageData {
+        id: 999,
+        width: 5000,
+        height: 5000,
+        rgba: None,
+    });
+    assert!(!grid.images.contains_key(&999));
+    assert_eq!(grid.total_image_bytes(), 0);
+}
