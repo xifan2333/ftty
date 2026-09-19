@@ -443,11 +443,42 @@ fn test_srgb_optical_alpha_transfer_table() {
     // Low-mid tone (25% coverage) must be expanded (~53.7%)
     assert_eq!(LINEAR_TO_SRGB[64], 137);
 
-    // Rasterization must apply the sRGB table
+    // Rasterization must apply the sRGB table and boost anti-aliased edge coverage
     let fonts = FontManager::load(14.0).expect("load font");
     let key = fonts.face_key('M', CellFlags::empty());
     let glyph = fonts.rasterize(key);
     assert!(glyph.width > 0 && glyph.height > 0);
     let max_val = glyph.pixels.iter().copied().max().unwrap_or(0);
     assert!(max_val >= 250);
+
+    // Compare raw FreeType buffer directly with LINEAR_TO_SRGB to ensure partial-coverage
+    // edge pixels are transformed rather than identity-mapped.
+    let fc = fontconfig().expect("fontconfig must be initialized");
+    let (path, index) = match_family(fc, "monospace", false, false).expect("system monospace");
+    let lib = freetype::Library::init().expect("ft init");
+    let face = lib.new_face(&path, index as isize).expect("new face");
+    face.set_char_size(0, (14.0 * 64.0) as isize, 72, 72)
+        .expect("set size");
+    face.load_glyph(
+        face.get_char_index('M' as usize).unwrap_or(0),
+        freetype::face::LoadFlag::RENDER | freetype::face::LoadFlag::TARGET_LIGHT,
+    )
+    .expect("load glyph");
+    let slot = face.glyph();
+    let bmp = slot.bitmap();
+    let raw_buf = bmp.buffer();
+    let raw_partial = raw_buf
+        .iter()
+        .copied()
+        .find(|&b| (20..=180).contains(&b))
+        .expect("glyph must contain edge pixels with partial coverage");
+    let expected = LINEAR_TO_SRGB[raw_partial as usize];
+    assert!(
+        expected > raw_partial,
+        "sRGB transfer curve must strictly expand partial coverage {raw_partial} -> {expected}"
+    );
+    assert!(
+        glyph.pixels.contains(&expected),
+        "rasterized glyph pixels must contain the boosted sRGB value {expected} from raw {raw_partial}"
+    );
 }
