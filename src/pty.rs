@@ -8,6 +8,7 @@ use nix::unistd::{Pid, setsid};
 use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 /// Manages a PTY master file descriptor and its associated child process.
@@ -23,6 +24,19 @@ impl Pty {
     /// # Errors
     /// Returns an [`io::Error`] if PTY allocation, process setup, or command execution fails.
     pub fn spawn(command: Option<&[&str]>, cols: u16, rows: u16) -> io::Result<Self> {
+        Self::spawn_with_dir(command, cols, rows, None)
+    }
+
+    /// Spawns a shell or specific command inside a new PTY session with an optional working directory.
+    ///
+    /// # Errors
+    /// Returns an [`io::Error`] if PTY allocation, process setup, directory change, or command execution fails.
+    pub fn spawn_with_dir(
+        command: Option<&[&str]>,
+        cols: u16,
+        rows: u16,
+        working_directory: Option<&Path>,
+    ) -> io::Result<Self> {
         let winsize = Winsize {
             ws_row: rows,
             ws_col: cols,
@@ -59,6 +73,9 @@ impl Pty {
             }
             None => Command::new(default_shell),
         };
+        if let Some(dir) = working_directory {
+            child.current_dir(dir);
+        }
         child
             .env("TERM", "xterm-256color")
             .env("COLORTERM", "truecolor")

@@ -83,6 +83,8 @@ pub struct WaylandState {
 
     pub width: u32,
     pub height: u32,
+    pub app_id: String,
+    pub title: String,
     pub configured: bool,
     pub window_state: WindowState,
     pub close_requested: bool,
@@ -97,6 +99,8 @@ impl WaylandState {
             scale_factor: 1.0,
             preferred_scale_120: 120,
             output_subpixel: Some(Subpixel::HorizontalRgb),
+            app_id: "ftty".to_string(),
+            title: "ftty".to_string(),
             ..Default::default()
         }
     }
@@ -131,8 +135,18 @@ impl WaylandState {
         let xdg_surface = xdg_wm_base.get_xdg_surface(&surface, qh, ());
         let toplevel = xdg_surface.get_toplevel(qh, ());
 
-        toplevel.set_title("ftty".to_string());
-        toplevel.set_app_id("ftty".to_string());
+        let title = if self.title.is_empty() {
+            "ftty"
+        } else {
+            &self.title
+        };
+        let app_id = if self.app_id.is_empty() {
+            "ftty"
+        } else {
+            &self.app_id
+        };
+        toplevel.set_title(title.to_string());
+        toplevel.set_app_id(app_id.to_string());
         toplevel.set_min_size(160, 90);
 
         surface.commit();

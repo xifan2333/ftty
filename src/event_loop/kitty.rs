@@ -40,6 +40,12 @@ impl AppState {
             self.terminal.grid.mark_all_dirty();
             self.needs_redraw = true;
         }
+        if !self.terminal.title.is_empty() && self.terminal.title != self.wayland.title {
+            self.wayland.title = self.terminal.title.clone();
+            if let Some(toplevel) = &self.wayland.xdg_toplevel {
+                toplevel.set_title(self.wayland.title.clone());
+            }
+        }
         if self.config.auto_scroll() && !self.terminal.grid.is_alt_screen() {
             self.terminal.grid.scroll_viewport_bottom();
         }
