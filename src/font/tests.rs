@@ -419,3 +419,35 @@ fn test_subpixel_and_grayscale_rasterization() {
     assert!(lcd_glyph.width > 0 && lcd_glyph.height > 0);
     assert!(!lcd_glyph.pixels.is_empty());
 }
+
+#[test]
+fn test_srgb_optical_alpha_transfer_table() {
+    use crate::font::face::LINEAR_TO_SRGB;
+
+    // Boundaries must map identically to 0 and 255
+    assert_eq!(LINEAR_TO_SRGB[0], 0);
+    assert_eq!(LINEAR_TO_SRGB[255], 255);
+
+    // Curve must be strictly non-decreasing across the entire u8 domain
+    for i in 0..255 {
+        assert!(
+            LINEAR_TO_SRGB[i] <= LINEAR_TO_SRGB[i + 1],
+            "inversion at {i}: {} > {}",
+            LINEAR_TO_SRGB[i],
+            LINEAR_TO_SRGB[i + 1]
+        );
+    }
+
+    // Mid-tone (50% geometric coverage) must be perceptually expanded for sRGB displays (~73.5%)
+    assert_eq!(LINEAR_TO_SRGB[128], 188);
+    // Low-mid tone (25% coverage) must be expanded (~53.7%)
+    assert_eq!(LINEAR_TO_SRGB[64], 137);
+
+    // Rasterization must apply the sRGB table
+    let fonts = FontManager::load(14.0).expect("load font");
+    let key = fonts.face_key('M', CellFlags::empty());
+    let glyph = fonts.rasterize(key);
+    assert!(glyph.width > 0 && glyph.height > 0);
+    let max_val = glyph.pixels.iter().copied().max().unwrap_or(0);
+    assert!(max_val >= 250);
+}

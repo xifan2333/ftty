@@ -48,6 +48,29 @@ pub struct RasterizedGlyph {
     pub pixels: Vec<u8>,
 }
 
+/// Precomputed sRGB transfer curve converting FreeType linear geometric coverage (0..=255)
+/// into sRGB non-linear alpha values.
+///
+/// Blending linear alpha directly onto an sRGB surface causes anti-aliased edge pixels to lose
+/// substantial perceived luminance (~alpha^2.2). This transfer curve ensures proper edge optical
+/// density and stroke body, identical to WezTerm (`linear_u8_to_srgb8`).
+pub const LINEAR_TO_SRGB: [u8; 256] = [
+    0, 13, 22, 28, 34, 38, 42, 46, 50, 53, 56, 59, 61, 64, 66, 69, 71, 73, 75, 77, 79, 81, 83, 85,
+    86, 88, 90, 92, 93, 95, 96, 98, 99, 101, 102, 104, 105, 106, 108, 109, 110, 112, 113, 114, 115,
+    117, 118, 119, 120, 121, 122, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136,
+    137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 148, 149, 150, 151, 152, 153, 154,
+    155, 155, 156, 157, 158, 159, 159, 160, 161, 162, 163, 163, 164, 165, 166, 167, 167, 168, 169,
+    170, 170, 171, 172, 173, 173, 174, 175, 175, 176, 177, 178, 178, 179, 180, 180, 181, 182, 182,
+    183, 184, 185, 185, 186, 187, 187, 188, 189, 189, 190, 190, 191, 192, 192, 193, 194, 194, 195,
+    196, 196, 197, 197, 198, 199, 199, 200, 200, 201, 202, 202, 203, 203, 204, 205, 205, 206, 206,
+    207, 208, 208, 209, 209, 210, 210, 211, 212, 212, 213, 213, 214, 214, 215, 215, 216, 216, 217,
+    218, 218, 219, 219, 220, 220, 221, 221, 222, 222, 223, 223, 224, 224, 225, 226, 226, 227, 227,
+    228, 228, 229, 229, 230, 230, 231, 231, 232, 232, 233, 233, 234, 234, 235, 235, 236, 236, 237,
+    237, 238, 238, 238, 239, 239, 240, 240, 241, 241, 242, 242, 243, 243, 244, 244, 245, 245, 246,
+    246, 246, 247, 247, 248, 248, 249, 249, 250, 250, 251, 251, 251, 252, 252, 253, 253, 254, 254,
+    255, 255,
+];
+
 impl RasterizedGlyph {
     #[must_use]
     pub fn empty() -> Self {
@@ -218,7 +241,7 @@ impl Font {
         let flags = if subpixel {
             LoadFlag::RENDER | LoadFlag::TARGET_LCD
         } else {
-            LoadFlag::RENDER | LoadFlag::TARGET_NORMAL
+            LoadFlag::RENDER | LoadFlag::TARGET_LIGHT
         };
         if face.load_glyph(glyph_index as u32, flags).is_err() {
             return RasterizedGlyph::empty();
@@ -238,7 +261,8 @@ impl Font {
 
         if subpixel && bmp.pixel_mode() == Ok(freetype::bitmap::PixelMode::Lcd) {
             // FreeType LCD bitmaps produce 3 horizontal subpixel coverage bytes per logical pixel.
-            // Downsample the 3 subpixel samples (R, G, B) into a smoothed 1-byte per logical pixel alpha mask.
+            // Downsample the 3 subpixel samples (R, G, B) into a smoothed 1-byte per logical pixel alpha mask
+            // and apply the sRGB transfer curve for proper perceptual weight.
             let logical_width = (raw_width / 3).max(1);
             let mut pixels = vec![0u8; (logical_width * height) as usize];
             for y in 0..height {
@@ -256,7 +280,7 @@ impl Font {
                         let g = buffer[src_idx + 1] as u32;
                         let b = buffer[src_idx + 2] as u32;
                         let lum = ((r * 77 + g * 151 + b * 28) >> 8) as u8;
-                        pixels[dst_row + x as usize] = lum;
+                        pixels[dst_row + x as usize] = LINEAR_TO_SRGB[lum as usize];
                     }
                 }
             }
@@ -272,20 +296,19 @@ impl Font {
             let row_bytes = raw_width as usize;
             let total_bytes = (raw_width * height) as usize;
             let mut pixels = vec![0u8; total_bytes];
-            if pitch > 0 && abs_pitch == row_bytes && buffer.len() >= total_bytes {
-                pixels.copy_from_slice(&buffer[..total_bytes]);
-            } else {
-                for y in 0..height {
-                    let src_y = if pitch < 0 {
-                        (height - 1 - y) as usize
-                    } else {
-                        y as usize
-                    };
-                    let src_offset = src_y * abs_pitch;
-                    let dst_offset = (y as usize) * (raw_width as usize);
-                    if src_offset + row_bytes <= buffer.len() {
-                        pixels[dst_offset..dst_offset + row_bytes]
-                            .copy_from_slice(&buffer[src_offset..src_offset + row_bytes]);
+            for y in 0..height {
+                let src_y = if pitch < 0 {
+                    (height - 1 - y) as usize
+                } else {
+                    y as usize
+                };
+                let src_offset = src_y * abs_pitch;
+                let dst_offset = (y as usize) * row_bytes;
+                if src_offset + row_bytes <= buffer.len() {
+                    let src = &buffer[src_offset..src_offset + row_bytes];
+                    let dst = &mut pixels[dst_offset..dst_offset + row_bytes];
+                    for (d, &s) in dst.iter_mut().zip(src) {
+                        *d = LINEAR_TO_SRGB[s as usize];
                     }
                 }
             }
@@ -294,7 +317,7 @@ impl Font {
                 height,
                 offset_x,
                 offset_y,
-                pitch: raw_width as usize,
+                pitch: row_bytes,
                 pixels,
             }
         }
