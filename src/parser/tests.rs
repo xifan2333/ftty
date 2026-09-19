@@ -2,18 +2,18 @@ use std::path::Path;
 
 use crate::color::{Color, Rgb};
 use crate::grid::CellFlags;
-use crate::parser::{MAX_HYPERLINKS, Parser, ProgressState, ShellIntegrationState, Terminal};
+use crate::parser::{MAX_HYPERLINKS, ProgressState, ShellIntegrationState, Terminal, VtParser};
 
 struct TestTerm {
     term: Terminal,
-    parser: Parser,
+    parser: VtParser,
 }
 
 impl TestTerm {
     fn new(cols: usize, rows: usize, max_scrollback: usize) -> Self {
         Self {
             term: Terminal::new(cols, rows, max_scrollback),
-            parser: Parser::new(),
+            parser: VtParser::new(),
         }
     }
 
@@ -622,9 +622,9 @@ fn test_c1_control_split_sequence() {
     let mut term = TestTerm::new(10, 5, 100);
     // Split CSI sequence across chunks
     term.advance_bytes(b"\x1b[");
-    assert!(term.parser_in_escape);
+    assert!(term.parser.is_in_escape());
     term.advance_bytes(b"31mX");
-    assert!(!term.parser_in_escape);
+    assert!(!term.parser.is_in_escape());
     assert_eq!(term.grid.lines[0].cells[0].c, 'X');
     assert_eq!(term.grid.lines[0].cells[0].fg, Color::Indexed(1));
 }
@@ -711,7 +711,7 @@ fn test_dynamic_palette_and_colors_osc() {
 #[test]
 fn test_chunked_cjk_utf8_parsing() {
     let mut term = Terminal::new(80, 24, 100);
-    let mut parser = Parser::new();
+    let mut parser = VtParser::new();
 
     // Pass a 12-byte contiguous Chinese text chunk directly
     term.advance_bytes(&mut parser, "你好世界".as_bytes());
@@ -725,7 +725,7 @@ fn test_chunked_cjk_utf8_parsing() {
 #[test]
 fn test_chunked_csi_escape_parsing() {
     let mut term = Terminal::new(80, 24, 100);
-    let mut parser = Parser::new();
+    let mut parser = VtParser::new();
 
     // Stream with multiple CSI sequences and ASCII runs in a single chunk
     term.advance_bytes(&mut parser, b"\x1b[31mRed\x1b[32mGreen\x1b[0mPlain");
@@ -736,4 +736,24 @@ fn test_chunked_csi_escape_parsing() {
     assert_eq!(term.grid.lines[0].cells[3].fg, Color::Indexed(2));
     assert_eq!(term.grid.lines[0].cells[8].c, 'P');
     assert_eq!(term.grid.lines[0].cells[8].fg, Color::DefaultForeground);
+}
+
+#[test]
+fn test_partial_csi_with_parser_reset_cleans_escape_state() {
+    let mut term = Terminal::new(80, 24, 100);
+    let mut parser = VtParser::new();
+
+    // Partial escape sequence
+    term.advance_bytes(&mut parser, b"\x1b[");
+    assert!(parser.is_in_escape());
+
+    // Resetting parser cleans both the vte engine and escape state
+    parser.reset();
+    assert!(!parser.is_in_escape());
+
+    // Next stream is parsed cleanly in Ground state
+    term.advance_bytes(&mut parser, b"ABC");
+    assert_eq!(term.grid.lines[0].cells[0].c, 'A');
+    assert_eq!(term.grid.lines[0].cells[1].c, 'B');
+    assert_eq!(term.grid.lines[0].cells[2].c, 'C');
 }
