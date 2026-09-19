@@ -166,6 +166,13 @@ impl Default for KeyboardHandler {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KittyKey {
+    Letter(char),
+    Tilde(u32),
+    Unicode(u32),
+}
+
 impl KeyboardHandler {
     #[must_use]
     pub fn new() -> Self {
@@ -324,40 +331,49 @@ impl KeyboardHandler {
         mods: Modifiers,
         event_type: u8,
     ) -> Option<Vec<u8>> {
-        let codepoint = match sym {
-            keysyms::KEY_Return | keysyms::KEY_KP_Enter => 13,
-            keysyms::KEY_Tab | keysyms::KEY_ISO_Left_Tab => 9,
-            keysyms::KEY_BackSpace => 127,
-            keysyms::KEY_Escape => 27,
-            keysyms::KEY_Insert => 57358,
-            keysyms::KEY_Delete => 57359,
-            keysyms::KEY_Left => 57376,
-            keysyms::KEY_Right => 57377,
-            keysyms::KEY_Up => 57378,
-            keysyms::KEY_Down => 57379,
-            keysyms::KEY_Page_Up => 57380,
-            keysyms::KEY_Page_Down => 57381,
-            keysyms::KEY_Home => 57382,
-            keysyms::KEY_End => 57383,
-            keysyms::KEY_F1 => 57384,
-            keysyms::KEY_F2 => 57385,
-            keysyms::KEY_F3 => 57386,
-            keysyms::KEY_F4 => 57387,
-            keysyms::KEY_F5 => 57388,
-            keysyms::KEY_F6 => 57389,
-            keysyms::KEY_F7 => 57390,
-            keysyms::KEY_F8 => 57391,
-            keysyms::KEY_F9 => 57392,
-            keysyms::KEY_F10 => 57393,
-            keysyms::KEY_F11 => 57394,
-            keysyms::KEY_F12 => 57395,
+        let key_format = match sym {
+            keysyms::KEY_Return | keysyms::KEY_KP_Enter => KittyKey::Unicode(13),
+            keysyms::KEY_Tab | keysyms::KEY_ISO_Left_Tab => KittyKey::Unicode(9),
+            keysyms::KEY_BackSpace => KittyKey::Unicode(127),
+            keysyms::KEY_Escape => KittyKey::Unicode(27),
+            keysyms::KEY_Up => KittyKey::Letter('A'),
+            keysyms::KEY_Down => KittyKey::Letter('B'),
+            keysyms::KEY_Right => KittyKey::Letter('C'),
+            keysyms::KEY_Left => KittyKey::Letter('D'),
+            keysyms::KEY_Home => KittyKey::Letter('H'),
+            keysyms::KEY_End => KittyKey::Letter('F'),
+            keysyms::KEY_F1 => KittyKey::Letter('P'),
+            keysyms::KEY_F2 => KittyKey::Letter('Q'),
+            keysyms::KEY_F3 => KittyKey::Tilde(13),
+            keysyms::KEY_F4 => KittyKey::Letter('S'),
+            keysyms::KEY_Insert => KittyKey::Tilde(2),
+            keysyms::KEY_Delete => KittyKey::Tilde(3),
+            keysyms::KEY_Page_Up => KittyKey::Tilde(5),
+            keysyms::KEY_Page_Down => KittyKey::Tilde(6),
+            keysyms::KEY_F5 => KittyKey::Tilde(15),
+            keysyms::KEY_F6 => KittyKey::Tilde(17),
+            keysyms::KEY_F7 => KittyKey::Tilde(18),
+            keysyms::KEY_F8 => KittyKey::Tilde(19),
+            keysyms::KEY_F9 => KittyKey::Tilde(20),
+            keysyms::KEY_F10 => KittyKey::Tilde(21),
+            keysyms::KEY_F11 => KittyKey::Tilde(23),
+            keysyms::KEY_F12 => KittyKey::Tilde(24),
+            keysyms::KEY_F13..=keysyms::KEY_F35 => {
+                KittyKey::Unicode(57376 + (sym - keysyms::KEY_F13))
+            }
+            keysyms::KEY_Caps_Lock => KittyKey::Unicode(57358),
+            keysyms::KEY_Scroll_Lock => KittyKey::Unicode(57359),
+            keysyms::KEY_Num_Lock => KittyKey::Unicode(57360),
+            keysyms::KEY_Print => KittyKey::Unicode(57361),
+            keysyms::KEY_Pause => KittyKey::Unicode(57362),
+            keysyms::KEY_Menu => KittyKey::Unicode(57363),
             _ => {
                 let state = self.state.as_ref()?;
                 let utf8 = state.key_get_utf8(keycode);
                 if let Some(ch) = utf8.chars().next() {
-                    ch as u32
+                    KittyKey::Unicode(ch as u32)
                 } else if sym < 0x10000 {
-                    sym
+                    KittyKey::Unicode(sym)
                 } else {
                     return None;
                 }
@@ -365,7 +381,11 @@ impl KeyboardHandler {
         };
 
         let has_modifiers = mods.ctrl || mods.alt || mods.shift || mods.logo;
-        let is_special_disambiguated = matches!(codepoint, 13 | 9 | 127 | 27 | 57358..=57395);
+        let is_functional = matches!(key_format, KittyKey::Letter(_) | KittyKey::Tilde(_));
+        let is_special_disambiguated = matches!(
+            key_format,
+            KittyKey::Unicode(13 | 9 | 127 | 27 | 57358..=57398)
+        );
 
         let report_types = self.kitty_flags & KittyKeyboardFlags::REPORT_EVENT_TYPES != 0;
         let disambiguate = self.kitty_flags & KittyKeyboardFlags::DISAMBIGUATE != 0;
@@ -373,6 +393,7 @@ impl KeyboardHandler {
 
         let should_encode = (report_types && event_type != 1)
             || all_keys
+            || is_functional
             || (disambiguate && (has_modifiers || is_special_disambiguated))
             || (has_modifiers && (mods.ctrl || mods.alt || mods.logo));
 
@@ -394,18 +415,40 @@ impl KeyboardHandler {
             mod_val += 8;
         }
 
-        let seq = if report_types {
-            if mod_val == 1 && event_type == 1 {
-                format!("\x1b[{codepoint}u")
-            } else if event_type == 1 {
-                format!("\x1b[{codepoint};{mod_val}u")
-            } else {
-                format!("\x1b[{codepoint};{mod_val}:{event_type}u")
+        let seq = match key_format {
+            KittyKey::Letter(ch) => {
+                if report_types && event_type != 1 {
+                    format!("\x1b[1;{mod_val}:{event_type}{ch}")
+                } else if mod_val > 1 {
+                    format!("\x1b[1;{mod_val}{ch}")
+                } else {
+                    format!("\x1b[{ch}")
+                }
             }
-        } else if mod_val == 1 {
-            format!("\x1b[{codepoint}u")
-        } else {
-            format!("\x1b[{codepoint};{mod_val}u")
+            KittyKey::Tilde(num) => {
+                if report_types && event_type != 1 {
+                    format!("\x1b[{num};{mod_val}:{event_type}~")
+                } else if mod_val > 1 {
+                    format!("\x1b[{num};{mod_val}~")
+                } else {
+                    format!("\x1b[{num}~")
+                }
+            }
+            KittyKey::Unicode(codepoint) => {
+                if report_types {
+                    if mod_val == 1 && event_type == 1 {
+                        format!("\x1b[{codepoint}u")
+                    } else if event_type == 1 {
+                        format!("\x1b[{codepoint};{mod_val}u")
+                    } else {
+                        format!("\x1b[{codepoint};{mod_val}:{event_type}u")
+                    }
+                } else if mod_val == 1 {
+                    format!("\x1b[{codepoint}u")
+                } else {
+                    format!("\x1b[{codepoint};{mod_val}u")
+                }
+            }
         };
 
         Some(seq.into_bytes())
