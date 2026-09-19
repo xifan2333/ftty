@@ -405,11 +405,16 @@ fn test_font_manager_initialization_is_fast() {
 
 #[test]
 fn test_subpixel_and_grayscale_rasterization() {
-    let fonts_gray = FontManager::load(14.0).expect("load grayscale font");
+    let fonts_gray =
+        FontManager::load_with_families_and_subpixel(&["monospace".to_string()], 14.0, false)
+            .expect("load grayscale font");
     assert!(!fonts_gray.subpixel);
     let key = fonts_gray.face_key('M', CellFlags::empty());
     let gray_glyph = fonts_gray.rasterize(key);
     assert!(gray_glyph.width > 0 && gray_glyph.height > 0);
+    // Grayscale pixels have identical R, G, B channels
+    assert_eq!(gray_glyph.pixels[0], gray_glyph.pixels[1]);
+    assert_eq!(gray_glyph.pixels[1], gray_glyph.pixels[2]);
 
     let fonts_lcd =
         FontManager::load_with_families_and_subpixel(&["monospace".to_string()], 14.0, true)

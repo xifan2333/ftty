@@ -80,7 +80,7 @@ impl GlyphAtlas {
         Self {
             width,
             height,
-            pixels: vec![0; (width * height) as usize],
+            pixels: vec![0; (width * height * 4) as usize],
             dirty: true,
             shelf: Shelf::default(),
             ascii_cache: [None; 128 * 4],
@@ -102,11 +102,13 @@ impl GlyphAtlas {
         if width == self.width && height == self.height {
             return false;
         }
-        let mut pixels = vec![0; (width * height) as usize];
+        let mut pixels = vec![0; (width * height * 4) as usize];
+        let old_row_bytes = (self.width * 4) as usize;
+        let new_row_bytes = (width * 4) as usize;
         for (old_row, new_row) in self
             .pixels
-            .chunks(self.width as usize)
-            .zip(pixels.chunks_mut(width as usize))
+            .chunks(old_row_bytes)
+            .zip(pixels.chunks_mut(new_row_bytes))
         {
             new_row[..old_row.len()].copy_from_slice(old_row);
         }
@@ -145,13 +147,14 @@ impl GlyphAtlas {
             }
         };
         let [x, y] = cached.position;
-        let pitch = glyph.pitch.max(width as usize);
+        let row_bytes = (width * 4) as usize;
+        let pitch = glyph.pitch.max(row_bytes);
         for row in 0..height {
             let src = (row as usize) * pitch;
-            let dst = ((y + row) * self.width + x) as usize;
-            if src + width as usize <= glyph.pixels.len() {
-                self.pixels[dst..dst + width as usize]
-                    .copy_from_slice(&glyph.pixels[src..src + width as usize]);
+            let dst = (((y + row) * self.width + x) * 4) as usize;
+            if src + row_bytes <= glyph.pixels.len() {
+                self.pixels[dst..dst + row_bytes]
+                    .copy_from_slice(&glyph.pixels[src..src + row_bytes]);
             }
         }
         self.dirty = true;

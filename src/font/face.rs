@@ -261,10 +261,9 @@ impl Font {
 
         if subpixel && bmp.pixel_mode() == Ok(freetype::bitmap::PixelMode::Lcd) {
             // FreeType LCD bitmaps produce 3 horizontal subpixel coverage bytes per logical pixel.
-            // Downsample the 3 subpixel samples (R, G, B) into a smoothed 1-byte per logical pixel alpha mask
-            // and apply the sRGB transfer curve for proper perceptual weight.
+            // Store true RGBA8 subpixel masks with per-channel sRGB transfer curve for Dual-Source Blending.
             let logical_width = (raw_width / 3).max(1);
-            let mut pixels = vec![0u8; (logical_width * height) as usize];
+            let mut pixels = vec![0u8; (logical_width * height * 4) as usize];
             for y in 0..height {
                 let src_y = if pitch < 0 {
                     (height - 1 - y) as usize
@@ -272,15 +271,16 @@ impl Font {
                     y as usize
                 };
                 let src_row = src_y * abs_pitch;
-                let dst_row = (y as usize) * (logical_width as usize);
+                let dst_row = (y as usize) * (logical_width as usize) * 4;
                 for x in 0..logical_width {
                     let src_idx = src_row + (x as usize) * 3;
                     if src_idx + 2 < buffer.len() {
-                        let r = buffer[src_idx] as u32;
-                        let g = buffer[src_idx + 1] as u32;
-                        let b = buffer[src_idx + 2] as u32;
-                        let lum = ((r * 77 + g * 151 + b * 28) >> 8) as u8;
-                        pixels[dst_row + x as usize] = LINEAR_TO_SRGB[lum as usize];
+                        let r = LINEAR_TO_SRGB[buffer[src_idx] as usize];
+                        let g = LINEAR_TO_SRGB[buffer[src_idx + 1] as usize];
+                        let b = LINEAR_TO_SRGB[buffer[src_idx + 2] as usize];
+                        let a = r.max(g).max(b);
+                        let dst_idx = dst_row + (x as usize) * 4;
+                        pixels[dst_idx..dst_idx + 4].copy_from_slice(&[r, g, b, a]);
                     }
                 }
             }
@@ -289,13 +289,12 @@ impl Font {
                 height,
                 offset_x,
                 offset_y,
-                pitch: logical_width as usize,
+                pitch: (logical_width * 4) as usize,
                 pixels,
             }
         } else {
-            let row_bytes = raw_width as usize;
-            let total_bytes = (raw_width * height) as usize;
-            let mut pixels = vec![0u8; total_bytes];
+            let row_pixels = raw_width as usize;
+            let mut pixels = vec![0u8; (raw_width * height * 4) as usize];
             for y in 0..height {
                 let src_y = if pitch < 0 {
                     (height - 1 - y) as usize
@@ -303,12 +302,12 @@ impl Font {
                     y as usize
                 };
                 let src_offset = src_y * abs_pitch;
-                let dst_offset = (y as usize) * row_bytes;
-                if src_offset + row_bytes <= buffer.len() {
-                    let src = &buffer[src_offset..src_offset + row_bytes];
-                    let dst = &mut pixels[dst_offset..dst_offset + row_bytes];
-                    for (d, &s) in dst.iter_mut().zip(src) {
-                        *d = LINEAR_TO_SRGB[s as usize];
+                let dst_offset = (y as usize) * row_pixels * 4;
+                for x in 0..row_pixels {
+                    if src_offset + x < buffer.len() {
+                        let gray = LINEAR_TO_SRGB[buffer[src_offset + x] as usize];
+                        let dst_idx = dst_offset + x * 4;
+                        pixels[dst_idx..dst_idx + 4].copy_from_slice(&[gray, gray, gray, gray]);
                     }
                 }
             }
@@ -317,7 +316,7 @@ impl Font {
                 height,
                 offset_x,
                 offset_y,
-                pitch: row_bytes,
+                pitch: row_pixels * 4,
                 pixels,
             }
         }
