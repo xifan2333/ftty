@@ -18,6 +18,7 @@ pub use row::{Cell, CellFlags, ClearMode, Cursor, CursorShape, Row};
 
 pub(crate) const MAX_PLACEMENTS: usize = 1024;
 pub(crate) const MAX_STORED_IMAGES: usize = 256;
+pub(crate) const MAX_ROW_POOL_CAPACITY: usize = 64;
 
 /// 2D Screen grid with scrollback history and alternate screen support.
 #[derive(Debug, Clone)]
@@ -90,10 +91,11 @@ impl Grid {
     }
 
     /// Recycles a discarded row into the row buffer pool if capacity allows.
-    pub(crate) fn recycle_row(&mut self, mut row: Row) {
-        let max_pool = self.rows.max(64);
-        if self.row_pool.len() < max_pool {
-            row.reset();
+    ///
+    /// If the pool reaches [`MAX_ROW_POOL_CAPACITY`], the incoming row is dropped without allocation.
+    /// Cell reset is deferred until checkout via [`alloc_row`] or rotation reset to avoid double clears.
+    pub(crate) fn recycle_row(&mut self, row: Row) {
+        if self.row_pool.len() < MAX_ROW_POOL_CAPACITY {
             self.row_pool.push(row);
         }
     }
@@ -513,7 +515,6 @@ impl Grid {
                         if recycled.cells.len() != self.cols {
                             recycled.resize(self.cols);
                         }
-                        recycled.reset();
                         let old = std::mem::replace(&mut self.lines[i], recycled);
                         self.scrollback.push_back(old);
                         if self.viewport_offset > 0 {

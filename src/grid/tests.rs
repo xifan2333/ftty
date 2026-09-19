@@ -1,6 +1,6 @@
 use crate::color::Color;
 use crate::grid::diacritics::KITTY_PLACEHOLDER;
-use crate::grid::{Cell, CellFlags, ClearMode, Grid, Row};
+use crate::grid::{Cell, CellFlags, ClearMode, Grid, MAX_ROW_POOL_CAPACITY, Row};
 use crate::kitty::{ImageData, ImagePlacement};
 
 #[test]
@@ -1184,5 +1184,22 @@ fn test_clear_saved_scrollback_populates_row_pool() {
     assert_eq!(grid.scrollback.len(), 0);
     // Rows evicted by ClearMode::Saved must populate row_pool up to capacity
     assert!(grid.row_pool.len() >= 30);
-    assert!(grid.row_pool.len() <= grid.rows.max(64));
+    assert!(grid.row_pool.len() <= MAX_ROW_POOL_CAPACITY);
+}
+
+#[test]
+fn test_row_pool_bounded_on_tall_grid_shrink_without_scrollback() {
+    let mut grid = Grid::new(80, 1000, 0);
+    grid.cursor.row = 999;
+
+    // Shrink from 1000 rows to 5 rows with zero scrollback
+    grid.resize(80, 5);
+    assert_eq!(grid.rows, 5);
+    assert_eq!(grid.lines.len(), 5);
+    assert!(
+        grid.row_pool.len() <= MAX_ROW_POOL_CAPACITY,
+        "pool length {} must not exceed MAX_ROW_POOL_CAPACITY {}",
+        grid.row_pool.len(),
+        MAX_ROW_POOL_CAPACITY
+    );
 }

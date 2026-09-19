@@ -1,6 +1,6 @@
 //! Terminal grid dimensions resizing, scrollback line restoration, and placement adjustment.
 
-use crate::grid::{Cursor, Grid, Row};
+use crate::grid::{Cursor, Grid, MAX_ROW_POOL_CAPACITY, Row};
 use crate::kitty::ImagePlacement;
 
 /// Drops `to_remove` rows from `lines`, discarding rows below `cursor_row` first so the
@@ -180,6 +180,7 @@ impl Grid {
             clamp(cursor);
         }
         self.viewport_offset = self.viewport_offset.min(self.scrollback.len());
+        self.row_pool.truncate(MAX_ROW_POOL_CAPACITY);
     }
 
     fn reflow_primary_screen(&mut self, new_cols: usize, new_rows: usize) {
@@ -523,6 +524,7 @@ impl Grid {
         }
 
         self.mark_all_dirty();
+        self.row_pool.truncate(MAX_ROW_POOL_CAPACITY);
     }
 }
 
