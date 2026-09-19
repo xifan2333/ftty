@@ -9,10 +9,13 @@ fn print_help() {
         "ftty v{} — Ultra-lightweight minimalist Wayland terminal emulator\n\n\
         Usage: ftty [options] [-e <command> [args...]]\n\n\
         Options:\n  \
-          -c, --config <path>    Path to configuration file\n  \
-          -e <command> ...       Execute command instead of default shell\n  \
-          -h, --help             Print this help message\n  \
-          -v, --version          Print version information\n",
+          -a, --app-id <id>              Set Wayland window app-id (default: ftty)\n  \
+          -T, --title <title>            Set initial window title (default: ftty)\n  \
+          -d, --working-directory <path> Initial working directory\n  \
+          -c, --config <path>            Path to configuration file\n  \
+          -e <command> ...               Execute command instead of default shell\n  \
+          -h, --help                     Print this help message\n  \
+          -v, --version                  Print version information\n",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -21,6 +24,9 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let mut config_path = None;
     let mut custom_command: Option<Vec<String>> = None;
+    let mut app_id = None;
+    let mut title = None;
+    let mut working_dir = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -37,6 +43,38 @@ fn main() {
                     config_path = Some(PathBuf::from(path));
                 } else {
                     eprintln!("ftty: missing argument for --config");
+                    std::process::exit(1);
+                }
+            }
+            "-a" | "--app-id" => {
+                if let Some(id) = args.next() {
+                    app_id = Some(id);
+                } else {
+                    eprintln!("ftty: missing argument for --app-id");
+                    std::process::exit(1);
+                }
+            }
+            "-T" | "--title" => {
+                if let Some(t) = args.next() {
+                    title = Some(t);
+                } else {
+                    eprintln!("ftty: missing argument for --title");
+                    std::process::exit(1);
+                }
+            }
+            "-d" | "--working-directory" => {
+                if let Some(dir) = args.next() {
+                    let path = PathBuf::from(dir);
+                    if !path.is_dir() {
+                        eprintln!(
+                            "ftty: working directory '{}' does not exist or is not a directory",
+                            path.display()
+                        );
+                        std::process::exit(1);
+                    }
+                    working_dir = Some(path);
+                } else {
+                    eprintln!("ftty: missing argument for --working-directory");
                     std::process::exit(1);
                 }
             }
@@ -106,7 +144,7 @@ fn main() {
     let cmd_slice: Option<Vec<&str>> = custom_command
         .as_ref()
         .map(|v| v.iter().map(String::as_str).collect());
-    let pty = match Pty::spawn(cmd_slice.as_deref(), cols, rows) {
+    let pty = match Pty::spawn_with_dir(cmd_slice.as_deref(), cols, rows, working_dir.as_deref()) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("ftty: failed to spawn PTY: {e}");
@@ -122,6 +160,14 @@ fn main() {
                 std::process::exit(1);
             }
         };
+
+    if let Some(id) = app_id {
+        app_state.wayland.app_id = id;
+    }
+    if let Some(t) = title {
+        app_state.terminal.title = t.clone();
+        app_state.wayland.title = t;
+    }
 
     // Step 3: Dispatch any compositor globals that arrived during font/pty loading.
     // If the surface was already committed during dispatch, flush immediately to avoid

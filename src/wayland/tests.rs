@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 
 use wayland_client::protocol::wl_data_device_manager::WlDataDeviceManager;
@@ -17,10 +17,52 @@ fn test_wayland_state_initialization() {
     let state = WaylandState::new();
     assert_eq!(state.width, 720);
     assert_eq!(state.height, 480);
+    assert_eq!(state.app_id, "ftty");
+    assert_eq!(state.title, "ftty");
     assert!(!state.configured);
     assert_eq!(state.window_state, WindowState::Unmapped);
     assert!(!state.close_requested);
     assert!(state.surface.is_none());
+}
+
+#[test]
+fn test_wayland_custom_app_id_and_title() {
+    let mut state = WaylandState::new();
+    state.app_id = "my-floating-terminal".to_string();
+    state.title = "Build Logs".to_string();
+
+    assert_eq!(state.app_id, "my-floating-terminal");
+    assert_eq!(state.title, "Build Logs");
+}
+
+#[test]
+fn test_pty_spawn_with_custom_working_directory() {
+    let temp_dir = std::env::temp_dir();
+    let pty = Pty::spawn_with_dir(Some(&["pwd"]), 80, 24, Some(&temp_dir));
+    assert!(pty.is_ok());
+    let mut pty = pty.unwrap();
+
+    let mut output = Vec::new();
+    let mut buf = [0u8; 1024];
+    for _ in 0..50 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        if let Ok(n) = pty.read(&mut buf)
+            && n > 0
+        {
+            output.extend_from_slice(&buf[..n]);
+            if output.contains(&b'\n') {
+                break;
+            }
+        }
+    }
+    let text = String::from_utf8_lossy(&output);
+    let canonical = temp_dir.canonicalize().unwrap();
+    assert!(
+        text.contains(&temp_dir.to_string_lossy().to_string())
+            || text.contains(&canonical.to_string_lossy().to_string()),
+        "output {text} must contain temp directory {}",
+        temp_dir.display()
+    );
 }
 
 #[test]
