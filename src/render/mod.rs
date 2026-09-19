@@ -212,7 +212,7 @@ impl Renderer {
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, renderer.texture);
             for parameter in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
-                gl.tex_parameter_i32(glow::TEXTURE_2D, parameter, glow::LINEAR as i32);
+                gl.tex_parameter_i32(glow::TEXTURE_2D, parameter, glow::NEAREST as i32);
             }
             for parameter in [glow::TEXTURE_WRAP_S, glow::TEXTURE_WRAP_T] {
                 gl.tex_parameter_i32(glow::TEXTURE_2D, parameter, glow::CLAMP_TO_EDGE as i32);

@@ -218,7 +218,7 @@ impl Font {
         let flags = if subpixel {
             LoadFlag::RENDER | LoadFlag::TARGET_LCD
         } else {
-            LoadFlag::RENDER | LoadFlag::TARGET_LIGHT
+            LoadFlag::RENDER | LoadFlag::TARGET_NORMAL
         };
         if face.load_glyph(glyph_index as u32, flags).is_err() {
             return RasterizedGlyph::empty();
@@ -255,8 +255,8 @@ impl Font {
                         let r = buffer[src_idx] as u32;
                         let g = buffer[src_idx + 1] as u32;
                         let b = buffer[src_idx + 2] as u32;
-                        let filtered = ((r + (g << 1) + b) >> 2) as u8;
-                        pixels[dst_row + x as usize] = filtered;
+                        let lum = ((r * 77 + g * 151 + b * 28) >> 8) as u8;
+                        pixels[dst_row + x as usize] = lum;
                     }
                 }
             }
