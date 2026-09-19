@@ -265,9 +265,10 @@ pub(crate) fn build_row_foregrounds(vertices: &mut Vec<f32>, row: usize, ctx: &R
                 // Procedural box drawing and block elements glyph
             } else if let Some(glyph) = atlas.get(cell.c, cell.flags, fonts) {
                 if glyph.width > 0 && glyph.height > 0 {
-                    let gx = x + glyph.offset_x as f32;
+                    let gx = (x + glyph.offset_x as f32).round();
                     let gy =
-                        y + metrics.ascent as f32 - glyph.offset_y as f32 - glyph.height as f32;
+                        (y + metrics.ascent as f32 - glyph.offset_y as f32 - glyph.height as f32)
+                            .round();
                     let [u, v] = glyph.position.map(|value| value as f32);
                     let w = glyph.width as f32;
                     let h = glyph.height as f32;
@@ -281,10 +282,11 @@ pub(crate) fn build_row_foregrounds(vertices: &mut Vec<f32>, row: usize, ctx: &R
             } else if let Some(fallback) = atlas.get('?', CellFlags::empty(), fonts) {
                 // Fallback to '?' when the primary character does not fit in the atlas.
                 if fallback.width > 0 && fallback.height > 0 {
-                    let gx = x + fallback.offset_x as f32;
-                    let gy = y + metrics.ascent as f32
+                    let gx = (x + fallback.offset_x as f32).round();
+                    let gy = (y + metrics.ascent as f32
                         - fallback.offset_y as f32
-                        - fallback.height as f32;
+                        - fallback.height as f32)
+                        .round();
                     let [u, v] = fallback.position.map(|value| value as f32);
                     let w = fallback.width as f32;
                     let h = fallback.height as f32;
