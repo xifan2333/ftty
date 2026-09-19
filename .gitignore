@@ -9,6 +9,9 @@
 # Logs
 *.log
 
+# Distribution artifacts
+dist/
+
 # Agent local directories
 .claude/
 .pi/
