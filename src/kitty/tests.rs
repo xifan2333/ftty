@@ -44,7 +44,7 @@ fn shared_memory_loads_images_and_rejects_oversized_payloads() {
         ..Default::default()
     };
     let image = decode_image_data(7, &command, BASE64_STANDARD.encode(&name.0).as_bytes()).unwrap();
-    assert_eq!(image.rgba, pixels);
+    assert_eq!(image.rgba.as_deref(), Some(pixels.as_slice()));
     assert_eq!((image.id, image.width, image.height), (7, 1, 1));
 
     // A sparse object can exceed the cap without consuming that much RAM.
@@ -109,7 +109,7 @@ fn test_parse_kitty_direct_rgba() {
             assert_eq!(command.image_id, Some(10));
             assert_eq!(image.width, 2);
             assert_eq!(image.height, 1);
-            assert_eq!(image.rgba, raw_pixels.to_vec());
+            assert_eq!(image.rgba.as_deref(), Some(raw_pixels.as_slice()));
         }
         other => panic!("Expected Transmit, got {:?}", other),
     }
@@ -137,7 +137,7 @@ fn test_parse_kitty_chunking() {
     match &e2[0] {
         KittyEvent::Transmit { command, image } => {
             assert_eq!(command.image_id, Some(5));
-            assert_eq!(image.rgba, raw_pixels.to_vec());
+            assert_eq!(image.rgba.as_deref(), Some(raw_pixels.as_slice()));
         }
         other => panic!("Expected Transmit, got {:?}", other),
     }
@@ -182,7 +182,7 @@ fn test_parse_kitty_png_format() {
             assert_eq!(command.image_id, Some(99));
             assert_eq!(image.width, 1);
             assert_eq!(image.height, 1);
-            assert_eq!(image.rgba, vec![255, 0, 0, 255]);
+            assert_eq!(image.rgba.as_deref(), Some([255, 0, 0, 255].as_slice()));
         }
         other => panic!("Expected Transmit with PNG, got {:?}", other),
     }
@@ -203,7 +203,7 @@ fn test_kitty_transmit_with_response() {
         KittyEvent::Transmit { command, image } => {
             assert_eq!(command.action, KittyAction::TransmitAndDisplayWithResponse);
             assert_eq!(command.image_id, Some(77));
-            assert_eq!(image.rgba, raw.to_vec());
+            assert_eq!(image.rgba.as_deref(), Some(raw.as_slice()));
         }
         other => panic!("Expected Transmit with response, got {:?}", other),
     }

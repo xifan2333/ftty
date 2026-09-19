@@ -71,7 +71,26 @@ pub struct ImageData {
     pub id: u32,
     pub width: u32,
     pub height: u32,
-    pub rgba: Vec<u8>,
+    pub rgba: Option<Vec<u8>>,
+}
+
+impl ImageData {
+    #[must_use]
+    pub fn new(id: u32, width: u32, height: u32, rgba: Vec<u8>) -> Self {
+        Self {
+            id,
+            width,
+            height,
+            rgba: Some(rgba),
+        }
+    }
+
+    #[must_use]
+    pub fn byte_size(&self) -> usize {
+        (self.width as usize)
+            .saturating_mul(self.height as usize)
+            .saturating_mul(4)
+    }
 }
 
 /// On-screen image placement anchored to grid coordinates.

@@ -18,7 +18,7 @@ pub fn placeholder_image_id(color: Color) -> u32 {
 }
 
 impl Renderer {
-    pub(crate) fn sync_image_textures(&mut self, grid: &Grid) {
+    pub(crate) fn sync_image_textures(&mut self, grid: &mut Grid) {
         let gl = &self.gl;
         let mut to_delete = Vec::new();
         self.image_textures.retain(|id, (tex, _, _, ver)| {
@@ -44,48 +44,51 @@ impl Renderer {
             }
         }
 
-        for (id, img) in &grid.images {
+        for (id, img) in &mut grid.images {
             if !self.image_textures.contains_key(id) {
                 let ver = grid.image_versions.get(id).copied().unwrap_or(0);
-                // SAFETY: draw holds this renderer's current EGL context. New textures
-                // belong to it, and decoded RGBA pixels remain borrowed for the upload.
-                unsafe {
-                    if let Ok(tex) = gl.create_texture() {
-                        gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                        gl.tex_parameter_i32(
-                            glow::TEXTURE_2D,
-                            glow::TEXTURE_MIN_FILTER,
-                            glow::LINEAR as i32,
-                        );
-                        gl.tex_parameter_i32(
-                            glow::TEXTURE_2D,
-                            glow::TEXTURE_MAG_FILTER,
-                            glow::LINEAR as i32,
-                        );
-                        gl.tex_parameter_i32(
-                            glow::TEXTURE_2D,
-                            glow::TEXTURE_WRAP_S,
-                            glow::CLAMP_TO_EDGE as i32,
-                        );
-                        gl.tex_parameter_i32(
-                            glow::TEXTURE_2D,
-                            glow::TEXTURE_WRAP_T,
-                            glow::CLAMP_TO_EDGE as i32,
-                        );
-                        gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
-                        gl.tex_image_2d(
-                            glow::TEXTURE_2D,
-                            0,
-                            glow::RGBA as i32,
-                            img.width as i32,
-                            img.height as i32,
-                            0,
-                            glow::RGBA,
-                            glow::UNSIGNED_BYTE,
-                            glow::PixelUnpackData::Slice(Some(&img.rgba)),
-                        );
-                        self.image_textures
-                            .insert(*id, (tex, img.width, img.height, ver));
+                if let Some(rgba) = &img.rgba {
+                    // SAFETY: draw holds this renderer's current EGL context. New textures
+                    // belong to it, and decoded RGBA pixels remain borrowed for the upload.
+                    unsafe {
+                        if let Ok(tex) = gl.create_texture() {
+                            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                            gl.tex_parameter_i32(
+                                glow::TEXTURE_2D,
+                                glow::TEXTURE_MIN_FILTER,
+                                glow::LINEAR as i32,
+                            );
+                            gl.tex_parameter_i32(
+                                glow::TEXTURE_2D,
+                                glow::TEXTURE_MAG_FILTER,
+                                glow::LINEAR as i32,
+                            );
+                            gl.tex_parameter_i32(
+                                glow::TEXTURE_2D,
+                                glow::TEXTURE_WRAP_S,
+                                glow::CLAMP_TO_EDGE as i32,
+                            );
+                            gl.tex_parameter_i32(
+                                glow::TEXTURE_2D,
+                                glow::TEXTURE_WRAP_T,
+                                glow::CLAMP_TO_EDGE as i32,
+                            );
+                            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+                            gl.tex_image_2d(
+                                glow::TEXTURE_2D,
+                                0,
+                                glow::RGBA as i32,
+                                img.width as i32,
+                                img.height as i32,
+                                0,
+                                glow::RGBA,
+                                glow::UNSIGNED_BYTE,
+                                glow::PixelUnpackData::Slice(Some(rgba)),
+                            );
+                            self.image_textures
+                                .insert(*id, (tex, img.width, img.height, ver));
+                            img.rgba = None;
+                        }
                     }
                 }
             }

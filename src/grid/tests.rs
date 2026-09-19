@@ -273,13 +273,43 @@ fn virtual_placement_images_are_preserved_across_evictions() {
             id,
             width: 1,
             height: 1,
-            rgba: vec![0, 0, 0, 0],
+            rgba: Some(vec![0, 0, 0, 0]),
         });
     }
 
     assert!(
         grid.images.contains_key(&100),
         "virtual image 100 must be preserved across eviction"
+    );
+}
+
+#[test]
+fn scrollback_virtual_placement_images_are_preserved_across_evictions() {
+    let mut grid = Grid::new(80, 24, 100);
+    grid.virtual_placements.insert(100, (10, 10));
+    grid.write_char(
+        KITTY_PLACEHOLDER,
+        Color::Rgb(0, 0, 100),
+        Color::DefaultBackground,
+        CellFlags::empty(),
+    );
+
+    // Scroll lines up so the placeholder moves into scrollback history
+    grid.scroll_up(5);
+    assert_eq!(grid.scrollback.len(), 5);
+
+    for id in 1..=260 {
+        grid.add_image(ImageData {
+            id,
+            width: 1,
+            height: 1,
+            rgba: Some(vec![0, 0, 0, 0]),
+        });
+    }
+
+    assert!(
+        grid.images.contains_key(&100),
+        "virtual image 100 in scrollback must be preserved across eviction"
     );
 }
 
@@ -524,7 +554,7 @@ fn hidden_primary_images_survive_cache_eviction() {
         id: 42,
         width: 1,
         height: 1,
-        rgba: vec![0, 0, 0, 0],
+        rgba: Some(vec![0, 0, 0, 0]),
     };
     grid.add_image(image);
     grid.add_placement(ImagePlacement {
@@ -546,7 +576,7 @@ fn hidden_primary_images_survive_cache_eviction() {
             id,
             width: 1,
             height: 1,
-            rgba: vec![0, 0, 0, 0],
+            rgba: Some(vec![0, 0, 0, 0]),
         });
     }
     grid.exit_alt_screen();
@@ -1202,4 +1232,57 @@ fn test_row_pool_bounded_on_tall_grid_shrink_without_scrollback() {
         grid.row_pool.len(),
         MAX_ROW_POOL_CAPACITY
     );
+}
+
+#[test]
+fn test_image_data_byte_size_and_rgba_take() {
+    let mut image = ImageData::new(1, 100, 100, vec![0; 40000]);
+    assert_eq!(image.byte_size(), 40000);
+    assert!(image.rgba.is_some());
+    let taken = image.rgba.take();
+    assert_eq!(taken.unwrap().len(), 40000);
+    assert!(image.rgba.is_none());
+    assert_eq!(image.byte_size(), 40000);
+}
+
+#[test]
+fn test_stored_images_byte_budget_eviction() {
+    let mut grid = Grid::new(80, 24, 100);
+
+    // Each image is 2048 x 2048 x 4 bytes = 16 MB
+    // With a 64 MB cap, at most 4 images can be stored simultaneously.
+    for id in 1..=6 {
+        grid.add_image(ImageData {
+            id,
+            width: 2048,
+            height: 2048,
+            rgba: None,
+        });
+    }
+
+    assert!(
+        grid.total_image_bytes() <= crate::grid::MAX_STORED_IMAGE_BYTES,
+        "total bytes {} must not exceed MAX_STORED_IMAGE_BYTES {}",
+        grid.total_image_bytes(),
+        crate::grid::MAX_STORED_IMAGE_BYTES
+    );
+    // Oldest images (1 and 2) must have been evicted by LRU
+    assert!(!grid.images.contains_key(&1));
+    assert!(!grid.images.contains_key(&2));
+    assert!(grid.images.contains_key(&5));
+    assert!(grid.images.contains_key(&6));
+}
+
+#[test]
+fn test_single_oversized_image_rejected_without_exceeding_budget() {
+    let mut grid = Grid::new(80, 24, 100);
+    // 5000 x 5000 x 4 bytes = 100 MB > 64 MB cap
+    grid.add_image(ImageData {
+        id: 999,
+        width: 5000,
+        height: 5000,
+        rgba: None,
+    });
+    assert!(!grid.images.contains_key(&999));
+    assert_eq!(grid.total_image_bytes(), 0);
 }

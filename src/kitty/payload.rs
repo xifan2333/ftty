@@ -78,7 +78,7 @@ pub(crate) fn decode_image_data(
                 id,
                 width,
                 height,
-                rgba: bytes,
+                rgba: Some(bytes),
             })
         }
         KittyFormat::Rgb24 => {
@@ -106,7 +106,7 @@ pub(crate) fn decode_image_data(
                 id,
                 width,
                 height,
-                rgba,
+                rgba: Some(rgba),
             })
         }
     }
@@ -191,6 +191,6 @@ pub(crate) fn decode_png(id: u32, bytes: &[u8]) -> io::Result<ImageData> {
         id,
         width,
         height,
-        rgba,
+        rgba: Some(rgba),
     })
 }

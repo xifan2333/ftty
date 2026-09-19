@@ -18,6 +18,7 @@ pub use row::{Cell, CellFlags, ClearMode, Cursor, CursorShape, Row};
 
 pub(crate) const MAX_PLACEMENTS: usize = 1024;
 pub(crate) const MAX_STORED_IMAGES: usize = 256;
+pub(crate) const MAX_STORED_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_ROW_POOL_CAPACITY: usize = 64;
 
 /// 2D Screen grid with scrollback history and alternate screen support.
@@ -35,6 +36,7 @@ pub struct Grid {
     pub image_versions: HashMap<u32, u64>,
     pub placements: Vec<ImagePlacement>,
     pub virtual_placements: HashMap<u32, (usize, usize)>,
+    pub(crate) image_lru: Vec<u32>,
 
     pub cursor: Cursor,
     pub saved_cursor: Cursor,
@@ -72,6 +74,7 @@ impl Grid {
             image_versions: HashMap::new(),
             placements: Vec::new(),
             virtual_placements: HashMap::new(),
+            image_lru: Vec::new(),
             cursor: Cursor::default(),
             saved_cursor: Cursor::default(),
             scroll_region_top: 0,
@@ -115,22 +118,51 @@ impl Grid {
         }
     }
 
+    /// Returns the sum of decoded RGBA byte sizes across all stored images.
+    #[must_use]
+    pub fn total_image_bytes(&self) -> usize {
+        self.images.values().map(ImageData::byte_size).sum()
+    }
+
+    pub(crate) fn remove_image_internal(&mut self, k: u32) {
+        self.images.remove(&k);
+        self.image_versions.remove(&k);
+        self.placements.retain(|p| p.image_id != k);
+        self.alt_placements.retain(|p| p.image_id != k);
+        self.virtual_placements.remove(&k);
+        self.image_lru.retain(|&id| id != k);
+    }
+
     pub fn add_image(&mut self, image: ImageData) {
         let id = image.id;
+        if image.byte_size() > MAX_STORED_IMAGE_BYTES {
+            self.remove_image_internal(id);
+            return;
+        }
+
+        self.image_lru.retain(|&k| k != id);
+        self.image_lru.push(id);
         self.images.insert(id, image);
         let ver = self.image_versions.entry(id).or_insert(0);
         *ver = ver.wrapping_add(1);
 
-        // Cap stored images to MAX_STORED_IMAGES by removing unplaced images
-        if self.images.len() > MAX_STORED_IMAGES {
+        // Enforce both count limit (MAX_STORED_IMAGES) and byte budget (MAX_STORED_IMAGE_BYTES)
+        if self.images.len() > MAX_STORED_IMAGES
+            || self.total_image_bytes() > MAX_STORED_IMAGE_BYTES
+        {
             let mut active_ids: std::collections::HashSet<u32> = self
                 .placements
                 .iter()
                 .chain(self.alt_placements.iter())
                 .map(|p| p.image_id)
                 .collect();
-            // Virtual image IDs stay alive while a placeholder on either screen references them.
-            for row in self.lines.iter().chain(self.alt_lines.iter().flatten()) {
+            // Virtual image IDs stay alive while a placeholder on either screen or scrollback references them.
+            for row in self
+                .lines
+                .iter()
+                .chain(self.alt_lines.iter().flatten())
+                .chain(self.scrollback.iter())
+            {
                 for cell in &row.cells {
                     if cell.c != KITTY_PLACEHOLDER {
                         continue;
@@ -155,28 +187,30 @@ impl Grid {
             }
             self.virtual_placements
                 .retain(|id, _| active_ids.contains(id));
-            self.images
-                .retain(|img_id, _| active_ids.contains(img_id) || *img_id == id);
-            self.image_versions
-                .retain(|img_id, _| self.images.contains_key(img_id));
 
-            // If active placements exceed capacity, evict oldest unreferenced images
-            if self.images.len() > MAX_STORED_IMAGES {
-                let to_evict = self.images.len() - MAX_STORED_IMAGES;
-                let evict_keys: Vec<u32> = self
-                    .images
-                    .keys()
-                    .copied()
-                    .filter(|&k| k != id)
-                    .take(to_evict)
-                    .collect();
-                for k in evict_keys {
-                    self.images.remove(&k);
-                    self.image_versions.remove(&k);
-                    self.placements.retain(|p| p.image_id != k);
-                    self.alt_placements.retain(|p| p.image_id != k);
-                    self.virtual_placements.remove(&k);
+            // First pass: evict unreferenced images in LRU order
+            let unplaced: Vec<u32> = self
+                .image_lru
+                .iter()
+                .copied()
+                .filter(|&k| k != id && !active_ids.contains(&k))
+                .collect();
+            for k in unplaced {
+                if self.images.len() <= MAX_STORED_IMAGES
+                    && self.total_image_bytes() <= MAX_STORED_IMAGE_BYTES
+                {
+                    break;
                 }
+                self.remove_image_internal(k);
+            }
+
+            // Second pass: if still exceeding budget, evict oldest referenced images
+            while self.images.len() > MAX_STORED_IMAGES
+                || self.total_image_bytes() > MAX_STORED_IMAGE_BYTES
+            {
+                let oldest = self.image_lru.iter().copied().find(|&k| k != id);
+                let Some(k) = oldest else { break };
+                self.remove_image_internal(k);
             }
         }
     }
@@ -198,13 +232,10 @@ impl Grid {
                 self.placements.clear();
                 self.alt_placements.clear();
                 self.virtual_placements.clear();
+                self.image_lru.clear();
             }
             DeleteTarget::ById(id) => {
-                self.images.remove(&id);
-                self.image_versions.remove(&id);
-                self.placements.retain(|p| p.image_id != id);
-                self.alt_placements.retain(|p| p.image_id != id);
-                self.virtual_placements.remove(&id);
+                self.remove_image_internal(id);
             }
             DeleteTarget::ByPlacement(p_id) => {
                 self.placements.retain(|p| p.placement_id != p_id);

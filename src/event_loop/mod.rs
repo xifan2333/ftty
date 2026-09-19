@@ -471,7 +471,7 @@ pub fn run_event_loop_with_connection(
                 (app_state.wayland.height as f64 * factor).round().max(1.0) as u32,
             ];
             renderer.render_grid(
-                &app_state.terminal.grid,
+                &mut app_state.terminal.grid,
                 colors,
                 &app_state.font_mgr,
                 &mut app_state.atlas,
