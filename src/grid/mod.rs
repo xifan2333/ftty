@@ -670,8 +670,9 @@ impl Grid {
             rest = &rest[take..];
 
             let row_line = &mut self.lines[row];
-            for (idx, &byte) in chunk.iter().enumerate() {
-                row_line.cells[col + idx] = Cell {
+            let target_cells = &mut row_line.cells[col..col + take];
+            for (cell, &byte) in target_cells.iter_mut().zip(chunk.iter()) {
+                *cell = Cell {
                     c: byte as char,
                     fg,
                     bg,

@@ -270,18 +270,23 @@ impl Font {
             }
         } else {
             let row_bytes = raw_width as usize;
-            let mut pixels = vec![0u8; (raw_width * height) as usize];
-            for y in 0..height {
-                let src_y = if pitch < 0 {
-                    (height - 1 - y) as usize
-                } else {
-                    y as usize
-                };
-                let src_offset = src_y * abs_pitch;
-                let dst_offset = (y as usize) * (raw_width as usize);
-                if src_offset + row_bytes <= buffer.len() {
-                    pixels[dst_offset..dst_offset + row_bytes]
-                        .copy_from_slice(&buffer[src_offset..src_offset + row_bytes]);
+            let total_bytes = (raw_width * height) as usize;
+            let mut pixels = vec![0u8; total_bytes];
+            if pitch > 0 && abs_pitch == row_bytes && buffer.len() >= total_bytes {
+                pixels.copy_from_slice(&buffer[..total_bytes]);
+            } else {
+                for y in 0..height {
+                    let src_y = if pitch < 0 {
+                        (height - 1 - y) as usize
+                    } else {
+                        y as usize
+                    };
+                    let src_offset = src_y * abs_pitch;
+                    let dst_offset = (y as usize) * (raw_width as usize);
+                    if src_offset + row_bytes <= buffer.len() {
+                        pixels[dst_offset..dst_offset + row_bytes]
+                            .copy_from_slice(&buffer[src_offset..src_offset + row_bytes]);
+                    }
                 }
             }
             RasterizedGlyph {
