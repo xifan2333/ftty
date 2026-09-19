@@ -138,6 +138,7 @@ impl Renderer {
         self.row_fg.clear();
         self.row_valid.clear();
         self.last_cols = 0;
+        self.vertices.clear();
     }
 
     /// Creates a renderer after the first XDG surface configure has been acknowledged.
@@ -401,6 +402,7 @@ impl Renderer {
             cursor,
         };
 
+        let mut any_row_regenerated = false;
         for r in 0..rows {
             let line = grid.visible_line(r);
             let abs_line = grid.scrollback.len() + r - viewport_offset;
@@ -433,24 +435,35 @@ impl Renderer {
                 build_row_foregrounds(&mut self.row_fg[r], r, &ctx);
                 self.row_valid[r] = true;
                 line.dirty.set(false);
+                any_row_regenerated = true;
             }
         }
 
-        let total_floats: usize = self.row_bg[..rows].iter().map(Vec::len).sum::<usize>()
-            + self.row_fg[..rows].iter().map(Vec::len).sum::<usize>()
-            + 192;
-        self.vertices.clear();
-        self.vertices.reserve(total_floats);
-        // 1. All row backgrounds first (prevents lower row background from covering upper row descenders)
-        for r in 0..rows {
-            self.vertices.extend_from_slice(&self.row_bg[r]);
+        let overlays_changed = cursor_changed
+            || selection_changed
+            || hover_changed
+            || viewport_changed
+            || shape_changed
+            || cols_changed
+            || padding_changed;
+
+        if any_row_regenerated || overlays_changed || self.vertices.is_empty() {
+            let total_floats: usize = self.row_bg[..rows].iter().map(Vec::len).sum::<usize>()
+                + self.row_fg[..rows].iter().map(Vec::len).sum::<usize>()
+                + 192;
+            self.vertices.clear();
+            self.vertices.reserve(total_floats);
+            // 1. All row backgrounds first (prevents lower row background from covering upper row descenders)
+            for r in 0..rows {
+                self.vertices.extend_from_slice(&self.row_bg[r]);
+            }
+            // 2. All row foregrounds (glyphs, underlines, borders)
+            for r in 0..rows {
+                self.vertices.extend_from_slice(&self.row_fg[r]);
+            }
+            // 3. Dynamic overlays (cursor, preedit)
+            build_dynamic_overlays(&mut self.vertices, &ctx);
         }
-        // 2. All row foregrounds (glyphs, underlines, borders)
-        for r in 0..rows {
-            self.vertices.extend_from_slice(&self.row_fg[r]);
-        }
-        // 3. Dynamic overlays (cursor, preedit)
-        build_dynamic_overlays(&mut self.vertices, &ctx);
 
         self.last_cursor = cursor;
         self.last_selection = options.selection.cloned();
