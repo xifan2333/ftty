@@ -157,6 +157,19 @@ pub(crate) fn build_row_backgrounds(vertices: &mut Vec<f32>, row: usize, ctx: &R
 
     let abs_line = grid.scrollback.len() + row - grid.viewport_offset();
     let line = grid.visible_line(row);
+
+    let has_selection = options.selection.is_some_and(|s| s.spans_line(abs_line));
+    let has_block_cursor =
+        cursor.is_some_and(|(r, _, _)| r == row && grid.cursor.shape == CursorShape::Block);
+    let has_custom_bg = line
+        .cells
+        .iter()
+        .any(|c| c.bg != Color::DefaultBackground || c.flags.contains(CellFlags::REVERSE));
+
+    if !has_selection && !has_block_cursor && !has_custom_bg {
+        return;
+    }
+
     let y = pad_y + row as f32 * ch;
 
     // Draw background and selection on this row with contiguous span merging
@@ -244,9 +257,11 @@ pub(crate) fn build_row_foregrounds(vertices: &mut Vec<f32>, row: usize, ctx: &R
             cw
         };
         if visible_glyph(cell) {
-            if crate::render::box_drawing::render_procedural_glyph(
-                vertices, cell.c, x, y, width, ch, color,
-            ) {
+            if crate::render::box_drawing::is_procedural_glyph(cell.c)
+                && crate::render::box_drawing::render_procedural_glyph(
+                    vertices, cell.c, x, y, width, ch, color,
+                )
+            {
                 // Procedural box drawing and block elements glyph
             } else if let Some(glyph) = atlas.get(cell.c, cell.flags, fonts) {
                 if glyph.width > 0 && glyph.height > 0 {
