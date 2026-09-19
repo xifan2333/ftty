@@ -41,7 +41,7 @@ pub use kitty::{
     DeleteTarget, ImageData, ImagePlacement, KittyAction, KittyCommand, KittyEvent, KittyFormat,
     KittyMedium, KittyParser, kitty_response,
 };
-pub use parser::Terminal;
+pub use parser::{Parser as VtParser, Terminal};
 pub use pty::Pty;
 pub use render::{ColorScheme, HoveredHyperlinkSpan, RenderOptions, Renderer};
 pub use wayland::{OfferData, WaylandState, WindowState};

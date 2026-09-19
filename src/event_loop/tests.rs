@@ -59,7 +59,7 @@ fn test_pty_and_terminal_roundtrip() {
         if let Ok(n) = app.pty.read(&mut buf)
             && n > 0
         {
-            app.terminal.advance_bytes(&buf[..n]);
+            app.terminal.advance_bytes(&mut app.vt_parser, &buf[..n]);
             let full_screen: String = app
                 .terminal
                 .grid

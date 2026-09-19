@@ -2,11 +2,42 @@ use std::path::Path;
 
 use crate::color::{Color, Rgb};
 use crate::grid::CellFlags;
-use crate::parser::{MAX_HYPERLINKS, ProgressState, ShellIntegrationState, Terminal};
+use crate::parser::{MAX_HYPERLINKS, Parser, ProgressState, ShellIntegrationState, Terminal};
+
+struct TestTerm {
+    term: Terminal,
+    parser: Parser,
+}
+
+impl TestTerm {
+    fn new(cols: usize, rows: usize, max_scrollback: usize) -> Self {
+        Self {
+            term: Terminal::new(cols, rows, max_scrollback),
+            parser: Parser::new(),
+        }
+    }
+
+    fn advance_bytes(&mut self, bytes: &[u8]) {
+        self.term.advance_bytes(&mut self.parser, bytes);
+    }
+}
+
+impl std::ops::Deref for TestTerm {
+    type Target = Terminal;
+    fn deref(&self) -> &Self::Target {
+        &self.term
+    }
+}
+
+impl std::ops::DerefMut for TestTerm {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.term
+    }
+}
 
 #[test]
 fn test_print_and_cursor_movement() {
-    let mut term = Terminal::new(80, 24, 100);
+    let mut term = TestTerm::new(80, 24, 100);
     term.advance_bytes(b"Hello, World!\r\nSecond line");
 
     assert_eq!(term.grid.lines[0].cells[0].c, 'H');
@@ -18,7 +49,7 @@ fn test_print_and_cursor_movement() {
 
 #[test]
 fn test_sgr_formatting() {
-    let mut term = Terminal::new(80, 24, 100);
+    let mut term = TestTerm::new(80, 24, 100);
     // Set bold, red fg (31), truecolor bg (48;2;10;20;30)
     term.advance_bytes(b"\x1b[1;31;48;2;10;20;30mX\x1b[0m");
 
@@ -36,14 +67,14 @@ fn test_sgr_formatting() {
 
 #[test]
 fn test_osc_title() {
-    let mut term = Terminal::new(80, 24, 100);
+    let mut term = TestTerm::new(80, 24, 100);
     term.advance_bytes(b"\x1b]0;ftty terminal\x07");
     assert_eq!(term.title, "ftty terminal");
 }
 
 #[test]
 fn window_geometry_queries_are_answered_in_height_width_order() {
-    let mut term = Terminal::new(80, 24, 100);
+    let mut term = TestTerm::new(80, 24, 100);
     term.set_geometry([9, 18], [720, 432]);
     term.advance_bytes(b"\x1b[14t\x1b[16t\x1b[18t");
 
@@ -68,7 +99,7 @@ fn window_geometry_queries_are_answered_in_height_width_order() {
 fn test_mouse_tracking_modes() {
     use crate::input::mouse::{MouseEncoding, MouseTracking};
 
-    let mut term = Terminal::new(80, 24, 100);
+    let mut term = TestTerm::new(80, 24, 100);
     assert!(!term.mouse.is_reporting());
 
     term.advance_bytes(b"\x1b[?1002h\x1b[?1006h");
@@ -93,7 +124,7 @@ fn test_mouse_tracking_modes() {
 
 #[test]
 fn test_cursor_visibility_does_not_disturb_mouse_modes() {
-    let mut term = Terminal::new(80, 24, 100);
+    let mut term = TestTerm::new(80, 24, 100);
     term.advance_bytes(b"\x1b[?1000h\x1b[?25l");
     assert!(term.mouse.is_reporting());
     assert!(!term.grid.cursor.visible);
@@ -101,14 +132,14 @@ fn test_cursor_visibility_does_not_disturb_mouse_modes() {
 
 #[test]
 fn test_clear_screen_csi() {
-    let mut term = Terminal::new(80, 24, 100);
+    let mut term = TestTerm::new(80, 24, 100);
     term.advance_bytes(b"Testing\x1b[2J");
     assert_eq!(term.grid.lines[0].cells[0].c, ' ');
 }
 
 #[test]
 fn test_device_status_and_attributes_queries() {
-    let mut term = Terminal::new(80, 24, 100);
+    let mut term = TestTerm::new(80, 24, 100);
 
     // CSI 5 n -> Operating status (DSR)
     term.advance_bytes(b"\x1b[5n");
@@ -129,7 +160,7 @@ fn test_device_status_and_attributes_queries() {
 
 #[test]
 fn test_osc_color_queries_use_configured_defaults() {
-    let mut term = Terminal::new(80, 24, 100);
+    let mut term = TestTerm::new(80, 24, 100);
     term.set_default_colors(Rgb::new(255, 128, 0), Rgb::new(10, 20, 30));
 
     term.advance_bytes(b"\x1b]10;?\x07");
@@ -147,7 +178,7 @@ fn test_osc_color_queries_use_configured_defaults() {
 
 #[test]
 fn test_bracketed_paste_mode_toggle() {
-    let mut term = Terminal::new(80, 24, 100);
+    let mut term = TestTerm::new(80, 24, 100);
     assert!(!term.bracketed_paste);
 
     term.advance_bytes(b"\x1b[?2004h");
@@ -168,7 +199,7 @@ fn test_bracketed_paste_mode_toggle() {
 
 #[test]
 fn test_focus_reporting_mode_toggle() {
-    let mut term = Terminal::new(80, 24, 100);
+    let mut term = TestTerm::new(80, 24, 100);
     assert!(!term.focus_reporting);
 
     term.advance_bytes(b"\x1b[?1004h");
@@ -184,7 +215,7 @@ fn test_focus_reporting_mode_toggle() {
 
 #[test]
 fn test_synchronized_output_and_decrqm_queries() {
-    let mut term = Terminal::new(80, 24, 100);
+    let mut term = TestTerm::new(80, 24, 100);
     assert!(!term.synchronized_output);
 
     // Query mode 2026 before setting: disabled (2)
@@ -215,7 +246,7 @@ fn test_synchronized_output_and_decrqm_queries() {
 
 #[test]
 fn test_osc_52_clipboard_read_and_write() {
-    let mut term = Terminal::new(80, 24, 100);
+    let mut term = TestTerm::new(80, 24, 100);
 
     // By default, OSC 52 read is disabled for security
     assert!(!term.allow_osc52_read);
@@ -256,7 +287,7 @@ fn test_osc_52_clipboard_read_and_write() {
 
 #[test]
 fn test_osc_7_current_working_directory() {
-    let mut term = Terminal::new(80, 24, 100);
+    let mut term = TestTerm::new(80, 24, 100);
     assert_eq!(term.current_dir, None);
 
     // Typical file URI with hostname
@@ -280,7 +311,7 @@ fn test_osc_7_current_working_directory() {
 
 #[test]
 fn test_osc_133_shell_integration() {
-    let mut term = Terminal::new(80, 24, 100);
+    let mut term = TestTerm::new(80, 24, 100);
     assert_eq!(term.shell_integration, None);
 
     term.advance_bytes(b"\x1b]133;A\x07");
@@ -321,7 +352,7 @@ fn test_osc_133_shell_integration() {
 
 #[test]
 fn test_mode_2031_color_scheme_report() {
-    let mut term = Terminal::new(80, 24, 100);
+    let mut term = TestTerm::new(80, 24, 100);
     // Default bg is (24, 24, 24) which is dark -> 1
     term.advance_bytes(b"\x1b[?2031h");
     assert!(term.report_color_scheme);
@@ -341,7 +372,7 @@ fn test_mode_2031_color_scheme_report() {
 
 #[test]
 fn test_mode_2048_window_size_notifications() {
-    let mut term = Terminal::new(80, 24, 100);
+    let mut term = TestTerm::new(80, 24, 100);
     term.set_geometry([10, 20], [800, 600]);
 
     term.advance_bytes(b"\x1b[?2048h");
@@ -372,7 +403,7 @@ fn test_mode_2048_window_size_notifications() {
 
 #[test]
 fn test_osc_9_4_progress_reporting() {
-    let mut term = Terminal::new(80, 24, 100);
+    let mut term = TestTerm::new(80, 24, 100);
     assert_eq!(term.progress, None);
 
     // State 1: normal, 45%
@@ -402,7 +433,7 @@ fn test_osc_9_4_progress_reporting() {
 
 #[test]
 fn test_styled_underlines_and_underline_color() {
-    let mut term = Terminal::new(80, 24, 100);
+    let mut term = TestTerm::new(80, 24, 100);
 
     // Undercurl (4:3) with RGB underline color (58;2;255;0;128)
     term.advance_bytes(b"\x1b[4:3;58;2;255;0;128mU\x1b[0m");
@@ -431,7 +462,7 @@ fn test_styled_underlines_and_underline_color() {
 
 #[test]
 fn test_osc_8_hyperlinks() {
-    let mut term = Terminal::new(80, 24, 100);
+    let mut term = TestTerm::new(80, 24, 100);
 
     // Emit text with hyperlink
     term.advance_bytes(b"\x1b]8;id=link1;https://example.com\x07Click\x1b]8;;\x07 here");
@@ -456,7 +487,7 @@ fn test_osc_8_hyperlinks() {
     assert_eq!(term.grid.lines[0].cells[0].hyperlink_id, None);
 
     // Test hyperlink clearing across alternate screen switch
-    let mut alt_term = Terminal::new(80, 24, 100);
+    let mut alt_term = TestTerm::new(80, 24, 100);
     alt_term.advance_bytes(b"\x1b]8;;https://foo.bar\x07Link\x1b]8;;\x07");
     assert!(alt_term.grid.lines[0].cells[0].hyperlink_id.is_some());
     // Enter alt screen, execute RIS, exit alt screen
@@ -464,7 +495,7 @@ fn test_osc_8_hyperlinks() {
     assert_eq!(alt_term.grid.lines[0].cells[0].hyperlink_id, None);
 
     // When pool reaches MAX_HYPERLINKS, FIFO eviction ensures new URLs continue to be interned
-    let mut full_term = Terminal::new(80, 24, 100);
+    let mut full_term = TestTerm::new(80, 24, 100);
     let first_id = full_term.get_or_intern_hyperlink("https://first.com".to_string());
     for i in 1..MAX_HYPERLINKS {
         let _ = full_term.get_or_intern_hyperlink(format!("https://unique-{i}.com"));
@@ -486,7 +517,7 @@ fn test_osc_8_hyperlinks() {
 
 #[test]
 fn test_kitty_keyboard_protocol_negotiation() {
-    let mut term = Terminal::new(80, 24, 100);
+    let mut term = TestTerm::new(80, 24, 100);
 
     // Query initial flags: 0
     term.advance_bytes(b"\x1b[?u");
@@ -526,7 +557,7 @@ fn test_kitty_keyboard_protocol_negotiation() {
 
 #[test]
 fn test_combined_underline_and_bold_does_not_corrupt() {
-    let mut term = Terminal::new(80, 24, 100);
+    let mut term = TestTerm::new(80, 24, 100);
     // CSI 4;1m must set BOTH underline and bold (not treated as 4:1)
     term.advance_bytes(b"\x1b[4;1mB\x1b[0m");
     let cell = term.grid.lines[0].cells[0];
@@ -538,7 +569,7 @@ fn test_combined_underline_and_bold_does_not_corrupt() {
 
 #[test]
 fn test_parser_instance_reuse_across_invocations() {
-    let mut term = Terminal::new(80, 24, 100);
+    let mut term = TestTerm::new(80, 24, 100);
     term.advance_bytes(b"A");
     assert_eq!(term.grid.lines[0].cells[0].c, 'A');
     term.advance_bytes(b"B");
@@ -549,7 +580,7 @@ fn test_parser_instance_reuse_across_invocations() {
 
 #[test]
 fn test_stack_allocated_parameter_parsing_dense_sgr() {
-    let mut term = Terminal::new(80, 24, 100);
+    let mut term = TestTerm::new(80, 24, 100);
     // Sequence with many chained parameters
     term.advance_bytes(b"\x1b[0;1;3;4;31;48;2;10;20;30;24;58;2;40;50;60mZ\x1b[0m");
     let cell = term.grid.lines[0].cells[0];
@@ -563,7 +594,7 @@ fn test_stack_allocated_parameter_parsing_dense_sgr() {
 
 #[test]
 fn test_simd_ascii_scanning_and_batch_wrap() {
-    let mut term = Terminal::new(10, 5, 100);
+    let mut term = TestTerm::new(10, 5, 100);
     // Write 15 printable ASCII characters: 10 on line 0, wraps 5 to line 1
     term.advance_bytes(b"0123456789ABCDE\n");
     for (i, c) in "0123456789".chars().enumerate() {
@@ -588,7 +619,7 @@ fn test_simd_ascii_scanning_and_batch_wrap() {
 
 #[test]
 fn test_c1_control_split_sequence() {
-    let mut term = Terminal::new(10, 5, 100);
+    let mut term = TestTerm::new(10, 5, 100);
     // Split CSI sequence across chunks
     term.advance_bytes(b"\x1b[");
     assert!(term.parser_in_escape);
@@ -600,7 +631,7 @@ fn test_c1_control_split_sequence() {
 
 #[test]
 fn test_alt_screen_prompt_markers_not_recorded_in_primary() {
-    let mut term = Terminal::new(80, 24, 100);
+    let mut term = TestTerm::new(80, 24, 100);
     term.advance_bytes(b"\x1b[?1049h");
     assert!(term.grid.is_alt_screen());
     term.advance_bytes(b"\x1b]133;A\x07");
@@ -612,7 +643,7 @@ fn test_alt_screen_prompt_markers_not_recorded_in_primary() {
 
 #[test]
 fn test_dynamic_palette_and_colors_osc() {
-    let mut term = Terminal::new(80, 24, 100);
+    let mut term = TestTerm::new(80, 24, 100);
     let init_fg = term.default_fg;
     let init_bg = term.default_bg;
     let init_p1 = term.palette[1];
@@ -675,4 +706,34 @@ fn test_dynamic_palette_and_colors_osc() {
 
     term.advance_bytes(b"\x1b]111\x07");
     assert_eq!(term.take_responses(), vec![b"\x1b[?2031;1$y".to_vec()]);
+}
+
+#[test]
+fn test_chunked_cjk_utf8_parsing() {
+    let mut term = Terminal::new(80, 24, 100);
+    let mut parser = Parser::new();
+
+    // Pass a 12-byte contiguous Chinese text chunk directly
+    term.advance_bytes(&mut parser, "你好世界".as_bytes());
+
+    assert_eq!(term.grid.lines[0].cells[0].c, '你');
+    assert_eq!(term.grid.lines[0].cells[2].c, '好');
+    assert_eq!(term.grid.lines[0].cells[4].c, '世');
+    assert_eq!(term.grid.lines[0].cells[6].c, '界');
+}
+
+#[test]
+fn test_chunked_csi_escape_parsing() {
+    let mut term = Terminal::new(80, 24, 100);
+    let mut parser = Parser::new();
+
+    // Stream with multiple CSI sequences and ASCII runs in a single chunk
+    term.advance_bytes(&mut parser, b"\x1b[31mRed\x1b[32mGreen\x1b[0mPlain");
+
+    assert_eq!(term.grid.lines[0].cells[0].c, 'R');
+    assert_eq!(term.grid.lines[0].cells[0].fg, Color::Indexed(1));
+    assert_eq!(term.grid.lines[0].cells[3].c, 'G');
+    assert_eq!(term.grid.lines[0].cells[3].fg, Color::Indexed(2));
+    assert_eq!(term.grid.lines[0].cells[8].c, 'P');
+    assert_eq!(term.grid.lines[0].cells[8].fg, Color::DefaultForeground);
 }

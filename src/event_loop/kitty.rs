@@ -10,7 +10,7 @@ impl AppState {
         if text.is_empty() {
             return;
         }
-        self.terminal.advance_bytes(text);
+        self.terminal.advance_bytes(&mut self.vt_parser, text);
         if !self.terminal.responses.is_empty() {
             for response in self.terminal.take_responses() {
                 self.write_pty_blocking(&response);
