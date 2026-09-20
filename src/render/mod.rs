@@ -313,17 +313,46 @@ impl Renderer {
             gl.bind_texture(glow::TEXTURE_2D, self.texture);
             if atlas.dirty {
                 gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
-                gl.tex_image_2d(
-                    glow::TEXTURE_2D,
-                    0,
-                    glow::RGBA as i32,
-                    atlas.width as i32,
-                    atlas.height as i32,
-                    0,
-                    glow::RGBA,
-                    glow::UNSIGNED_BYTE,
-                    glow::PixelUnpackData::Slice(Some(&atlas.pixels)),
-                );
+                if atlas.full_upload || atlas.dirty_rect.is_none() {
+                    gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, 0);
+                    gl.pixel_store_i32(glow::UNPACK_SKIP_PIXELS, 0);
+                    gl.pixel_store_i32(glow::UNPACK_SKIP_ROWS, 0);
+                    gl.tex_image_2d(
+                        glow::TEXTURE_2D,
+                        0,
+                        glow::RGBA as i32,
+                        atlas.width as i32,
+                        atlas.height as i32,
+                        0,
+                        glow::RGBA,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::Slice(Some(&atlas.pixels)),
+                    );
+                    atlas.full_upload = false;
+                } else if let Some([min_x, min_y, max_x, max_y]) = atlas.dirty_rect {
+                    let sub_w = (max_x - min_x).min(atlas.width - min_x);
+                    let sub_h = (max_y - min_y).min(atlas.height - min_y);
+                    if sub_w > 0 && sub_h > 0 {
+                        gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, atlas.width as i32);
+                        gl.pixel_store_i32(glow::UNPACK_SKIP_PIXELS, min_x as i32);
+                        gl.pixel_store_i32(glow::UNPACK_SKIP_ROWS, min_y as i32);
+                        gl.tex_sub_image_2d(
+                            glow::TEXTURE_2D,
+                            0,
+                            min_x as i32,
+                            min_y as i32,
+                            sub_w as i32,
+                            sub_h as i32,
+                            glow::RGBA,
+                            glow::UNSIGNED_BYTE,
+                            glow::PixelUnpackData::Slice(Some(&atlas.pixels)),
+                        );
+                        gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, 0);
+                        gl.pixel_store_i32(glow::UNPACK_SKIP_PIXELS, 0);
+                        gl.pixel_store_i32(glow::UNPACK_SKIP_ROWS, 0);
+                    }
+                }
+                atlas.dirty_rect = None;
                 atlas.dirty = false;
             }
             gl.use_program(self.program);
