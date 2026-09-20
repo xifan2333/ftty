@@ -76,8 +76,8 @@ pub struct CursorConfig {
     pub shape: Option<CursorShape>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
-pub struct PaletteConfig {
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub struct LegacyPaletteConfig {
     pub black: Option<Rgb>,
     pub red: Option<Rgb>,
     pub green: Option<Rgb>,
@@ -100,8 +100,82 @@ pub struct PaletteConfig {
 pub struct ColorsConfig {
     pub foreground: Option<Rgb>,
     pub background: Option<Rgb>,
-    pub palette: Option<PaletteConfig>,
+    pub black: Option<Rgb>,
+    pub red: Option<Rgb>,
+    pub green: Option<Rgb>,
+    pub yellow: Option<Rgb>,
+    pub blue: Option<Rgb>,
+    pub magenta: Option<Rgb>,
+    pub cyan: Option<Rgb>,
+    pub white: Option<Rgb>,
+    pub bright_black: Option<Rgb>,
+    pub bright_red: Option<Rgb>,
+    pub bright_green: Option<Rgb>,
+    pub bright_yellow: Option<Rgb>,
+    pub bright_blue: Option<Rgb>,
+    pub bright_magenta: Option<Rgb>,
+    pub bright_cyan: Option<Rgb>,
+    pub bright_white: Option<Rgb>,
     pub indexed: Option<HashMap<u8, Rgb>>,
+
+    /// Backward compatibility: accept legacy `[colors.palette]` table and fold into flat fields.
+    #[serde(default)]
+    pub palette: Option<LegacyPaletteConfig>,
+}
+
+impl ColorsConfig {
+    pub fn fold_legacy_palette(&mut self) {
+        if let Some(p) = self.palette.take() {
+            if self.black.is_none() {
+                self.black = p.black;
+            }
+            if self.red.is_none() {
+                self.red = p.red;
+            }
+            if self.green.is_none() {
+                self.green = p.green;
+            }
+            if self.yellow.is_none() {
+                self.yellow = p.yellow;
+            }
+            if self.blue.is_none() {
+                self.blue = p.blue;
+            }
+            if self.magenta.is_none() {
+                self.magenta = p.magenta;
+            }
+            if self.cyan.is_none() {
+                self.cyan = p.cyan;
+            }
+            if self.white.is_none() {
+                self.white = p.white;
+            }
+            if self.bright_black.is_none() {
+                self.bright_black = p.bright_black;
+            }
+            if self.bright_red.is_none() {
+                self.bright_red = p.bright_red;
+            }
+            if self.bright_green.is_none() {
+                self.bright_green = p.bright_green;
+            }
+            if self.bright_yellow.is_none() {
+                self.bright_yellow = p.bright_yellow;
+            }
+            if self.bright_blue.is_none() {
+                self.bright_blue = p.bright_blue;
+            }
+            if self.bright_magenta.is_none() {
+                self.bright_magenta = p.bright_magenta;
+            }
+            if self.bright_cyan.is_none() {
+                self.bright_cyan = p.bright_cyan;
+            }
+            if self.bright_white.is_none() {
+                self.bright_white = p.bright_white;
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize, Default)]
@@ -374,27 +448,7 @@ impl Config {
             self.cursor.shape = Some(shape);
         }
 
-        if let Some(fg) = other.colors.foreground {
-            self.colors.foreground = Some(fg);
-        }
-        if let Some(bg) = other.colors.background {
-            self.colors.background = Some(bg);
-        }
-
-        if let Some(other_pal) = other.colors.palette {
-            let pal = self
-                .colors
-                .palette
-                .get_or_insert_with(PaletteConfig::default);
-            include::merge_palette(pal, other_pal);
-        }
-
-        if let Some(other_indexed) = other.colors.indexed {
-            let indexed = self.colors.indexed.get_or_insert_with(HashMap::new);
-            for (k, v) in other_indexed {
-                indexed.insert(k, v);
-            }
-        }
+        include::merge_colors(&mut self.colors, other.colors);
 
         if let Some(lines) = other.scrollback.lines {
             self.scrollback.lines = Some(lines);
@@ -505,55 +559,61 @@ impl Config {
     pub fn build_palette(&self) -> [Rgb; 256] {
         let mut palette = default_256_palette();
 
-        if let Some(p) = &self.colors.palette {
-            if let Some(c) = p.black {
-                palette[0] = c;
-            }
-            if let Some(c) = p.red {
-                palette[1] = c;
-            }
-            if let Some(c) = p.green {
-                palette[2] = c;
-            }
-            if let Some(c) = p.yellow {
-                palette[3] = c;
-            }
-            if let Some(c) = p.blue {
-                palette[4] = c;
-            }
-            if let Some(c) = p.magenta {
-                palette[5] = c;
-            }
-            if let Some(c) = p.cyan {
-                palette[6] = c;
-            }
-            if let Some(c) = p.white {
-                palette[7] = c;
-            }
-            if let Some(c) = p.bright_black {
-                palette[8] = c;
-            }
-            if let Some(c) = p.bright_red {
-                palette[9] = c;
-            }
-            if let Some(c) = p.bright_green {
-                palette[10] = c;
-            }
-            if let Some(c) = p.bright_yellow {
-                palette[11] = c;
-            }
-            if let Some(c) = p.bright_blue {
-                palette[12] = c;
-            }
-            if let Some(c) = p.bright_magenta {
-                palette[13] = c;
-            }
-            if let Some(c) = p.bright_cyan {
-                palette[14] = c;
-            }
-            if let Some(c) = p.bright_white {
-                palette[15] = c;
-            }
+        let c = &self.colors;
+        let leg = c.palette.as_ref();
+        if let Some(col) = c.black.or_else(|| leg.and_then(|p| p.black)) {
+            palette[0] = col;
+        }
+        if let Some(col) = c.red.or_else(|| leg.and_then(|p| p.red)) {
+            palette[1] = col;
+        }
+        if let Some(col) = c.green.or_else(|| leg.and_then(|p| p.green)) {
+            palette[2] = col;
+        }
+        if let Some(col) = c.yellow.or_else(|| leg.and_then(|p| p.yellow)) {
+            palette[3] = col;
+        }
+        if let Some(col) = c.blue.or_else(|| leg.and_then(|p| p.blue)) {
+            palette[4] = col;
+        }
+        if let Some(col) = c.magenta.or_else(|| leg.and_then(|p| p.magenta)) {
+            palette[5] = col;
+        }
+        if let Some(col) = c.cyan.or_else(|| leg.and_then(|p| p.cyan)) {
+            palette[6] = col;
+        }
+        if let Some(col) = c.white.or_else(|| leg.and_then(|p| p.white)) {
+            palette[7] = col;
+        }
+        if let Some(col) = c.bright_black.or_else(|| leg.and_then(|p| p.bright_black)) {
+            palette[8] = col;
+        }
+        if let Some(col) = c.bright_red.or_else(|| leg.and_then(|p| p.bright_red)) {
+            palette[9] = col;
+        }
+        if let Some(col) = c.bright_green.or_else(|| leg.and_then(|p| p.bright_green)) {
+            palette[10] = col;
+        }
+        if let Some(col) = c
+            .bright_yellow
+            .or_else(|| leg.and_then(|p| p.bright_yellow))
+        {
+            palette[11] = col;
+        }
+        if let Some(col) = c.bright_blue.or_else(|| leg.and_then(|p| p.bright_blue)) {
+            palette[12] = col;
+        }
+        if let Some(col) = c
+            .bright_magenta
+            .or_else(|| leg.and_then(|p| p.bright_magenta))
+        {
+            palette[13] = col;
+        }
+        if let Some(col) = c.bright_cyan.or_else(|| leg.and_then(|p| p.bright_cyan)) {
+            palette[14] = col;
+        }
+        if let Some(col) = c.bright_white.or_else(|| leg.and_then(|p| p.bright_white)) {
+            palette[15] = col;
         }
 
         if let Some(indexed) = &self.colors.indexed {
