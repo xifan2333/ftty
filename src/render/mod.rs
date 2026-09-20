@@ -1,4 +1,4 @@
-//! Wayland EGL ownership and batched OpenGL ES 2 terminal rendering.
+//! Wayland EGL ownership and batched OpenGL ES 3 terminal rendering.
 
 pub mod box_drawing;
 pub(crate) mod egl;
