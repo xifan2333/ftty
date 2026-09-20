@@ -11,11 +11,12 @@ pub mod event_loop;
 pub mod font;
 pub mod grid;
 pub mod input;
-pub mod kitty;
 pub mod parser;
-// Audited FFI boundaries: EGL/OpenGL, POSIX PTY, and GNU allocator tuning.
+// Audited FFI boundaries: EGL/OpenGL, POSIX PTY, POSIX SHM mmap, and GNU allocator tuning.
 #[allow(unsafe_code)]
 pub mod alloc;
+#[allow(unsafe_code)]
+pub mod kitty;
 #[allow(unsafe_code)]
 pub mod pty;
 #[allow(unsafe_code)]
