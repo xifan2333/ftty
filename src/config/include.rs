@@ -63,7 +63,10 @@ pub(crate) fn load_internal(path: &Path, visited: &mut HashSet<PathBuf>) -> io::
     Ok(current)
 }
 
-pub(crate) fn merge_colors(dst: &mut ColorsConfig, src: ColorsConfig) {
+pub(crate) fn merge_colors(dst: &mut ColorsConfig, mut src: ColorsConfig) {
+    src.fold_legacy_palette();
+    dst.fold_legacy_palette();
+
     if let Some(c) = src.foreground {
         dst.foreground = Some(c);
     }

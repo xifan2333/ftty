@@ -316,3 +316,21 @@ fn test_flattened_colors_all_ansi_and_indexed() {
     assert_eq!(palette[16], Rgb::new(0xff, 0x00, 0x88));
     assert_eq!(palette[255], Rgb::new(0x11, 0x22, 0x33));
 }
+
+#[test]
+fn test_legacy_palette_subtable_backward_compatibility() {
+    let toml_str = r##"
+    [colors]
+    foreground = "#ffffff"
+    background = "#000000"
+
+    [colors.palette]
+    red = "#ff0000"
+    blue = "#0000ff"
+    "##;
+
+    let config: Config = toml::from_str(toml_str).expect("parse legacy palette toml");
+    let palette = config.build_palette();
+    assert_eq!(palette[1], Rgb::new(255, 0, 0));
+    assert_eq!(palette[4], Rgb::new(0, 0, 255));
+}
