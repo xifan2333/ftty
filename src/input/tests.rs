@@ -253,8 +253,10 @@ fn test_check_action_default_bindings() {
 
     // User override: disabling clipboard_paste with "none" keeps primary_paste (Shift+Insert)
     let custom_paste_config = KeybindingsConfig {
-        clipboard_paste: Some(crate::config::KeyCombos::Single("none".to_string())),
-        ..Default::default()
+        bindings: std::collections::HashMap::from([(
+            "Ctrl+Shift+V".to_string(),
+            crate::config::ActionDef::Simple("none".to_string()),
+        )]),
     };
     handler.update_modifiers(5, 0, 0, 0);
     assert_eq!(handler.check_action(47, &custom_paste_config), None);
@@ -267,18 +269,37 @@ fn test_check_action_default_bindings() {
 
     // User override: disabling primary_paste with "none" disables Shift+Insert
     let custom_primary_config = KeybindingsConfig {
-        primary_paste: Some(crate::config::KeyCombos::Single("none".to_string())),
-        ..Default::default()
+        bindings: std::collections::HashMap::from([(
+            "Shift+Insert".to_string(),
+            crate::config::ActionDef::Simple("none".to_string()),
+        )]),
     };
     assert_eq!(handler.check_action(110, &custom_primary_config), None);
 
     // User override: disabling clipboard_copy with "none"
     let custom_config = KeybindingsConfig {
-        clipboard_copy: Some(crate::config::KeyCombos::Single("none".to_string())),
-        ..Default::default()
+        bindings: std::collections::HashMap::from([(
+            "Ctrl+Shift+C".to_string(),
+            crate::config::ActionDef::Simple("none".to_string()),
+        )]),
     };
     handler.update_modifiers(5, 0, 0, 0);
     assert_eq!(handler.check_action(46, &custom_config), None);
+
+    // Custom pipe action
+    let custom_pipe_config = KeybindingsConfig {
+        bindings: std::collections::HashMap::from([(
+            "Ctrl+Shift+U".to_string(),
+            crate::config::ActionDef::Pipe(crate::config::PipeActionDef::PipeVisible(
+                crate::config::CommandDef::List(vec!["urlscan".to_string()]),
+            )),
+        )]),
+    };
+    handler.update_modifiers(5, 0, 0, 0);
+    assert_eq!(
+        handler.check_action(22, &custom_pipe_config),
+        Some(KeyAction::PipeVisible(vec!["urlscan".to_string()]))
+    );
 }
 
 #[test]

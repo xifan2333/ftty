@@ -509,6 +509,55 @@ impl Grid {
         }
     }
 
+    /// Extracts all text currently displayed in the visible viewport.
+    #[must_use]
+    pub fn extract_visible_text(&self) -> String {
+        let mut result = String::new();
+        for r in 0..self.rows {
+            let row = self.visible_line(r);
+            let mut line_str = String::new();
+            for cell in &row.cells {
+                if !cell
+                    .flags
+                    .intersects(CellFlags::WIDE_CHAR_SPACER | CellFlags::WRAP_SPACER)
+                {
+                    line_str.push(cell.c);
+                }
+            }
+            if row.wrapped {
+                result.push_str(&line_str);
+            } else {
+                result.push_str(line_str.trim_end());
+                result.push('\n');
+            }
+        }
+        result
+    }
+
+    /// Extracts all text from the start of scrollback history through visible screen lines.
+    #[must_use]
+    pub fn extract_scrollback_text(&self) -> String {
+        let mut result = String::new();
+        for row in self.scrollback.iter().chain(self.lines.iter()) {
+            let mut line_str = String::new();
+            for cell in &row.cells {
+                if !cell
+                    .flags
+                    .intersects(CellFlags::WIDE_CHAR_SPACER | CellFlags::WRAP_SPACER)
+                {
+                    line_str.push(cell.c);
+                }
+            }
+            if row.wrapped {
+                result.push_str(&line_str);
+            } else {
+                result.push_str(line_str.trim_end());
+                result.push('\n');
+            }
+        }
+        result
+    }
+
     /// Sets the top and bottom scrolling margins (0-indexed).
     pub fn set_scroll_region(&mut self, top: usize, bottom: usize) {
         let top = top.min(self.rows.saturating_sub(1));

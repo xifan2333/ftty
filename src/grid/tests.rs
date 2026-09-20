@@ -1286,3 +1286,34 @@ fn test_single_oversized_image_rejected_without_exceeding_budget() {
     assert!(!grid.images.contains_key(&999));
     assert_eq!(grid.total_image_bytes(), 0);
 }
+
+#[test]
+fn test_extract_visible_and_scrollback_text() {
+    let mut grid = Grid::new(80, 5, 100);
+    for c in "Line 1 in history".chars() {
+        grid.write_char(
+            c,
+            Color::DefaultForeground,
+            Color::DefaultBackground,
+            CellFlags::empty(),
+        );
+    }
+    grid.scroll_up(1);
+
+    for c in "Line 2 visible".chars() {
+        grid.write_char(
+            c,
+            Color::DefaultForeground,
+            Color::DefaultBackground,
+            CellFlags::empty(),
+        );
+    }
+
+    let visible = grid.extract_visible_text();
+    assert!(visible.contains("Line 2 visible"));
+    assert!(!visible.contains("Line 1 in history"));
+
+    let scrollback = grid.extract_scrollback_text();
+    assert!(scrollback.contains("Line 1 in history"));
+    assert!(scrollback.contains("Line 2 visible"));
+}

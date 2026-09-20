@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::color::{Rgb, default_256_palette};
 use crate::grid::CursorShape;
+use crate::input::{KeyAction, Modifiers, canonicalize_sym, parse_key_combo};
+use xkbcommon::xkb;
 
 pub use include::{Include, default_config_path, resolve_path};
 
@@ -123,50 +125,190 @@ pub struct ClipboardConfig {
     pub allow_osc52_write: Option<bool>,
 }
 
-/// A single key combination string or a list of alternatives.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(untagged)]
-pub enum KeyCombos {
+pub enum CommandDef {
     Single(String),
-    Multiple(Vec<String>),
+    List(Vec<String>),
 }
 
-impl KeyCombos {
+impl CommandDef {
     #[must_use]
-    pub fn to_combos(&self) -> Vec<&str> {
+    pub fn into_vec(self) -> Vec<String> {
         match self {
-            Self::Single(s) => {
-                if s.eq_ignore_ascii_case("none") {
-                    Vec::new()
-                } else {
-                    vec![s.as_str()]
-                }
-            }
-            Self::Multiple(v) => v
-                .iter()
-                .map(String::as_str)
-                .filter(|s| !s.eq_ignore_ascii_case("none"))
-                .collect(),
+            Self::Single(s) => vec!["sh".to_string(), "-c".to_string(), s],
+            Self::List(v) => v,
         }
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PipeActionDef {
+    PipeVisible(CommandDef),
+    PipeScrollback(CommandDef),
+    PipeSelection(CommandDef),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedAction {
+    Action(KeyAction),
+    Unbind,
+    Invalid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum ActionDef {
+    Simple(String),
+    Multiple(Vec<String>),
+    Pipe(PipeActionDef),
+}
+
+impl ActionDef {
+    #[must_use]
+    pub fn to_resolved_action(&self) -> ResolvedAction {
+        match self {
+            Self::Simple(s) => match s.to_ascii_lowercase().as_str() {
+                "scrollback_up_page" => ResolvedAction::Action(KeyAction::ScrollbackUpPage),
+                "scrollback_down_page" => ResolvedAction::Action(KeyAction::ScrollbackDownPage),
+                "scrollback_up_line" => ResolvedAction::Action(KeyAction::ScrollbackUpLine),
+                "scrollback_down_line" => ResolvedAction::Action(KeyAction::ScrollbackDownLine),
+                "scrollback_home" => ResolvedAction::Action(KeyAction::ScrollbackHome),
+                "scrollback_end" => ResolvedAction::Action(KeyAction::ScrollbackEnd),
+                "prompt_prev" => ResolvedAction::Action(KeyAction::PromptPrev),
+                "prompt_next" => ResolvedAction::Action(KeyAction::PromptNext),
+                "font_increase" => ResolvedAction::Action(KeyAction::FontIncrease),
+                "font_decrease" => ResolvedAction::Action(KeyAction::FontDecrease),
+                "font_reset" => ResolvedAction::Action(KeyAction::FontReset),
+                "clipboard_copy" => ResolvedAction::Action(KeyAction::ClipboardCopy),
+                "clipboard_paste" => ResolvedAction::Action(KeyAction::ClipboardPaste),
+                "primary_paste" => ResolvedAction::Action(KeyAction::PrimaryPaste),
+                "none" | "" => ResolvedAction::Unbind,
+                _ => {
+                    eprintln!("ftty: unrecognized keybinding action '{s}'");
+                    ResolvedAction::Invalid
+                }
+            },
+            Self::Multiple(_) => ResolvedAction::Invalid,
+            Self::Pipe(pipe) => match pipe {
+                PipeActionDef::PipeVisible(cmd) => {
+                    ResolvedAction::Action(KeyAction::PipeVisible(cmd.clone().into_vec()))
+                }
+                PipeActionDef::PipeScrollback(cmd) => {
+                    ResolvedAction::Action(KeyAction::PipeScrollback(cmd.clone().into_vec()))
+                }
+                PipeActionDef::PipeSelection(cmd) => {
+                    ResolvedAction::Action(KeyAction::PipeSelection(cmd.clone().into_vec()))
+                }
+            },
+        }
+    }
+}
+
+const KNOWN_ACTIONS: &[&str] = &[
+    "scrollback_up_page",
+    "scrollback_down_page",
+    "scrollback_up_line",
+    "scrollback_down_line",
+    "scrollback_home",
+    "scrollback_end",
+    "prompt_prev",
+    "prompt_next",
+    "font_increase",
+    "font_decrease",
+    "font_reset",
+    "clipboard_copy",
+    "clipboard_paste",
+    "primary_paste",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(transparent)]
 pub struct KeybindingsConfig {
-    pub scrollback_up_page: Option<KeyCombos>,
-    pub scrollback_down_page: Option<KeyCombos>,
-    pub scrollback_up_line: Option<KeyCombos>,
-    pub scrollback_down_line: Option<KeyCombos>,
-    pub scrollback_home: Option<KeyCombos>,
-    pub scrollback_end: Option<KeyCombos>,
-    pub prompt_prev: Option<KeyCombos>,
-    pub prompt_next: Option<KeyCombos>,
-    pub font_increase: Option<KeyCombos>,
-    pub font_decrease: Option<KeyCombos>,
-    pub font_reset: Option<KeyCombos>,
-    pub clipboard_copy: Option<KeyCombos>,
-    pub clipboard_paste: Option<KeyCombos>,
-    pub primary_paste: Option<KeyCombos>,
+    pub bindings: HashMap<String, ActionDef>,
+}
+
+impl KeybindingsConfig {
+    #[must_use]
+    pub fn resolve_bindings_map(&self) -> HashMap<(Modifiers, xkb::Keysym), KeyAction> {
+        let mut map = HashMap::new();
+
+        let defaults = [
+            ("Shift+Page_Up", KeyAction::ScrollbackUpPage),
+            ("Shift+KP_Page_Up", KeyAction::ScrollbackUpPage),
+            ("Shift+Page_Down", KeyAction::ScrollbackDownPage),
+            ("Shift+KP_Page_Down", KeyAction::ScrollbackDownPage),
+            ("Ctrl+Shift+Up", KeyAction::ScrollbackUpLine),
+            ("Ctrl+Shift+Down", KeyAction::ScrollbackDownLine),
+            ("Shift+Home", KeyAction::ScrollbackHome),
+            ("Shift+End", KeyAction::ScrollbackEnd),
+            ("Ctrl+Shift+Z", KeyAction::PromptPrev),
+            ("Ctrl+Shift+X", KeyAction::PromptNext),
+            ("Ctrl+plus", KeyAction::FontIncrease),
+            ("Ctrl+equal", KeyAction::FontIncrease),
+            ("Ctrl+minus", KeyAction::FontDecrease),
+            ("Ctrl+0", KeyAction::FontReset),
+            ("Ctrl+Shift+c", KeyAction::ClipboardCopy),
+            ("Ctrl+Insert", KeyAction::ClipboardCopy),
+            ("Ctrl+Shift+v", KeyAction::ClipboardPaste),
+            ("Shift+Insert", KeyAction::PrimaryPaste),
+        ];
+
+        for (combo_str, action) in defaults {
+            if let Some((mods, sym)) = parse_key_combo(combo_str) {
+                let canonical_sym = canonicalize_sym(sym);
+                map.insert((mods, canonical_sym), action);
+            }
+        }
+
+        for (key_str, def) in &self.bindings {
+            let key_lower = key_str.to_ascii_lowercase();
+            if KNOWN_ACTIONS.contains(&key_lower.as_str()) {
+                let action_res = ActionDef::Simple(key_lower).to_resolved_action();
+                if let ResolvedAction::Action(act) = action_res {
+                    match def {
+                        ActionDef::Simple(c) => {
+                            if let Some((mods, sym)) = parse_key_combo(c) {
+                                let canonical_sym = canonicalize_sym(sym);
+                                map.insert((mods, canonical_sym), act);
+                            }
+                        }
+                        ActionDef::Multiple(combos) => {
+                            for c in combos {
+                                if let Some((mods, sym)) = parse_key_combo(c) {
+                                    let canonical_sym = canonicalize_sym(sym);
+                                    map.insert((mods, canonical_sym), act.clone());
+                                }
+                            }
+                        }
+                        ActionDef::Pipe(_) => {}
+                    }
+                }
+                continue;
+            }
+
+            if let Some((mods, sym)) = parse_key_combo(key_str) {
+                let canonical_sym = canonicalize_sym(sym);
+                match def.to_resolved_action() {
+                    ResolvedAction::Action(action) => {
+                        map.insert((mods, canonical_sym), action);
+                    }
+                    ResolvedAction::Unbind => {
+                        map.remove(&(mods, canonical_sym));
+                    }
+                    ResolvedAction::Invalid => {}
+                }
+            }
+        }
+
+        map
+    }
+
+    #[must_use]
+    pub fn resolve_bindings(&self) -> Vec<((Modifiers, xkb::Keysym), KeyAction)> {
+        self.resolve_bindings_map().into_iter().collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]

@@ -115,47 +115,12 @@ pub(crate) fn merge_palette(dst: &mut PaletteConfig, src: PaletteConfig) {
 }
 
 pub(crate) fn merge_keybindings(dst: &mut KeybindingsConfig, src: KeybindingsConfig) {
-    if let Some(c) = src.scrollback_up_page {
-        dst.scrollback_up_page = Some(c);
-    }
-    if let Some(c) = src.scrollback_down_page {
-        dst.scrollback_down_page = Some(c);
-    }
-    if let Some(c) = src.scrollback_up_line {
-        dst.scrollback_up_line = Some(c);
-    }
-    if let Some(c) = src.scrollback_down_line {
-        dst.scrollback_down_line = Some(c);
-    }
-    if let Some(c) = src.scrollback_home {
-        dst.scrollback_home = Some(c);
-    }
-    if let Some(c) = src.scrollback_end {
-        dst.scrollback_end = Some(c);
-    }
-    if let Some(c) = src.prompt_prev {
-        dst.prompt_prev = Some(c);
-    }
-    if let Some(c) = src.prompt_next {
-        dst.prompt_next = Some(c);
-    }
-    if let Some(c) = src.font_increase {
-        dst.font_increase = Some(c);
-    }
-    if let Some(c) = src.font_decrease {
-        dst.font_decrease = Some(c);
-    }
-    if let Some(c) = src.font_reset {
-        dst.font_reset = Some(c);
-    }
-    if let Some(c) = src.clipboard_copy {
-        dst.clipboard_copy = Some(c);
-    }
-    if let Some(c) = src.clipboard_paste {
-        dst.clipboard_paste = Some(c);
-    }
-    if let Some(c) = src.primary_paste {
-        dst.primary_paste = Some(c);
+    for (src_key, src_val) in src.bindings {
+        if let Some(src_parsed) = crate::input::parse_key_combo(&src_key) {
+            dst.bindings
+                .retain(|dst_key, _| crate::input::parse_key_combo(dst_key) != Some(src_parsed));
+        }
+        dst.bindings.insert(src_key, src_val);
     }
 }
 

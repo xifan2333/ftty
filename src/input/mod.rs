@@ -4,6 +4,7 @@ pub mod ime;
 pub mod mouse;
 pub mod selection;
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::os::fd::OwnedFd;
 use xkbcommon::xkb::{self, Context, KEYMAP_FORMAT_TEXT_V1, Keycode, Keymap, State, keysyms};
@@ -11,7 +12,7 @@ use xkbcommon::xkb::{self, Context, KEYMAP_FORMAT_TEXT_V1, Keycode, Keymap, Stat
 use crate::config::KeybindingsConfig;
 
 /// Semantic actions triggered by key combinations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum KeyAction {
     ScrollbackUpPage,
     ScrollbackDownPage,
@@ -27,10 +28,13 @@ pub enum KeyAction {
     ClipboardCopy,
     ClipboardPaste,
     PrimaryPaste,
+    PipeVisible(Vec<String>),
+    PipeScrollback(Vec<String>),
+    PipeSelection(Vec<String>),
 }
 
 /// Keyboard modifiers state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub struct Modifiers {
     pub ctrl: bool,
     pub alt: bool,
@@ -123,22 +127,15 @@ pub fn parse_key_combo(s: &str) -> Option<(Modifiers, xkb::Keysym)> {
     }
 }
 
-fn sym_matches(pressed: xkb::Keysym, target: xkb::Keysym) -> bool {
-    if pressed == target {
-        return true;
+#[must_use]
+pub fn canonicalize_sym(sym: xkb::Keysym) -> xkb::Keysym {
+    let u = xkb::keysym_to_utf32(sym);
+    if let Some(ch) = char::from_u32(u)
+        && ch.is_ascii_uppercase()
+    {
+        return xkb::utf32_to_keysym(ch.to_ascii_lowercase() as u32);
     }
-    let p_u32 = xkb::keysym_to_utf32(pressed);
-    let t_u32 = xkb::keysym_to_utf32(target);
-    if p_u32 == 0 || t_u32 == 0 {
-        return false;
-    }
-    let p_char = char::from_u32(p_u32);
-    let t_char = char::from_u32(t_u32);
-    if let (Some(p), Some(t)) = (p_char, t_char) {
-        p.eq_ignore_ascii_case(&t)
-    } else {
-        false
-    }
+    sym
 }
 
 /// Flags controlling the Kitty keyboard protocol progressive enhancement.
@@ -158,6 +155,7 @@ pub struct KeyboardHandler {
     state: Option<State>,
     pub kitty_flags: u8,
     pub kitty_stack: Vec<u8>,
+    pub(crate) resolved_bindings: HashMap<(Modifiers, xkb::Keysym), KeyAction>,
 }
 
 impl Default for KeyboardHandler {
@@ -191,6 +189,7 @@ impl KeyboardHandler {
             state,
             kitty_flags: 0,
             kitty_stack: Vec::new(),
+            resolved_bindings: HashMap::new(),
         }
     }
 
@@ -468,6 +467,11 @@ impl KeyboardHandler {
         }
     }
 
+    /// Pre-compiles and caches resolved keybindings for constant-time key action dispatch.
+    pub fn update_keybindings(&mut self, config: &KeybindingsConfig) {
+        self.resolved_bindings = config.resolve_bindings_map();
+    }
+
     /// Checks if a keycode matches an action in `KeybindingsConfig`.
     #[must_use]
     pub fn check_action(&self, key: u32, config: &KeybindingsConfig) -> Option<KeyAction> {
@@ -475,99 +479,35 @@ impl KeyboardHandler {
         let keycode = Keycode::new(key + 8);
         let sym = state.key_get_one_sym(keycode);
         let current_mods = self.modifiers();
+        let canonical_sym = canonicalize_sym(sym);
 
-        let bindings = [
-            (
-                KeyAction::ScrollbackUpPage,
-                config.scrollback_up_page.as_ref(),
-                &["Shift+PageUp", "Shift+KP_PageUp"][..],
-            ),
-            (
-                KeyAction::ScrollbackDownPage,
-                config.scrollback_down_page.as_ref(),
-                &["Shift+PageDown", "Shift+KP_PageDown"][..],
-            ),
-            (
-                KeyAction::ScrollbackUpLine,
-                config.scrollback_up_line.as_ref(),
-                &["Ctrl+Shift+Up"][..],
-            ),
-            (
-                KeyAction::ScrollbackDownLine,
-                config.scrollback_down_line.as_ref(),
-                &["Ctrl+Shift+Down"][..],
-            ),
-            (
-                KeyAction::ScrollbackHome,
-                config.scrollback_home.as_ref(),
-                &["Shift+Home"][..],
-            ),
-            (
-                KeyAction::ScrollbackEnd,
-                config.scrollback_end.as_ref(),
-                &["Shift+End"][..],
-            ),
-            (
-                KeyAction::PromptPrev,
-                config.prompt_prev.as_ref(),
-                &["Ctrl+Shift+Z"][..],
-            ),
-            (
-                KeyAction::PromptNext,
-                config.prompt_next.as_ref(),
-                &["Ctrl+Shift+X"][..],
-            ),
-            (
-                KeyAction::FontIncrease,
-                config.font_increase.as_ref(),
-                &["Ctrl+Plus", "Ctrl+Equal"][..],
-            ),
-            (
-                KeyAction::FontDecrease,
-                config.font_decrease.as_ref(),
-                &["Ctrl+Minus"][..],
-            ),
-            (
-                KeyAction::FontReset,
-                config.font_reset.as_ref(),
-                &["Ctrl+0"][..],
-            ),
-            (
-                KeyAction::ClipboardCopy,
-                config.clipboard_copy.as_ref(),
-                &["Ctrl+Shift+C", "Ctrl+Insert"][..],
-            ),
-            (
-                KeyAction::ClipboardPaste,
-                config.clipboard_paste.as_ref(),
-                &["Ctrl+Shift+V"][..],
-            ),
-            (
-                KeyAction::PrimaryPaste,
-                config.primary_paste.as_ref(),
-                &["Shift+Insert"][..],
-            ),
-        ];
+        let get_action = |mods: Modifiers, s: xkb::Keysym| -> Option<KeyAction> {
+            if !self.resolved_bindings.is_empty() {
+                self.resolved_bindings.get(&(mods, s)).cloned()
+            } else {
+                let map = config.resolve_bindings_map();
+                map.get(&(mods, s)).cloned()
+            }
+        };
 
-        for (action, configured, defaults) in bindings {
-            let combos: Vec<&str> = match configured {
-                Some(c) => c.to_combos(),
-                None => defaults.to_vec(),
-            };
+        if let Some(action) = get_action(current_mods, canonical_sym) {
+            return Some(action);
+        }
 
-            for combo_str in combos {
-                if let Some((target_mods, target_sym)) = parse_key_combo(combo_str)
-                    && current_mods.ctrl == target_mods.ctrl
-                    && current_mods.alt == target_mods.alt
-                    && current_mods.logo == target_mods.logo
-                    && (current_mods.shift == target_mods.shift
-                        || (!target_mods.shift
-                            && current_mods.shift
-                            && target_sym == xkb::Keysym::new(keysyms::KEY_plus)))
-                    && sym_matches(sym, target_sym)
-                {
-                    return Some(action);
-                }
+        if canonical_sym != sym
+            && let Some(action) = get_action(current_mods, sym)
+        {
+            return Some(action);
+        }
+
+        if current_mods.shift
+            && (sym == xkb::Keysym::new(keysyms::KEY_plus)
+                || canonical_sym == xkb::Keysym::new(keysyms::KEY_plus))
+        {
+            let mut unshifted = current_mods;
+            unshifted.shift = false;
+            if let Some(action) = get_action(unshifted, xkb::Keysym::new(keysyms::KEY_plus)) {
+                return Some(action);
             }
         }
 

@@ -55,8 +55,9 @@ allow_osc52_read = false
 allow_osc52_write = true
 
 [keybindings]
-prompt_prev = ["Ctrl+Shift+Z"]
-prompt_next = ["Ctrl+Shift+X"]
+"Ctrl+Shift+Z" = "prompt_prev"
+"Ctrl+Shift+X" = "prompt_next"
+"Ctrl+Shift+U" = { pipe_visible = ["urlscan"] }
 ```
 
 ---
