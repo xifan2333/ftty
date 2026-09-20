@@ -33,8 +33,6 @@ fn test_parse_basic_toml() {
     [colors]
     foreground = "#ffffff"
     background = "#000000"
-
-    [colors.palette]
     red = "#ff0000"
     bright_red = "#ff5555"
     "##;
@@ -159,8 +157,6 @@ fn test_include_merging_and_override() {
         [colors]
         foreground = "#aaaaaa"
         background = "#111111"
-
-        [colors.palette]
         blue = "#0000ff"
         "##,
     )
@@ -266,4 +262,57 @@ fn test_clipboard_security_config() {
     inc.clipboard.allow_osc52_read = Some(true);
     base.merge(inc);
     assert!(base.allow_osc52_read());
+}
+
+#[test]
+fn test_flattened_colors_all_ansi_and_indexed() {
+    let toml_str = r##"
+    [colors]
+    foreground = "#dcdcdc"
+    background = "#181818"
+    black = "#000000"
+    red = "#cc0403"
+    green = "#19cb00"
+    yellow = "#cecb00"
+    blue = "#0d73cc"
+    magenta = "#cb1ed1"
+    cyan = "#0dcdcd"
+    white = "#e5e5e5"
+    bright_black = "#767676"
+    bright_red = "#f2201f"
+    bright_green = "#23fd00"
+    bright_yellow = "#fffd00"
+    bright_blue = "#1a8fff"
+    bright_magenta = "#fd28ff"
+    bright_cyan = "#14ffff"
+    bright_white = "#ffffff"
+
+    [colors.indexed]
+    16 = "#ff0088"
+    255 = "#112233"
+    "##;
+
+    let config: Config = toml::from_str(toml_str).expect("parse flat colors toml");
+    assert_eq!(config.foreground(), Rgb::new(0xdc, 0xdc, 0xdc));
+    assert_eq!(config.background(), Rgb::new(0x18, 0x18, 0x18));
+
+    let palette = config.build_palette();
+    assert_eq!(palette[0], Rgb::new(0, 0, 0));
+    assert_eq!(palette[1], Rgb::new(0xcc, 0x04, 0x03));
+    assert_eq!(palette[2], Rgb::new(0x19, 0xcb, 0x00));
+    assert_eq!(palette[3], Rgb::new(0xce, 0xcb, 0x00));
+    assert_eq!(palette[4], Rgb::new(0x0d, 0x73, 0xcc));
+    assert_eq!(palette[5], Rgb::new(0xcb, 0x1e, 0xd1));
+    assert_eq!(palette[6], Rgb::new(0x0d, 0xcd, 0xcd));
+    assert_eq!(palette[7], Rgb::new(0xe5, 0xe5, 0xe5));
+    assert_eq!(palette[8], Rgb::new(0x76, 0x76, 0x76));
+    assert_eq!(palette[9], Rgb::new(0xf2, 0x20, 0x1f));
+    assert_eq!(palette[10], Rgb::new(0x23, 0xfd, 0x00));
+    assert_eq!(palette[11], Rgb::new(0xff, 0xfd, 0x00));
+    assert_eq!(palette[12], Rgb::new(0x1a, 0x8f, 0xff));
+    assert_eq!(palette[13], Rgb::new(0xfd, 0x28, 0xff));
+    assert_eq!(palette[14], Rgb::new(0x14, 0xff, 0xff));
+    assert_eq!(palette[15], Rgb::new(0xff, 0xff, 0xff));
+    assert_eq!(palette[16], Rgb::new(0xff, 0x00, 0x88));
+    assert_eq!(palette[255], Rgb::new(0x11, 0x22, 0x33));
 }

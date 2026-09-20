@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{Config, KeybindingsConfig, PaletteConfig};
+use crate::config::{ColorsConfig, Config, KeybindingsConfig};
 
 /// Flexible include directive accepting either a single string or an array of strings.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -63,7 +63,13 @@ pub(crate) fn load_internal(path: &Path, visited: &mut HashSet<PathBuf>) -> io::
     Ok(current)
 }
 
-pub(crate) fn merge_palette(dst: &mut PaletteConfig, src: PaletteConfig) {
+pub(crate) fn merge_colors(dst: &mut ColorsConfig, src: ColorsConfig) {
+    if let Some(c) = src.foreground {
+        dst.foreground = Some(c);
+    }
+    if let Some(c) = src.background {
+        dst.background = Some(c);
+    }
     if let Some(c) = src.black {
         dst.black = Some(c);
     }
@@ -111,6 +117,14 @@ pub(crate) fn merge_palette(dst: &mut PaletteConfig, src: PaletteConfig) {
     }
     if let Some(c) = src.bright_white {
         dst.bright_white = Some(c);
+    }
+    if let Some(other_indexed) = src.indexed {
+        let indexed = dst
+            .indexed
+            .get_or_insert_with(std::collections::HashMap::new);
+        for (k, v) in other_indexed {
+            indexed.insert(k, v);
+        }
     }
 }
 
