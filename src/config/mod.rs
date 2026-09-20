@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::color::{Rgb, default_256_palette};
 use crate::grid::CursorShape;
-use crate::input::{KeyAction, Modifiers, parse_key_combo};
+use crate::input::{KeyAction, Modifiers, canonicalize_sym, parse_key_combo};
 use xkbcommon::xkb;
 
 pub use include::{Include, default_config_path, resolve_path};
@@ -231,7 +231,7 @@ pub struct KeybindingsConfig {
 
 impl KeybindingsConfig {
     #[must_use]
-    pub fn resolve_bindings(&self) -> Vec<((Modifiers, xkb::Keysym), KeyAction)> {
+    pub fn resolve_bindings_map(&self) -> HashMap<(Modifiers, xkb::Keysym), KeyAction> {
         let mut map = HashMap::new();
 
         let defaults = [
@@ -256,8 +256,9 @@ impl KeybindingsConfig {
         ];
 
         for (combo_str, action) in defaults {
-            if let Some(parsed) = parse_key_combo(combo_str) {
-                map.insert(parsed, action);
+            if let Some((mods, sym)) = parse_key_combo(combo_str) {
+                let canonical_sym = canonicalize_sym(sym);
+                map.insert((mods, canonical_sym), action);
             }
         }
 
@@ -268,14 +269,16 @@ impl KeybindingsConfig {
                 if let ResolvedAction::Action(act) = action_res {
                     match def {
                         ActionDef::Simple(c) => {
-                            if let Some(parsed) = parse_key_combo(c) {
-                                map.insert(parsed, act);
+                            if let Some((mods, sym)) = parse_key_combo(c) {
+                                let canonical_sym = canonicalize_sym(sym);
+                                map.insert((mods, canonical_sym), act);
                             }
                         }
                         ActionDef::Multiple(combos) => {
                             for c in combos {
-                                if let Some(parsed) = parse_key_combo(c) {
-                                    map.insert(parsed, act.clone());
+                                if let Some((mods, sym)) = parse_key_combo(c) {
+                                    let canonical_sym = canonicalize_sym(sym);
+                                    map.insert((mods, canonical_sym), act.clone());
                                 }
                             }
                         }
@@ -285,20 +288,26 @@ impl KeybindingsConfig {
                 continue;
             }
 
-            if let Some(parsed) = parse_key_combo(key_str) {
+            if let Some((mods, sym)) = parse_key_combo(key_str) {
+                let canonical_sym = canonicalize_sym(sym);
                 match def.to_resolved_action() {
                     ResolvedAction::Action(action) => {
-                        map.insert(parsed, action);
+                        map.insert((mods, canonical_sym), action);
                     }
                     ResolvedAction::Unbind => {
-                        map.remove(&parsed);
+                        map.remove(&(mods, canonical_sym));
                     }
                     ResolvedAction::Invalid => {}
                 }
             }
         }
 
-        map.into_iter().collect()
+        map
+    }
+
+    #[must_use]
+    pub fn resolve_bindings(&self) -> Vec<((Modifiers, xkb::Keysym), KeyAction)> {
+        self.resolve_bindings_map().into_iter().collect()
     }
 }
 

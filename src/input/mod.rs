@@ -4,6 +4,7 @@ pub mod ime;
 pub mod mouse;
 pub mod selection;
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::os::fd::OwnedFd;
 use xkbcommon::xkb::{self, Context, KEYMAP_FORMAT_TEXT_V1, Keycode, Keymap, State, keysyms};
@@ -126,22 +127,15 @@ pub fn parse_key_combo(s: &str) -> Option<(Modifiers, xkb::Keysym)> {
     }
 }
 
-fn sym_matches(pressed: xkb::Keysym, target: xkb::Keysym) -> bool {
-    if pressed == target {
-        return true;
+#[must_use]
+pub fn canonicalize_sym(sym: xkb::Keysym) -> xkb::Keysym {
+    let u = xkb::keysym_to_utf32(sym);
+    if let Some(ch) = char::from_u32(u)
+        && ch.is_ascii_uppercase()
+    {
+        return xkb::utf32_to_keysym(ch.to_ascii_lowercase() as u32);
     }
-    let p_u32 = xkb::keysym_to_utf32(pressed);
-    let t_u32 = xkb::keysym_to_utf32(target);
-    if p_u32 == 0 || t_u32 == 0 {
-        return false;
-    }
-    let p_char = char::from_u32(p_u32);
-    let t_char = char::from_u32(t_u32);
-    if let (Some(p), Some(t)) = (p_char, t_char) {
-        p.eq_ignore_ascii_case(&t)
-    } else {
-        false
-    }
+    sym
 }
 
 /// Flags controlling the Kitty keyboard protocol progressive enhancement.
@@ -161,7 +155,7 @@ pub struct KeyboardHandler {
     state: Option<State>,
     pub kitty_flags: u8,
     pub kitty_stack: Vec<u8>,
-    pub(crate) resolved_bindings: Vec<((Modifiers, xkb::Keysym), KeyAction)>,
+    pub(crate) resolved_bindings: HashMap<(Modifiers, xkb::Keysym), KeyAction>,
 }
 
 impl Default for KeyboardHandler {
@@ -195,7 +189,7 @@ impl KeyboardHandler {
             state,
             kitty_flags: 0,
             kitty_stack: Vec::new(),
-            resolved_bindings: Vec::new(),
+            resolved_bindings: HashMap::new(),
         }
     }
 
@@ -475,7 +469,7 @@ impl KeyboardHandler {
 
     /// Pre-compiles and caches resolved keybindings for constant-time key action dispatch.
     pub fn update_keybindings(&mut self, config: &KeybindingsConfig) {
-        self.resolved_bindings = config.resolve_bindings();
+        self.resolved_bindings = config.resolve_bindings_map();
     }
 
     /// Checks if a keycode matches an action in `KeybindingsConfig`.
@@ -485,28 +479,35 @@ impl KeyboardHandler {
         let keycode = Keycode::new(key + 8);
         let sym = state.key_get_one_sym(keycode);
         let current_mods = self.modifiers();
+        let canonical_sym = canonicalize_sym(sym);
 
-        let bindings_borrow: &Vec<((Modifiers, xkb::Keysym), KeyAction)>;
-        let temp_bindings;
-        let bindings = if !self.resolved_bindings.is_empty() {
-            &self.resolved_bindings
-        } else {
-            temp_bindings = config.resolve_bindings();
-            bindings_borrow = &temp_bindings;
-            bindings_borrow
+        let get_action = |mods: Modifiers, s: xkb::Keysym| -> Option<KeyAction> {
+            if !self.resolved_bindings.is_empty() {
+                self.resolved_bindings.get(&(mods, s)).cloned()
+            } else {
+                let map = config.resolve_bindings_map();
+                map.get(&(mods, s)).cloned()
+            }
         };
 
-        for ((target_mods, target_sym), action) in bindings {
-            if current_mods.ctrl == target_mods.ctrl
-                && current_mods.alt == target_mods.alt
-                && current_mods.logo == target_mods.logo
-                && (current_mods.shift == target_mods.shift
-                    || (!target_mods.shift
-                        && current_mods.shift
-                        && *target_sym == xkb::Keysym::new(keysyms::KEY_plus)))
-                && sym_matches(sym, *target_sym)
-            {
-                return Some(action.clone());
+        if let Some(action) = get_action(current_mods, canonical_sym) {
+            return Some(action);
+        }
+
+        if canonical_sym != sym
+            && let Some(action) = get_action(current_mods, sym)
+        {
+            return Some(action);
+        }
+
+        if current_mods.shift
+            && (sym == xkb::Keysym::new(keysyms::KEY_plus)
+                || canonical_sym == xkb::Keysym::new(keysyms::KEY_plus))
+        {
+            let mut unshifted = current_mods;
+            unshifted.shift = false;
+            if let Some(action) = get_action(unshifted, xkb::Keysym::new(keysyms::KEY_plus)) {
+                return Some(action);
             }
         }
 
