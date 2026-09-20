@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::color::{Rgb, default_256_palette};
 use crate::grid::CursorShape;
+use crate::input::{KeyAction, Modifiers, parse_key_combo};
+use xkbcommon::xkb;
 
 pub use include::{Include, default_config_path, resolve_path};
 
@@ -123,50 +125,125 @@ pub struct ClipboardConfig {
     pub allow_osc52_write: Option<bool>,
 }
 
-/// A single key combination string or a list of alternatives.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(untagged)]
-pub enum KeyCombos {
+pub enum CommandDef {
     Single(String),
-    Multiple(Vec<String>),
+    List(Vec<String>),
 }
 
-impl KeyCombos {
+impl CommandDef {
     #[must_use]
-    pub fn to_combos(&self) -> Vec<&str> {
+    pub fn into_vec(self) -> Vec<String> {
         match self {
-            Self::Single(s) => {
-                if s.eq_ignore_ascii_case("none") {
-                    Vec::new()
-                } else {
-                    vec![s.as_str()]
+            Self::Single(s) => vec!["sh".to_string(), "-c".to_string(), s],
+            Self::List(v) => v,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PipeActionDef {
+    PipeVisible(CommandDef),
+    PipeScrollback(CommandDef),
+    PipeSelection(CommandDef),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum ActionDef {
+    Simple(String),
+    Pipe(PipeActionDef),
+}
+
+impl ActionDef {
+    #[must_use]
+    pub fn to_key_action(&self) -> Option<KeyAction> {
+        match self {
+            Self::Simple(s) => match s.to_ascii_lowercase().as_str() {
+                "scrollback_up_page" => Some(KeyAction::ScrollbackUpPage),
+                "scrollback_down_page" => Some(KeyAction::ScrollbackDownPage),
+                "scrollback_up_line" => Some(KeyAction::ScrollbackUpLine),
+                "scrollback_down_line" => Some(KeyAction::ScrollbackDownLine),
+                "scrollback_home" => Some(KeyAction::ScrollbackHome),
+                "scrollback_end" => Some(KeyAction::ScrollbackEnd),
+                "prompt_prev" => Some(KeyAction::PromptPrev),
+                "prompt_next" => Some(KeyAction::PromptNext),
+                "font_increase" => Some(KeyAction::FontIncrease),
+                "font_decrease" => Some(KeyAction::FontDecrease),
+                "font_reset" => Some(KeyAction::FontReset),
+                "clipboard_copy" => Some(KeyAction::ClipboardCopy),
+                "clipboard_paste" => Some(KeyAction::ClipboardPaste),
+                "primary_paste" => Some(KeyAction::PrimaryPaste),
+                "none" | "" => None,
+                _ => None,
+            },
+            Self::Pipe(pipe) => match pipe {
+                PipeActionDef::PipeVisible(cmd) => {
+                    Some(KeyAction::PipeVisible(cmd.clone().into_vec()))
                 }
-            }
-            Self::Multiple(v) => v
-                .iter()
-                .map(String::as_str)
-                .filter(|s| !s.eq_ignore_ascii_case("none"))
-                .collect(),
+                PipeActionDef::PipeScrollback(cmd) => {
+                    Some(KeyAction::PipeScrollback(cmd.clone().into_vec()))
+                }
+                PipeActionDef::PipeSelection(cmd) => {
+                    Some(KeyAction::PipeSelection(cmd.clone().into_vec()))
+                }
+            },
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(transparent)]
 pub struct KeybindingsConfig {
-    pub scrollback_up_page: Option<KeyCombos>,
-    pub scrollback_down_page: Option<KeyCombos>,
-    pub scrollback_up_line: Option<KeyCombos>,
-    pub scrollback_down_line: Option<KeyCombos>,
-    pub scrollback_home: Option<KeyCombos>,
-    pub scrollback_end: Option<KeyCombos>,
-    pub prompt_prev: Option<KeyCombos>,
-    pub prompt_next: Option<KeyCombos>,
-    pub font_increase: Option<KeyCombos>,
-    pub font_decrease: Option<KeyCombos>,
-    pub font_reset: Option<KeyCombos>,
-    pub clipboard_copy: Option<KeyCombos>,
-    pub clipboard_paste: Option<KeyCombos>,
-    pub primary_paste: Option<KeyCombos>,
+    pub bindings: HashMap<String, ActionDef>,
+}
+
+impl KeybindingsConfig {
+    #[must_use]
+    pub fn resolve_bindings(&self) -> Vec<((Modifiers, xkb::Keysym), KeyAction)> {
+        let mut map = HashMap::new();
+
+        let defaults = [
+            ("Shift+Page_Up", KeyAction::ScrollbackUpPage),
+            ("Shift+KP_Page_Up", KeyAction::ScrollbackUpPage),
+            ("Shift+Page_Down", KeyAction::ScrollbackDownPage),
+            ("Shift+KP_Page_Down", KeyAction::ScrollbackDownPage),
+            ("Ctrl+Shift+Up", KeyAction::ScrollbackUpLine),
+            ("Ctrl+Shift+Down", KeyAction::ScrollbackDownLine),
+            ("Shift+Home", KeyAction::ScrollbackHome),
+            ("Shift+End", KeyAction::ScrollbackEnd),
+            ("Ctrl+Shift+Z", KeyAction::PromptPrev),
+            ("Ctrl+Shift+X", KeyAction::PromptNext),
+            ("Ctrl+plus", KeyAction::FontIncrease),
+            ("Ctrl+equal", KeyAction::FontIncrease),
+            ("Ctrl+minus", KeyAction::FontDecrease),
+            ("Ctrl+0", KeyAction::FontReset),
+            ("Ctrl+Shift+c", KeyAction::ClipboardCopy),
+            ("Ctrl+Insert", KeyAction::ClipboardCopy),
+            ("Ctrl+Shift+v", KeyAction::ClipboardPaste),
+            ("Shift+Insert", KeyAction::PrimaryPaste),
+        ];
+
+        for (combo_str, action) in defaults {
+            if let Some(parsed) = parse_key_combo(combo_str) {
+                map.insert(parsed, action);
+            }
+        }
+
+        for (combo_str, def) in &self.bindings {
+            if let Some(parsed) = parse_key_combo(combo_str) {
+                if let Some(action) = def.to_key_action() {
+                    map.insert(parsed, action);
+                } else {
+                    map.remove(&parsed);
+                }
+            }
+        }
+
+        map.into_iter().collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]

@@ -1,5 +1,7 @@
 use std::fs;
 
+use xkbcommon::xkb;
+
 use crate::color::Rgb;
 use crate::config::Config;
 use crate::grid::CursorShape;
@@ -97,10 +99,14 @@ fn test_parse_scrollback_and_keybindings() {
     auto_scroll = false
 
     [keybindings]
-    scrollback_up_page = ["Shift+PageUp", "Shift+KP_PageUp"]
-    scrollback_down_page = "Shift+PageDown"
-    clipboard_copy = "Ctrl+Shift+C"
-    clipboard_paste = "none"
+    "Shift+PageUp" = "scrollback_up_page"
+    "Shift+KP_PageUp" = "scrollback_up_page"
+    "Shift+PageDown" = "scrollback_down_page"
+    "Ctrl+Shift+C" = "clipboard_copy"
+    "Ctrl+Shift+V" = "none"
+    "Ctrl+Shift+U" = { pipe_visible = ["urlscan"] }
+    "Ctrl+Shift+F" = { pipe_scrollback = ["sh", "-c", "fzf | wl-copy"] }
+    "Ctrl+Shift+Y" = { pipe_selection = "wl-copy" }
     "##;
 
     let config: Config = toml::from_str(toml_str).expect("parse toml");
@@ -108,14 +114,37 @@ fn test_parse_scrollback_and_keybindings() {
     assert_eq!(config.scroll_multiplier(), 5.5);
     assert!(!config.auto_scroll());
 
-    let up_combos = config.keybindings.scrollback_up_page.unwrap();
+    let resolved = config.keybindings.resolve_bindings();
+    let pipe_u = resolved.iter().find(|((_, sym), _)| {
+        *sym == xkb::Keysym::new(xkb::keysyms::KEY_u)
+            || *sym == xkb::Keysym::new(xkb::keysyms::KEY_U)
+    });
+    assert!(pipe_u.is_some());
     assert_eq!(
-        up_combos.to_combos(),
-        vec!["Shift+PageUp", "Shift+KP_PageUp"]
+        pipe_u.unwrap().1,
+        crate::input::KeyAction::PipeVisible(vec!["urlscan".to_string()])
     );
 
-    let paste_combos = config.keybindings.clipboard_paste.unwrap();
-    assert_eq!(paste_combos.to_combos(), Vec::<&str>::new());
+    let pipe_y = resolved.iter().find(|((_, sym), _)| {
+        *sym == xkb::Keysym::new(xkb::keysyms::KEY_y)
+            || *sym == xkb::Keysym::new(xkb::keysyms::KEY_Y)
+    });
+    assert!(pipe_y.is_some());
+    assert_eq!(
+        pipe_y.unwrap().1,
+        crate::input::KeyAction::PipeSelection(vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "wl-copy".to_string()
+        ])
+    );
+
+    // Verify unbind "none" removed Ctrl+Shift+V
+    let paste = resolved.iter().find(|((_, sym), _)| {
+        *sym == xkb::Keysym::new(xkb::keysyms::KEY_v)
+            || *sym == xkb::Keysym::new(xkb::keysyms::KEY_V)
+    });
+    assert!(paste.is_none());
 }
 
 #[test]
@@ -199,19 +228,22 @@ fn test_parse_font_size_and_family() {
 fn test_include_keybindings_prompt_navigation() {
     let mut base = Config::default();
     let mut inc = Config::default();
-    inc.keybindings.prompt_prev =
-        Some(crate::config::KeyCombos::Single("Ctrl+Shift+K".to_string()));
-    inc.keybindings.prompt_next =
-        Some(crate::config::KeyCombos::Single("Ctrl+Shift+J".to_string()));
+    inc.keybindings.bindings.insert(
+        "Ctrl+Shift+K".to_string(),
+        crate::config::ActionDef::Simple("prompt_prev".to_string()),
+    );
+    inc.keybindings.bindings.insert(
+        "Ctrl+Shift+J".to_string(),
+        crate::config::ActionDef::Simple("prompt_next".to_string()),
+    );
     base.merge(inc);
-    assert_eq!(
-        base.keybindings.prompt_prev.unwrap().to_combos(),
-        vec!["Ctrl+Shift+K"]
-    );
-    assert_eq!(
-        base.keybindings.prompt_next.unwrap().to_combos(),
-        vec!["Ctrl+Shift+J"]
-    );
+    let resolved = base.keybindings.resolve_bindings();
+    let prev = resolved.iter().find(|((_, sym), _)| {
+        *sym == xkb::Keysym::new(xkb::keysyms::KEY_k)
+            || *sym == xkb::Keysym::new(xkb::keysyms::KEY_K)
+    });
+    assert!(prev.is_some());
+    assert_eq!(prev.unwrap().1, crate::input::KeyAction::PromptPrev);
 }
 
 #[test]

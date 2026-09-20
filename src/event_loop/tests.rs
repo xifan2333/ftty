@@ -297,6 +297,48 @@ fn test_copy_and_paste_clipboard() {
 }
 
 #[test]
+fn test_pipe_visible_action_execution() {
+    use crate::color::Color;
+    use crate::grid::CellFlags;
+
+    let term = Terminal::new(80, 24, 100);
+    let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
+    let mut app = AppState::new(term, pty).expect("AppState new");
+
+    for c in "ftty_pipe_test".chars() {
+        app.terminal.grid.write_char(
+            c,
+            Color::DefaultForeground,
+            Color::DefaultBackground,
+            CellFlags::empty(),
+        );
+    }
+
+    let temp_file = std::env::temp_dir().join(format!("ftty_pipe_out_{}", std::process::id()));
+    let out_path = temp_file.to_string_lossy().to_string();
+
+    let cmd = vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        format!("cat > '{out_path}'"),
+    ];
+    app.handle_key_action(KeyAction::PipeVisible(cmd), None, None);
+
+    let mut success = false;
+    for _ in 0..50 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        if let Ok(content) = std::fs::read_to_string(&temp_file)
+            && content.contains("ftty_pipe_test")
+        {
+            success = true;
+            break;
+        }
+    }
+    let _ = std::fs::remove_file(&temp_file);
+    assert!(success, "piped output must contain 'ftty_pipe_test'");
+}
+
+#[test]
 fn x11_buttons_map_to_protocol_indexes() {
     use crate::wayland::seat::x11_button_index;
 

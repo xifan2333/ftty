@@ -186,7 +186,54 @@ impl AppState {
             KeyAction::ClipboardPaste | KeyAction::PrimaryPaste => {
                 self.paste_clipboard(conn);
             }
+            KeyAction::PipeVisible(cmd) => {
+                let text = self.terminal.grid.extract_visible_text();
+                Self::spawn_pipe_async(cmd, text);
+            }
+            KeyAction::PipeScrollback(cmd) => {
+                let text = self.terminal.grid.extract_scrollback_text();
+                Self::spawn_pipe_async(cmd, text);
+            }
+            KeyAction::PipeSelection(cmd) => {
+                let text = self.selection.extract_text(&self.terminal.grid);
+                if !text.is_empty() {
+                    Self::spawn_pipe_async(cmd, text);
+                }
+            }
         }
+    }
+
+    pub(crate) fn spawn_pipe_async(cmd: Vec<String>, text: String) {
+        if cmd.is_empty() {
+            return;
+        }
+        std::thread::spawn(move || {
+            let (program, args) = match cmd.split_first() {
+                Some((prog, args)) => (prog, args),
+                None => return,
+            };
+            let mut child = match std::process::Command::new(program)
+                .args(args)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::inherit())
+                .spawn()
+            {
+                Ok(child) => child,
+                Err(e) => {
+                    eprintln!("ftty: failed to spawn pipe command '{program}': {e}");
+                    return;
+                }
+            };
+
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write;
+                let _ = stdin.write_all(text.as_bytes());
+                let _ = stdin.flush();
+                drop(stdin);
+            }
+            let _ = child.wait();
+        });
     }
 
     /// Sets the logical font size and updates font metrics scaled by the active display factor.

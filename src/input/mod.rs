@@ -11,7 +11,7 @@ use xkbcommon::xkb::{self, Context, KEYMAP_FORMAT_TEXT_V1, Keycode, Keymap, Stat
 use crate::config::KeybindingsConfig;
 
 /// Semantic actions triggered by key combinations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum KeyAction {
     ScrollbackUpPage,
     ScrollbackDownPage,
@@ -27,10 +27,13 @@ pub enum KeyAction {
     ClipboardCopy,
     ClipboardPaste,
     PrimaryPaste,
+    PipeVisible(Vec<String>),
+    PipeScrollback(Vec<String>),
+    PipeSelection(Vec<String>),
 }
 
 /// Keyboard modifiers state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub struct Modifiers {
     pub ctrl: bool,
     pub alt: bool,
@@ -476,98 +479,18 @@ impl KeyboardHandler {
         let sym = state.key_get_one_sym(keycode);
         let current_mods = self.modifiers();
 
-        let bindings = [
-            (
-                KeyAction::ScrollbackUpPage,
-                config.scrollback_up_page.as_ref(),
-                &["Shift+PageUp", "Shift+KP_PageUp"][..],
-            ),
-            (
-                KeyAction::ScrollbackDownPage,
-                config.scrollback_down_page.as_ref(),
-                &["Shift+PageDown", "Shift+KP_PageDown"][..],
-            ),
-            (
-                KeyAction::ScrollbackUpLine,
-                config.scrollback_up_line.as_ref(),
-                &["Ctrl+Shift+Up"][..],
-            ),
-            (
-                KeyAction::ScrollbackDownLine,
-                config.scrollback_down_line.as_ref(),
-                &["Ctrl+Shift+Down"][..],
-            ),
-            (
-                KeyAction::ScrollbackHome,
-                config.scrollback_home.as_ref(),
-                &["Shift+Home"][..],
-            ),
-            (
-                KeyAction::ScrollbackEnd,
-                config.scrollback_end.as_ref(),
-                &["Shift+End"][..],
-            ),
-            (
-                KeyAction::PromptPrev,
-                config.prompt_prev.as_ref(),
-                &["Ctrl+Shift+Z"][..],
-            ),
-            (
-                KeyAction::PromptNext,
-                config.prompt_next.as_ref(),
-                &["Ctrl+Shift+X"][..],
-            ),
-            (
-                KeyAction::FontIncrease,
-                config.font_increase.as_ref(),
-                &["Ctrl+Plus", "Ctrl+Equal"][..],
-            ),
-            (
-                KeyAction::FontDecrease,
-                config.font_decrease.as_ref(),
-                &["Ctrl+Minus"][..],
-            ),
-            (
-                KeyAction::FontReset,
-                config.font_reset.as_ref(),
-                &["Ctrl+0"][..],
-            ),
-            (
-                KeyAction::ClipboardCopy,
-                config.clipboard_copy.as_ref(),
-                &["Ctrl+Shift+C", "Ctrl+Insert"][..],
-            ),
-            (
-                KeyAction::ClipboardPaste,
-                config.clipboard_paste.as_ref(),
-                &["Ctrl+Shift+V"][..],
-            ),
-            (
-                KeyAction::PrimaryPaste,
-                config.primary_paste.as_ref(),
-                &["Shift+Insert"][..],
-            ),
-        ];
-
-        for (action, configured, defaults) in bindings {
-            let combos: Vec<&str> = match configured {
-                Some(c) => c.to_combos(),
-                None => defaults.to_vec(),
-            };
-
-            for combo_str in combos {
-                if let Some((target_mods, target_sym)) = parse_key_combo(combo_str)
-                    && current_mods.ctrl == target_mods.ctrl
-                    && current_mods.alt == target_mods.alt
-                    && current_mods.logo == target_mods.logo
-                    && (current_mods.shift == target_mods.shift
-                        || (!target_mods.shift
-                            && current_mods.shift
-                            && target_sym == xkb::Keysym::new(keysyms::KEY_plus)))
-                    && sym_matches(sym, target_sym)
-                {
-                    return Some(action);
-                }
+        let bindings = config.resolve_bindings();
+        for ((target_mods, target_sym), action) in bindings {
+            if current_mods.ctrl == target_mods.ctrl
+                && current_mods.alt == target_mods.alt
+                && current_mods.logo == target_mods.logo
+                && (current_mods.shift == target_mods.shift
+                    || (!target_mods.shift
+                        && current_mods.shift
+                        && target_sym == xkb::Keysym::new(keysyms::KEY_plus)))
+                && sym_matches(sym, target_sym)
+            {
+                return Some(action);
             }
         }
 
