@@ -814,6 +814,9 @@ impl Grid {
                 for c in col..col + take {
                     coords.remove(&c);
                 }
+                if coords.is_empty() {
+                    row_line.placeholders = None;
+                }
             }
             row_line.dirty.set(true);
             self.cursor.col += take;
@@ -848,6 +851,9 @@ impl Grid {
                 }
                 if let Some(coords) = &mut self.lines[row].placeholders {
                     coords.remove(&col);
+                    if coords.is_empty() {
+                        self.lines[row].placeholders = None;
+                    }
                 }
                 self.cursor.col += 1;
                 return;
@@ -922,10 +928,13 @@ impl Grid {
             };
             self.lines[row]
                 .placeholders
-                .get_or_insert_with(HashMap::new)
+                .get_or_insert_with(|| Box::new(HashMap::new()))
                 .insert(col, (img_row, img_col, 0));
         } else if let Some(coords) = &mut self.lines[row].placeholders {
             coords.remove(&col);
+            if coords.is_empty() {
+                self.lines[row].placeholders = None;
+            }
         }
 
         if width == 2 && col + 1 < self.cols {

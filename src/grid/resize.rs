@@ -402,7 +402,7 @@ impl Grid {
                     row.cells[i] = *cell;
                     if let Some(coord) = ph {
                         row.placeholders
-                            .get_or_insert_with(std::collections::HashMap::new)
+                            .get_or_insert_with(|| Box::new(std::collections::HashMap::new()))
                             .insert(i, *coord);
                     }
                 }
