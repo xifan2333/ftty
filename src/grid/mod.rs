@@ -44,6 +44,7 @@ pub struct Grid {
     pub scroll_region_top: usize,
     pub scroll_region_bottom: usize,
     pub prompt_marks: BTreeSet<usize>,
+    pub total_evicted_rows: u64,
 
     // The hidden primary screen while the alternate screen is active. Each screen owns its saved
     // cursor and placements so a resize on one cannot shift the other's coordinates.
@@ -80,6 +81,7 @@ impl Grid {
             scroll_region_top: 0,
             scroll_region_bottom: actual_rows.saturating_sub(1),
             prompt_marks: BTreeSet::new(),
+            total_evicted_rows: 0,
             alt_lines: None,
             alt_cursor: None,
             alt_saved_cursor: None,
