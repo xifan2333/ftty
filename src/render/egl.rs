@@ -61,7 +61,7 @@ impl EglContext {
                         egl::SURFACE_TYPE,
                         egl::WINDOW_BIT,
                         egl::RENDERABLE_TYPE,
-                        egl::OPENGL_ES2_BIT,
+                        egl::OPENGL_ES3_BIT,
                         egl::RED_SIZE,
                         8,
                         egl::GREEN_SIZE,
@@ -82,7 +82,7 @@ impl EglContext {
                         display,
                         config,
                         None,
-                        &[egl::CONTEXT_CLIENT_VERSION, 2, egl::NONE],
+                        &[egl::CONTEXT_CLIENT_VERSION, 3, egl::NONE],
                     )
                     .map_err(|e| RenderError::ContextCreation(format!("{e:?}")))?,
             );

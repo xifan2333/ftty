@@ -1,4 +1,4 @@
-//! OpenGL ES 2.0 shader compilation and shader program linking.
+//! OpenGL ES 3.0 shader compilation and shader program linking.
 
 use glow::HasContext;
 
