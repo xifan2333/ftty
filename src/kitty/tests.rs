@@ -375,3 +375,43 @@ fn test_is_fast_path() {
     parser.in_apc = true;
     assert!(!parser.is_fast_path(b"more data"));
 }
+
+#[test]
+fn test_image_remains_valid_for_placements_after_cpu_buffer_unload() {
+    use crate::grid::Grid;
+    use crate::kitty::model::{ImageData, ImagePlacement};
+
+    let mut grid = Grid::new(80, 24, 100);
+    let image = ImageData::new(42, 64, 64, vec![255; 64 * 64 * 4]);
+    assert_eq!(image.byte_size(), 64 * 64 * 4);
+    grid.add_image(image);
+
+    // Simulate Renderer unloading CPU pixel buffer after OpenGL upload
+    if let Some(img) = grid.images.get_mut(&42) {
+        assert!(img.rgba.is_some());
+        img.rgba = None;
+    }
+
+    // Grid tracking, size calculation and placement remain fully intact
+    let img = grid.images.get(&42).unwrap();
+    assert!(img.rgba.is_none());
+    assert_eq!(img.byte_size(), 64 * 64 * 4);
+
+    grid.add_placement(ImagePlacement {
+        image_id: 42,
+        placement_id: 1,
+        line: 0,
+        col: 0,
+        cols: 10,
+        rows: 5,
+        offset_x: 0,
+        offset_y: 0,
+        z_index: 0,
+    });
+    assert_eq!(grid.placements.len(), 1);
+    assert_eq!(grid.placements[0].image_id, 42);
+
+    // Eviction budget accurately counts unloaded images
+    let total_stored: usize = grid.images.values().map(ImageData::byte_size).sum();
+    assert_eq!(total_stored, 64 * 64 * 4);
+}
