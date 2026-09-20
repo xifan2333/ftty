@@ -989,14 +989,40 @@ fn test_clear_screen_rebases_and_clears_prompt_marks() {
     grid.scroll_up(3);
 
     grid.clear_screen(ClearMode::All);
-    assert!(grid.prompt_marks.iter().all(|&m| m < grid.scrollback.len()));
+    assert!(
+        grid.prompt_marks
+            .iter()
+            .all(|&m| m < grid.total_evicted_rows + grid.scrollback.len())
+    );
 
     let active_mark = grid.scrollback.len() + 1;
     grid.add_prompt_mark(active_mark);
     let old_sb = grid.scrollback.len();
     grid.clear_screen(ClearMode::Saved);
     assert_eq!(grid.scrollback.len(), 0);
-    assert!(grid.prompt_marks.contains(&(active_mark - old_sb)));
+    assert!(grid.has_prompt_mark_at(active_mark - old_sb));
+}
+
+#[test]
+fn test_o1_prompt_marks_eviction_high_volume() {
+    let mut grid = Grid::new(80, 24, 100);
+    for _ in 0..500 {
+        grid.add_prompt_mark(grid.scrollback.len() + grid.cursor.row);
+        grid.scroll_up(1);
+    }
+    assert!(grid.total_evicted_rows > 0);
+    assert!(grid.prompt_marks.len() <= 1024);
+    assert!(
+        grid.prompt_marks
+            .iter()
+            .all(|&m| m >= grid.total_evicted_rows)
+    );
+
+    // Navigating with prompt marks across large history works cleanly
+    grid.scroll_to_prompt_prev();
+    assert!(grid.viewport_offset > 0);
+    grid.scroll_to_prompt_next();
+    assert_eq!(grid.viewport_offset, 0);
 }
 
 #[test]

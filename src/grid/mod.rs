@@ -44,7 +44,7 @@ pub struct Grid {
     pub scroll_region_top: usize,
     pub scroll_region_bottom: usize,
     pub prompt_marks: BTreeSet<usize>,
-    pub total_evicted_rows: u64,
+    pub total_evicted_rows: usize,
 
     // The hidden primary screen while the alternate screen is active. Each screen owns its saved
     // cursor and placements so a resize on one cannot shift the other's coordinates.
@@ -313,14 +313,13 @@ impl Grid {
                 }
             });
         }
-        if !self.prompt_marks.is_empty() {
-            let mut shifted = BTreeSet::new();
-            for &mark in &self.prompt_marks {
-                if mark > 0 {
-                    shifted.insert(mark - 1);
-                }
+        self.total_evicted_rows = self.total_evicted_rows.saturating_add(1);
+        while let Some(&first) = self.prompt_marks.first() {
+            if first < self.total_evicted_rows {
+                self.prompt_marks.pop_first();
+            } else {
+                break;
             }
-            self.prompt_marks = shifted;
         }
         Some(row)
     }
@@ -332,7 +331,14 @@ impl Grid {
         {
             self.prompt_marks.remove(&first);
         }
-        self.prompt_marks.insert(line);
+        self.prompt_marks.insert(self.total_evicted_rows + line);
+    }
+
+    /// Returns `true` if a prompt marker exists at the specified line relative to current scrollback.
+    #[must_use]
+    pub fn has_prompt_mark_at(&self, line: usize) -> bool {
+        self.prompt_marks
+            .contains(&(self.total_evicted_rows + line))
     }
 
     pub(crate) fn shift_region_marks_up(
@@ -345,8 +351,8 @@ impl Grid {
             return;
         }
         let sb_len = self.scrollback.len();
-        let abs_top = sb_len + top_row;
-        let abs_bottom = sb_len + bottom_row;
+        let abs_top = self.total_evicted_rows + sb_len + top_row;
+        let abs_bottom = self.total_evicted_rows + sb_len + bottom_row;
         let mut new_marks = BTreeSet::new();
         for &mark in &self.prompt_marks {
             if mark < abs_top || mark > abs_bottom {
@@ -368,8 +374,8 @@ impl Grid {
             return;
         }
         let sb_len = self.scrollback.len();
-        let abs_top = sb_len + top_row;
-        let abs_bottom = sb_len + bottom_row;
+        let abs_top = self.total_evicted_rows + sb_len + top_row;
+        let abs_bottom = self.total_evicted_rows + sb_len + bottom_row;
         let mut new_marks = BTreeSet::new();
         for &mark in &self.prompt_marks {
             if mark < abs_top || mark > abs_bottom {
@@ -386,22 +392,26 @@ impl Grid {
         if self.is_alt_screen() || self.prompt_marks.is_empty() {
             return;
         }
-        let top_line = self.scrollback.len().saturating_sub(self.viewport_offset);
+        let top_line = self
+            .total_evicted_rows
+            .saturating_add(self.scrollback.len().saturating_sub(self.viewport_offset));
         if let Some(&mark) = self.prompt_marks.range(..top_line).next_back() {
+            let rel_mark = mark.saturating_sub(self.total_evicted_rows);
             let new_offset = self
                 .scrollback
                 .len()
-                .saturating_sub(mark)
+                .saturating_sub(rel_mark)
                 .min(self.scrollback.len());
             if new_offset != self.viewport_offset {
                 self.viewport_offset = new_offset;
                 self.mark_all_dirty();
             }
         } else if let Some(&first) = self.prompt_marks.iter().next() {
+            let rel_mark = first.saturating_sub(self.total_evicted_rows);
             let new_offset = self
                 .scrollback
                 .len()
-                .saturating_sub(first)
+                .saturating_sub(rel_mark)
                 .min(self.scrollback.len());
             if new_offset != self.viewport_offset {
                 self.viewport_offset = new_offset;
@@ -415,9 +425,12 @@ impl Grid {
         if self.is_alt_screen() || self.viewport_offset == 0 {
             return;
         }
-        let top_line = self.scrollback.len().saturating_sub(self.viewport_offset);
+        let top_line = self
+            .total_evicted_rows
+            .saturating_add(self.scrollback.len().saturating_sub(self.viewport_offset));
         if let Some(&mark) = self.prompt_marks.range(top_line + 1..).next() {
-            let new_offset = self.scrollback.len().saturating_sub(mark);
+            let rel_mark = mark.saturating_sub(self.total_evicted_rows);
+            let new_offset = self.scrollback.len().saturating_sub(rel_mark);
             if new_offset != self.viewport_offset {
                 self.viewport_offset = new_offset;
                 self.mark_all_dirty();
@@ -672,8 +685,8 @@ impl Grid {
                 }
             }
             ClearMode::All => {
-                let sb_len = self.scrollback.len();
-                self.prompt_marks.retain(|&m| m < sb_len);
+                let abs_screen_start = self.total_evicted_rows + self.scrollback.len();
+                self.prompt_marks.retain(|&m| m < abs_screen_start);
                 for row in &mut self.lines {
                     row.reset();
                 }
@@ -685,12 +698,8 @@ impl Grid {
                     self.recycle_row(row);
                 }
                 self.viewport_offset = 0;
-                self.prompt_marks.retain(|&m| m >= sb_len);
-                let mut rebased = BTreeSet::new();
-                for &m in &self.prompt_marks {
-                    rebased.insert(m - sb_len);
-                }
-                self.prompt_marks = rebased;
+                self.total_evicted_rows = self.total_evicted_rows.saturating_add(sb_len);
+                self.prompt_marks.retain(|&m| m >= self.total_evicted_rows);
                 // Both screens share the scrollback base, so the hidden primary's placements need
                 // the same rebase as the active screen's.
                 for placements in [&mut self.placements, &mut self.alt_placements] {
