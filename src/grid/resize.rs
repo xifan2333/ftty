@@ -143,21 +143,23 @@ impl Grid {
                 if !active_retains {
                     shift_placements(&mut self.placements, from_top);
                     if from_top > 0 {
-                        let mut shifted = std::collections::BTreeSet::new();
-                        for &m in &self.prompt_marks {
-                            if m >= from_top {
-                                shifted.insert(m - from_top);
+                        self.total_evicted_rows = self.total_evicted_rows.saturating_add(from_top);
+                        while let Some(&first) = self.prompt_marks.first() {
+                            if first < self.total_evicted_rows {
+                                self.prompt_marks.pop_first();
+                            } else {
+                                break;
                             }
                         }
-                        self.prompt_marks = shifted;
                     }
                 }
             }
 
             let bottom_line = self.scrollback.len() + new_rows;
+            let abs_bottom = self.total_evicted_rows + bottom_line;
             self.placements.retain(|p| p.line < bottom_line);
             self.alt_placements.retain(|p| p.line < bottom_line);
-            self.prompt_marks.retain(|&m| m < bottom_line);
+            self.prompt_marks.retain(|&m| m < abs_bottom);
         }
 
         self.cols = new_cols;
@@ -205,7 +207,7 @@ impl Grid {
         let mut current_has_prompt_mark = false;
 
         for (abs_row, row) in self.scrollback.iter().chain(self.lines.iter()).enumerate() {
-            if self.prompt_marks.contains(&abs_row) {
+            if self.has_prompt_mark_at(abs_row) {
                 current_has_prompt_mark = true;
             }
 
@@ -322,7 +324,7 @@ impl Grid {
             if lline.cells.is_empty() {
                 let row_idx = new_all_rows.len();
                 if lline.has_prompt_mark {
-                    new_prompt_marks.insert(row_idx);
+                    new_prompt_marks.insert(self.total_evicted_rows + row_idx);
                 }
                 if lline.cursor_offset.is_some() {
                     new_cursor_pos = Some((row_idx, 0));
@@ -362,7 +364,7 @@ impl Grid {
 
                 let row_idx = new_all_rows.len();
                 if offset == 0 && lline.has_prompt_mark {
-                    new_prompt_marks.insert(row_idx);
+                    new_prompt_marks.insert(self.total_evicted_rows + row_idx);
                 }
 
                 if let Some(co) = lline.cursor_offset
@@ -455,13 +457,14 @@ impl Grid {
                 }
             }
             discarded_from_scrollback = excess;
-            let mut shifted = std::collections::BTreeSet::new();
-            for &m in &new_prompt_marks {
-                if m >= excess {
-                    shifted.insert(m - excess);
+            self.total_evicted_rows = self.total_evicted_rows.saturating_add(excess);
+            while let Some(&first) = new_prompt_marks.first() {
+                if first < self.total_evicted_rows {
+                    new_prompt_marks.pop_first();
+                } else {
+                    break;
                 }
             }
-            new_prompt_marks = shifted;
         }
 
         // Update placements
