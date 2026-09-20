@@ -962,7 +962,7 @@ fn test_ascii_fast_path_writing_and_wrapping() {
 #[test]
 fn test_cell_memory_footprint() {
     assert!(std::mem::size_of::<crate::grid::Cell>() <= 24);
-    assert!(std::mem::size_of::<crate::grid::Row>() <= 32);
+    assert!(std::mem::size_of::<crate::grid::Row>() <= 40);
 }
 
 #[test]
@@ -1158,17 +1158,26 @@ fn test_reflow_preserves_image_placeholders() {
         Color::DefaultBackground,
         CellFlags::empty(),
     );
-    grid.set_placeholder(0, 0, (42, 99, 1));
+    grid.lines[0].placeholders = Some(Box::new(std::collections::HashMap::from([(
+        0,
+        (42, 99, 1),
+    )])));
 
     // Resize narrower
     grid.resize(10, 2);
     assert_eq!(grid.visible_line(0).cells[0].c, KITTY_PLACEHOLDER);
-    assert_eq!(grid.placeholder(0, 0), Some((42, 99, 1)));
+    assert_eq!(
+        grid.visible_line(0).placeholders.as_ref().unwrap().get(&0),
+        Some(&(42, 99, 1))
+    );
 
     // Resize wider
     grid.resize(25, 2);
     assert_eq!(grid.visible_line(0).cells[0].c, KITTY_PLACEHOLDER);
-    assert_eq!(grid.placeholder(0, 0), Some((42, 99, 1)));
+    assert_eq!(
+        grid.visible_line(0).placeholders.as_ref().unwrap().get(&0),
+        Some(&(42, 99, 1))
+    );
 }
 
 #[test]
@@ -1208,6 +1217,7 @@ fn test_row_pool_alloc_and_resize() {
     let mut dirty_row = Row::new(80);
     dirty_row.cells[0].c = 'Z';
     dirty_row.wrapped = true;
+    dirty_row.placeholders = Some(Box::new(std::collections::HashMap::from([(0, (1, 2, 3))])));
     grid.recycle_row(dirty_row);
 
     assert_eq!(grid.row_pool.len(), 1);
@@ -1217,6 +1227,7 @@ fn test_row_pool_alloc_and_resize() {
     assert_eq!(grid.row_pool.len(), 0);
     assert_eq!(allocated.cells.len(), 120);
     assert!(!allocated.wrapped);
+    assert!(allocated.placeholders.is_none());
     assert_eq!(allocated.cells[0], Cell::default());
     assert!(allocated.dirty.get());
 }

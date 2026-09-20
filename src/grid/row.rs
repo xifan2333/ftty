@@ -1,6 +1,7 @@
 //! Terminal cell and row representation, cell flags, and cursor state.
 
 pub(crate) use std::cell::Cell as DirtyCell;
+use std::collections::HashMap;
 use std::num::NonZeroU32;
 
 use crate::color::Color;
@@ -114,10 +115,14 @@ pub enum ClearMode {
     Saved,
 }
 
+/// Sparse map of column indexes to (image_row, image_col, diacritic_count) coordinates.
+pub type PlaceholderMap = HashMap<usize, (u16, u16, u8)>;
+
 /// A horizontal row of cells in the terminal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Row {
     pub cells: Vec<Cell>,
+    pub placeholders: Option<Box<PlaceholderMap>>,
     pub wrapped: bool,
     pub dirty: DirtyCell<bool>,
 }
@@ -127,6 +132,7 @@ impl Row {
     pub fn new(cols: usize) -> Self {
         Self {
             cells: vec![Cell::default(); cols],
+            placeholders: None,
             wrapped: false,
             dirty: DirtyCell::new(true),
         }
@@ -143,6 +149,12 @@ impl Row {
                 self.cells[new_cols - 1] = Cell::default();
             }
             self.cells.truncate(new_cols);
+            if let Some(coords) = &mut self.placeholders {
+                coords.retain(|&col, _| col < new_cols);
+                if coords.is_empty() {
+                    self.placeholders = None;
+                }
+            }
             self.dirty.set(true);
         } else if new_cols > self.cells.len() {
             self.cells.resize(new_cols, Cell::default());
@@ -152,6 +164,7 @@ impl Row {
 
     pub fn reset(&mut self) {
         self.cells.fill(Cell::default());
+        self.placeholders = None;
         self.wrapped = false;
         self.dirty.set(true);
     }
