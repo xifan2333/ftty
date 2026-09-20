@@ -23,7 +23,7 @@ fn test_ftty_error_display_and_source() {
     let ftty_render: FttyError = render_err.into();
     assert_eq!(
         ftty_render.to_string(),
-        "Render error: no EGL configuration supports OpenGL ES 2"
+        "Render error: no EGL configuration supports OpenGL ES 3"
     );
 
     let font_err = FontError::InvalidSize(-5.0);

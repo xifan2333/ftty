@@ -273,7 +273,7 @@ impl fmt::Display for RenderError {
             Self::EglSurface(msg) => write!(f, "failed to create wl_egl_window: {msg}"),
             Self::EglDisplay(msg) => write!(f, "eglGetDisplay failed: {msg}"),
             Self::EglInit(msg) => write!(f, "eglInitialize failed: {msg}"),
-            Self::NoSupportedConfig => write!(f, "no EGL configuration supports OpenGL ES 2"),
+            Self::NoSupportedConfig => write!(f, "no EGL configuration supports OpenGL ES 3"),
             Self::ContextCreation(msg) => write!(f, "failed to create EGL context: {msg}"),
             Self::SurfaceCreation(msg) => write!(f, "failed to create EGL surface: {msg}"),
             Self::MakeCurrent(msg) => write!(f, "eglMakeCurrent failed: {msg}"),
