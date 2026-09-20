@@ -59,6 +59,8 @@ pub struct GlyphAtlas {
     pub(crate) height: u32,
     pub(crate) pixels: Vec<u8>,
     pub(crate) dirty: bool,
+    pub(crate) full_upload: bool,
+    pub(crate) dirty_rect: Option<[u32; 4]>,
     shelf: Shelf,
     // Fast L1 array cache for ASCII characters (0..127) across 4 styles (0..3).
     pub(crate) ascii_cache: [Option<CachedGlyph>; 128 * 4],
@@ -82,6 +84,8 @@ impl GlyphAtlas {
             height,
             pixels: vec![0; (width * height * 4) as usize],
             dirty: true,
+            full_upload: true,
+            dirty_rect: None,
             shelf: Shelf::default(),
             ascii_cache: [None; 128 * 4],
             cache: HashMap::new(),
@@ -94,6 +98,8 @@ impl GlyphAtlas {
         self.ascii_cache = [None; 128 * 4];
         self.shelf = Shelf::default();
         self.dirty = true;
+        self.full_upload = true;
+        self.dirty_rect = None;
     }
 
     fn grow(&mut self) -> bool {
@@ -116,6 +122,8 @@ impl GlyphAtlas {
         self.height = height;
         self.pixels = pixels;
         self.dirty = true;
+        self.full_upload = true;
+        self.dirty_rect = None;
         true
     }
 
@@ -135,16 +143,20 @@ impl GlyphAtlas {
         if width > MAX_ATLAS_SIZE - 2 || height > MAX_ATLAS_SIZE - 2 {
             return None;
         }
-        cached.position = loop {
-            if let Some(position) = self
-                .shelf
+        let grew = if let Some(position) =
+            self.shelf
                 .allocate(width, height, [self.width, self.height])
-            {
-                break position;
-            }
-            if !self.grow() {
-                return None;
-            }
+        {
+            cached.position = position;
+            false
+        } else if self.grow() {
+            let position = self
+                .shelf
+                .allocate(width, height, [self.width, self.height])?;
+            cached.position = position;
+            true
+        } else {
+            return None;
         };
         let [x, y] = cached.position;
         let row_bytes = (width * 4) as usize;
@@ -158,6 +170,16 @@ impl GlyphAtlas {
             }
         }
         self.dirty = true;
+        if !grew && !self.full_upload {
+            let max_x = x + width;
+            let max_y = y + height;
+            self.dirty_rect = match self.dirty_rect {
+                Some([x0, y0, x1, y1]) => {
+                    Some([x0.min(x), y0.min(y), x1.max(max_x), y1.max(max_y)])
+                }
+                None => Some([x, y, max_x, max_y]),
+            };
+        }
         Some(cached)
     }
 

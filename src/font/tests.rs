@@ -489,3 +489,42 @@ fn test_srgb_optical_alpha_transfer_table() {
         "rasterized glyph pixels must contain the boosted sRGB value {expected} from raw {raw_partial}"
     );
 }
+
+#[test]
+fn test_atlas_dirty_rect_tracking_and_full_upload_reset() {
+    let mut atlas = GlyphAtlas::new(128, 128);
+    assert!(atlas.full_upload);
+    assert!(atlas.dirty);
+    assert!(atlas.dirty_rect.is_none());
+
+    // Simulate first full upload
+    atlas.full_upload = false;
+    atlas.dirty = false;
+
+    let fonts = fonts();
+    // Insert first glyph
+    let g1 = atlas.get_or_insert('A', CellFlags::empty(), fonts);
+    assert!(g1.is_some());
+    assert!(atlas.dirty);
+    assert!(!atlas.full_upload);
+    let rect1 = atlas
+        .dirty_rect
+        .expect("dirty rect must be set on glyph insertion");
+    assert!(rect1[2] > rect1[0]);
+    assert!(rect1[3] > rect1[1]);
+
+    // Insert second glyph expands bounding box
+    let g2 = atlas.get_or_insert('B', CellFlags::empty(), fonts);
+    assert!(g2.is_some());
+    let rect2 = atlas.dirty_rect.expect("dirty rect must be expanded");
+    assert!(rect2[0] <= rect1[0]);
+    assert!(rect2[1] <= rect1[1]);
+    assert!(rect2[2] >= rect1[2]);
+    assert!(rect2[3] >= rect1[3]);
+
+    // Clearing atlas resets to full upload and clears dirty rect
+    atlas.clear();
+    assert!(atlas.full_upload);
+    assert!(atlas.dirty);
+    assert!(atlas.dirty_rect.is_none());
+}
