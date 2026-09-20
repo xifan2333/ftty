@@ -65,39 +65,13 @@ pub struct KittyCommand {
     pub is_virtual: bool,
 }
 
-use crate::kitty::payload::MmapPayload;
-
-/// Backing storage for pixel data ready for GPU texture upload.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ImagePixels {
-    Owned(Vec<u8>),
-    Mmap(MmapPayload),
-}
-
-impl ImagePixels {
-    #[must_use]
-    pub fn as_slice(&self) -> &[u8] {
-        match self {
-            Self::Owned(bytes) => bytes.as_slice(),
-            Self::Mmap(mapped) => mapped.as_slice(),
-        }
-    }
-}
-
-impl std::ops::Deref for ImagePixels {
-    type Target = [u8];
-    fn deref(&self) -> &Self::Target {
-        self.as_slice()
-    }
-}
-
 /// Loaded RGBA image data ready for GPU texture upload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageData {
     pub id: u32,
     pub width: u32,
     pub height: u32,
-    pub rgba: Option<ImagePixels>,
+    pub rgba: Option<Vec<u8>>,
 }
 
 impl ImageData {
@@ -107,17 +81,7 @@ impl ImageData {
             id,
             width,
             height,
-            rgba: Some(ImagePixels::Owned(rgba)),
-        }
-    }
-
-    #[must_use]
-    pub fn with_pixels(id: u32, width: u32, height: u32, pixels: ImagePixels) -> Self {
-        Self {
-            id,
-            width,
-            height,
-            rgba: Some(pixels),
+            rgba: Some(rgba),
         }
     }
 

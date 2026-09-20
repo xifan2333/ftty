@@ -269,7 +269,12 @@ fn virtual_placement_images_are_preserved_across_evictions() {
     );
 
     for id in 1..=260 {
-        grid.add_image(ImageData::new(id, 1, 1, vec![0, 0, 0, 0]));
+        grid.add_image(ImageData {
+            id,
+            width: 1,
+            height: 1,
+            rgba: Some(vec![0, 0, 0, 0]),
+        });
     }
 
     assert!(
@@ -294,7 +299,12 @@ fn scrollback_virtual_placement_images_are_preserved_across_evictions() {
     assert_eq!(grid.scrollback.len(), 5);
 
     for id in 1..=260 {
-        grid.add_image(ImageData::new(id, 1, 1, vec![0, 0, 0, 0]));
+        grid.add_image(ImageData {
+            id,
+            width: 1,
+            height: 1,
+            rgba: Some(vec![0, 0, 0, 0]),
+        });
     }
 
     assert!(
@@ -540,7 +550,12 @@ fn primary_placements_are_parked_while_the_alternate_screen_is_active() {
 #[test]
 fn hidden_primary_images_survive_cache_eviction() {
     let mut grid = Grid::new(10, 4, 100);
-    let image = ImageData::new(42, 1, 1, vec![0, 0, 0, 0]);
+    let image = ImageData {
+        id: 42,
+        width: 1,
+        height: 1,
+        rgba: Some(vec![0, 0, 0, 0]),
+    };
     grid.add_image(image);
     grid.add_placement(ImagePlacement {
         image_id: 42,
@@ -557,7 +572,12 @@ fn hidden_primary_images_survive_cache_eviction() {
     // The primary's placement is parked while the alternate screen churns the cache.
     grid.enter_alt_screen();
     for id in 1000..1300 {
-        grid.add_image(ImageData::new(id, 1, 1, vec![0, 0, 0, 0]));
+        grid.add_image(ImageData {
+            id,
+            width: 1,
+            height: 1,
+            rgba: Some(vec![0, 0, 0, 0]),
+        });
     }
     grid.exit_alt_screen();
 
