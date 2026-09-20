@@ -199,10 +199,13 @@ impl AppState {
             viewport_pixels[1],
         )?;
 
+        let mut keyboard = KeyboardHandler::new();
+        keyboard.update_keybindings(&config.keybindings);
+
         Ok(Self {
             terminal,
             pty,
-            keyboard: KeyboardHandler::new(),
+            keyboard,
             wayland,
             font_mgr,
             atlas,

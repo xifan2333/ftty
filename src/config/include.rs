@@ -115,7 +115,13 @@ pub(crate) fn merge_palette(dst: &mut PaletteConfig, src: PaletteConfig) {
 }
 
 pub(crate) fn merge_keybindings(dst: &mut KeybindingsConfig, src: KeybindingsConfig) {
-    dst.bindings.extend(src.bindings);
+    for (src_key, src_val) in src.bindings {
+        if let Some(src_parsed) = crate::input::parse_key_combo(&src_key) {
+            dst.bindings
+                .retain(|dst_key, _| crate::input::parse_key_combo(dst_key) != Some(src_parsed));
+        }
+        dst.bindings.insert(src_key, src_val);
+    }
 }
 
 /// Resolves path strings, expanding leading `~` to the home directory and resolving relative paths.

@@ -524,8 +524,10 @@ impl Grid {
                     line_str.push(cell.c);
                 }
             }
-            result.push_str(line_str.trim_end());
-            if !row.wrapped {
+            if row.wrapped {
+                result.push_str(&line_str);
+            } else {
+                result.push_str(line_str.trim_end());
                 result.push('\n');
             }
         }
@@ -546,8 +548,10 @@ impl Grid {
                     line_str.push(cell.c);
                 }
             }
-            result.push_str(line_str.trim_end());
-            if !row.wrapped {
+            if row.wrapped {
+                result.push_str(&line_str);
+            } else {
+                result.push_str(line_str.trim_end());
                 result.push('\n');
             }
         }

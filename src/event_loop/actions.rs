@@ -11,6 +11,16 @@ use crate::event_loop::AppState;
 use crate::font::FontManager;
 use crate::input::KeyAction;
 
+static ACTIVE_PIPELINES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+const MAX_CONCURRENT_PIPELINES: usize = 8;
+
+struct PipelineGuard;
+impl Drop for PipelineGuard {
+    fn drop(&mut self) {
+        ACTIVE_PIPELINES.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 impl AppState {
     /// Writes bytes to the non-blocking PTY master with a bounded readiness loop to prevent truncation.
     pub fn write_pty_blocking(&mut self, mut bytes: &[u8]) {
@@ -91,6 +101,7 @@ impl AppState {
         self.terminal.allow_osc52_read = new_config.allow_osc52_read();
         self.terminal.allow_osc52_write = new_config.allow_osc52_write();
         self.terminal.grid.cursor.shape = new_config.cursor_shape();
+        self.keyboard.update_keybindings(&new_config.keybindings);
         self.config = new_config;
 
         self.terminal.grid.mark_all_dirty();
@@ -207,7 +218,15 @@ impl AppState {
         if cmd.is_empty() {
             return;
         }
+        if ACTIVE_PIPELINES.load(std::sync::atomic::Ordering::Relaxed) >= MAX_CONCURRENT_PIPELINES {
+            eprintln!(
+                "ftty: pipeline concurrency limit reached ({MAX_CONCURRENT_PIPELINES}), ignoring request"
+            );
+            return;
+        }
+        ACTIVE_PIPELINES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         std::thread::spawn(move || {
+            let _guard = PipelineGuard;
             let (program, args) = match cmd.split_first() {
                 Some((prog, args)) => (prog, args),
                 None => return,
@@ -228,8 +247,11 @@ impl AppState {
 
             if let Some(mut stdin) = child.stdin.take() {
                 use std::io::Write;
-                let _ = stdin.write_all(text.as_bytes());
-                let _ = stdin.flush();
+                if let Err(e) = stdin.write_all(text.as_bytes()).and_then(|_| stdin.flush())
+                    && e.kind() != std::io::ErrorKind::BrokenPipe
+                {
+                    eprintln!("ftty: pipeline write error for '{program}': {e}");
+                }
                 drop(stdin);
             }
             let _ = child.wait();

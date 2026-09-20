@@ -161,6 +161,7 @@ pub struct KeyboardHandler {
     state: Option<State>,
     pub kitty_flags: u8,
     pub kitty_stack: Vec<u8>,
+    pub(crate) resolved_bindings: Vec<((Modifiers, xkb::Keysym), KeyAction)>,
 }
 
 impl Default for KeyboardHandler {
@@ -194,6 +195,7 @@ impl KeyboardHandler {
             state,
             kitty_flags: 0,
             kitty_stack: Vec::new(),
+            resolved_bindings: Vec::new(),
         }
     }
 
@@ -471,6 +473,11 @@ impl KeyboardHandler {
         }
     }
 
+    /// Pre-compiles and caches resolved keybindings for constant-time key action dispatch.
+    pub fn update_keybindings(&mut self, config: &KeybindingsConfig) {
+        self.resolved_bindings = config.resolve_bindings();
+    }
+
     /// Checks if a keycode matches an action in `KeybindingsConfig`.
     #[must_use]
     pub fn check_action(&self, key: u32, config: &KeybindingsConfig) -> Option<KeyAction> {
@@ -479,7 +486,16 @@ impl KeyboardHandler {
         let sym = state.key_get_one_sym(keycode);
         let current_mods = self.modifiers();
 
-        let bindings = config.resolve_bindings();
+        let bindings_borrow: &Vec<((Modifiers, xkb::Keysym), KeyAction)>;
+        let temp_bindings;
+        let bindings = if !self.resolved_bindings.is_empty() {
+            &self.resolved_bindings
+        } else {
+            temp_bindings = config.resolve_bindings();
+            bindings_borrow = &temp_bindings;
+            bindings_borrow
+        };
+
         for ((target_mods, target_sym), action) in bindings {
             if current_mods.ctrl == target_mods.ctrl
                 && current_mods.alt == target_mods.alt
@@ -487,10 +503,10 @@ impl KeyboardHandler {
                 && (current_mods.shift == target_mods.shift
                     || (!target_mods.shift
                         && current_mods.shift
-                        && target_sym == xkb::Keysym::new(keysyms::KEY_plus)))
-                && sym_matches(sym, target_sym)
+                        && *target_sym == xkb::Keysym::new(keysyms::KEY_plus)))
+                && sym_matches(sym, *target_sym)
             {
-                return Some(action);
+                return Some(action.clone());
             }
         }
 

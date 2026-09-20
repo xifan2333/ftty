@@ -150,49 +150,78 @@ pub enum PipeActionDef {
     PipeSelection(CommandDef),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedAction {
+    Action(KeyAction),
+    Unbind,
+    Invalid,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum ActionDef {
     Simple(String),
+    Multiple(Vec<String>),
     Pipe(PipeActionDef),
 }
 
 impl ActionDef {
     #[must_use]
-    pub fn to_key_action(&self) -> Option<KeyAction> {
+    pub fn to_resolved_action(&self) -> ResolvedAction {
         match self {
             Self::Simple(s) => match s.to_ascii_lowercase().as_str() {
-                "scrollback_up_page" => Some(KeyAction::ScrollbackUpPage),
-                "scrollback_down_page" => Some(KeyAction::ScrollbackDownPage),
-                "scrollback_up_line" => Some(KeyAction::ScrollbackUpLine),
-                "scrollback_down_line" => Some(KeyAction::ScrollbackDownLine),
-                "scrollback_home" => Some(KeyAction::ScrollbackHome),
-                "scrollback_end" => Some(KeyAction::ScrollbackEnd),
-                "prompt_prev" => Some(KeyAction::PromptPrev),
-                "prompt_next" => Some(KeyAction::PromptNext),
-                "font_increase" => Some(KeyAction::FontIncrease),
-                "font_decrease" => Some(KeyAction::FontDecrease),
-                "font_reset" => Some(KeyAction::FontReset),
-                "clipboard_copy" => Some(KeyAction::ClipboardCopy),
-                "clipboard_paste" => Some(KeyAction::ClipboardPaste),
-                "primary_paste" => Some(KeyAction::PrimaryPaste),
-                "none" | "" => None,
-                _ => None,
+                "scrollback_up_page" => ResolvedAction::Action(KeyAction::ScrollbackUpPage),
+                "scrollback_down_page" => ResolvedAction::Action(KeyAction::ScrollbackDownPage),
+                "scrollback_up_line" => ResolvedAction::Action(KeyAction::ScrollbackUpLine),
+                "scrollback_down_line" => ResolvedAction::Action(KeyAction::ScrollbackDownLine),
+                "scrollback_home" => ResolvedAction::Action(KeyAction::ScrollbackHome),
+                "scrollback_end" => ResolvedAction::Action(KeyAction::ScrollbackEnd),
+                "prompt_prev" => ResolvedAction::Action(KeyAction::PromptPrev),
+                "prompt_next" => ResolvedAction::Action(KeyAction::PromptNext),
+                "font_increase" => ResolvedAction::Action(KeyAction::FontIncrease),
+                "font_decrease" => ResolvedAction::Action(KeyAction::FontDecrease),
+                "font_reset" => ResolvedAction::Action(KeyAction::FontReset),
+                "clipboard_copy" => ResolvedAction::Action(KeyAction::ClipboardCopy),
+                "clipboard_paste" => ResolvedAction::Action(KeyAction::ClipboardPaste),
+                "primary_paste" => ResolvedAction::Action(KeyAction::PrimaryPaste),
+                "none" | "" => ResolvedAction::Unbind,
+                _ => {
+                    eprintln!("ftty: unrecognized keybinding action '{s}'");
+                    ResolvedAction::Invalid
+                }
             },
+            Self::Multiple(_) => ResolvedAction::Invalid,
             Self::Pipe(pipe) => match pipe {
                 PipeActionDef::PipeVisible(cmd) => {
-                    Some(KeyAction::PipeVisible(cmd.clone().into_vec()))
+                    ResolvedAction::Action(KeyAction::PipeVisible(cmd.clone().into_vec()))
                 }
                 PipeActionDef::PipeScrollback(cmd) => {
-                    Some(KeyAction::PipeScrollback(cmd.clone().into_vec()))
+                    ResolvedAction::Action(KeyAction::PipeScrollback(cmd.clone().into_vec()))
                 }
                 PipeActionDef::PipeSelection(cmd) => {
-                    Some(KeyAction::PipeSelection(cmd.clone().into_vec()))
+                    ResolvedAction::Action(KeyAction::PipeSelection(cmd.clone().into_vec()))
                 }
             },
         }
     }
 }
+
+const KNOWN_ACTIONS: &[&str] = &[
+    "scrollback_up_page",
+    "scrollback_down_page",
+    "scrollback_up_line",
+    "scrollback_down_line",
+    "scrollback_home",
+    "scrollback_end",
+    "prompt_prev",
+    "prompt_next",
+    "font_increase",
+    "font_decrease",
+    "font_reset",
+    "clipboard_copy",
+    "clipboard_paste",
+    "primary_paste",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(transparent)]
@@ -232,12 +261,39 @@ impl KeybindingsConfig {
             }
         }
 
-        for (combo_str, def) in &self.bindings {
-            if let Some(parsed) = parse_key_combo(combo_str) {
-                if let Some(action) = def.to_key_action() {
-                    map.insert(parsed, action);
-                } else {
-                    map.remove(&parsed);
+        for (key_str, def) in &self.bindings {
+            let key_lower = key_str.to_ascii_lowercase();
+            if KNOWN_ACTIONS.contains(&key_lower.as_str()) {
+                let action_res = ActionDef::Simple(key_lower).to_resolved_action();
+                if let ResolvedAction::Action(act) = action_res {
+                    match def {
+                        ActionDef::Simple(c) => {
+                            if let Some(parsed) = parse_key_combo(c) {
+                                map.insert(parsed, act);
+                            }
+                        }
+                        ActionDef::Multiple(combos) => {
+                            for c in combos {
+                                if let Some(parsed) = parse_key_combo(c) {
+                                    map.insert(parsed, act.clone());
+                                }
+                            }
+                        }
+                        ActionDef::Pipe(_) => {}
+                    }
+                }
+                continue;
+            }
+
+            if let Some(parsed) = parse_key_combo(key_str) {
+                match def.to_resolved_action() {
+                    ResolvedAction::Action(action) => {
+                        map.insert(parsed, action);
+                    }
+                    ResolvedAction::Unbind => {
+                        map.remove(&parsed);
+                    }
+                    ResolvedAction::Invalid => {}
                 }
             }
         }
