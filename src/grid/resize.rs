@@ -266,11 +266,7 @@ impl Grid {
                 if is_view_top_row && current_view_top_offset.is_none() {
                     current_view_top_offset = Some(current_cells.len());
                 }
-                let ph = row
-                    .placeholders
-                    .as_ref()
-                    .and_then(|m| m.get(&col_idx))
-                    .copied();
+                let ph = self.placeholder(abs_row, col_idx);
                 current_cells.push((*cell, ph));
             }
 
@@ -315,6 +311,10 @@ impl Grid {
         // Rewrap each logical line into rows of width new_cols
         let mut new_all_rows: std::collections::VecDeque<Row> = std::collections::VecDeque::new();
         let mut new_prompt_marks = std::collections::BTreeSet::new();
+        let mut new_placeholders: std::collections::HashMap<
+            usize,
+            std::collections::HashMap<usize, (u16, u16, u8)>,
+        > = std::collections::HashMap::new();
         let mut new_placements: Vec<ImagePlacement> = Vec::new();
         let mut new_cursor_pos: Option<(usize, usize)> = None;
         let mut new_saved_cursor_pos: Option<(usize, usize)> = None;
@@ -401,8 +401,9 @@ impl Grid {
                 for (i, (cell, ph)) in lline.cells[offset..offset + actual_len].iter().enumerate() {
                     row.cells[i] = *cell;
                     if let Some(coord) = ph {
-                        row.placeholders
-                            .get_or_insert_with(std::collections::HashMap::new)
+                        new_placeholders
+                            .entry(self.total_evicted_rows + row_idx)
+                            .or_default()
                             .insert(i, *coord);
                     }
                 }
@@ -458,6 +459,7 @@ impl Grid {
             }
             discarded_from_scrollback = excess;
             self.total_evicted_rows = self.total_evicted_rows.saturating_add(excess);
+            new_placeholders.retain(|&r, _| r >= self.total_evicted_rows);
             while let Some(&first) = new_prompt_marks.first() {
                 if first < self.total_evicted_rows {
                     new_prompt_marks.pop_first();
@@ -510,6 +512,7 @@ impl Grid {
         }
 
         self.prompt_marks = new_prompt_marks;
+        self.row_placeholders = new_placeholders;
         self.cols = new_cols;
         self.rows = new_rows;
         self.scroll_region_top = 0;

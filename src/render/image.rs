@@ -315,15 +315,14 @@ impl Renderer {
                 let mut img_vertices = Vec::with_capacity(num_cells * 48);
 
                 for row in b.row_start..=b.row_end {
-                    let line = grid.visible_line(row);
+                    let abs_line = grid.scrollback.len() + row - grid.viewport_offset();
                     for col in b.col_start..=b.col_end {
-                        let (img_row, img_col) = if let Some(coords) = &line.placeholders
-                            && let Some(&(ir, ic, _)) = coords.get(&col)
-                        {
-                            (ir as usize, ic as usize)
-                        } else {
-                            (row - b.row_start, col - b.col_start)
-                        };
+                        let (img_row, img_col) =
+                            if let Some((ir, ic, _)) = grid.placeholder(abs_line, col) {
+                                (ir as usize, ic as usize)
+                            } else {
+                                (row - b.row_start, col - b.col_start)
+                            };
 
                         let x0 = pad_x + col as f32 * cw;
                         let y0 = pad_y + row as f32 * ch;

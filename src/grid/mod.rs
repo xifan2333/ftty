@@ -45,6 +45,7 @@ pub struct Grid {
     pub scroll_region_bottom: usize,
     pub prompt_marks: BTreeSet<usize>,
     pub total_evicted_rows: usize,
+    pub(crate) row_placeholders: HashMap<usize, HashMap<usize, (u16, u16, u8)>>,
 
     // The hidden primary screen while the alternate screen is active. Each screen owns its saved
     // cursor and placements so a resize on one cannot shift the other's coordinates.
@@ -82,6 +83,7 @@ impl Grid {
             scroll_region_bottom: actual_rows.saturating_sub(1),
             prompt_marks: BTreeSet::new(),
             total_evicted_rows: 0,
+            row_placeholders: HashMap::new(),
             alt_lines: None,
             alt_cursor: None,
             alt_saved_cursor: None,
@@ -314,6 +316,8 @@ impl Grid {
             });
         }
         self.total_evicted_rows = self.total_evicted_rows.saturating_add(1);
+        self.row_placeholders
+            .remove(&(self.total_evicted_rows.saturating_sub(1)));
         while let Some(&first) = self.prompt_marks.first() {
             if first < self.total_evicted_rows {
                 self.prompt_marks.pop_first();
@@ -339,6 +343,36 @@ impl Grid {
     pub fn has_prompt_mark_at(&self, line: usize) -> bool {
         self.prompt_marks
             .contains(&(self.total_evicted_rows + line))
+    }
+
+    /// Returns Kitty placeholder coordinates at the given row and column.
+    #[inline]
+    #[must_use]
+    pub fn placeholder(&self, abs_row: usize, col: usize) -> Option<(u16, u16, u8)> {
+        self.row_placeholders
+            .get(&(self.total_evicted_rows + abs_row))
+            .and_then(|coords| coords.get(&col).copied())
+    }
+
+    /// Inserts Kitty placeholder coordinates at the given row and column.
+    #[inline]
+    pub fn set_placeholder(&mut self, abs_row: usize, col: usize, val: (u16, u16, u8)) {
+        self.row_placeholders
+            .entry(self.total_evicted_rows + abs_row)
+            .or_default()
+            .insert(col, val);
+    }
+
+    /// Removes Kitty placeholder coordinates at the given row and column.
+    #[inline]
+    pub fn remove_placeholder(&mut self, abs_row: usize, col: usize) {
+        let abs_line = self.total_evicted_rows + abs_row;
+        if let Some(coords) = self.row_placeholders.get_mut(&abs_line) {
+            coords.remove(&col);
+            if coords.is_empty() {
+                self.row_placeholders.remove(&abs_line);
+            }
+        }
     }
 
     pub(crate) fn shift_region_marks_up(
@@ -687,6 +721,7 @@ impl Grid {
             ClearMode::All => {
                 let abs_screen_start = self.total_evicted_rows + self.scrollback.len();
                 self.prompt_marks.retain(|&m| m < abs_screen_start);
+                self.row_placeholders.retain(|&r, _| r < abs_screen_start);
                 for row in &mut self.lines {
                     row.reset();
                 }
@@ -700,6 +735,8 @@ impl Grid {
                 self.viewport_offset = 0;
                 self.total_evicted_rows = self.total_evicted_rows.saturating_add(sb_len);
                 self.prompt_marks.retain(|&m| m >= self.total_evicted_rows);
+                self.row_placeholders
+                    .retain(|&r, _| r >= self.total_evicted_rows);
                 // Both screens share the scrollback base, so the hidden primary's placements need
                 // the same rebase as the active screen's.
                 for placements in [&mut self.placements, &mut self.alt_placements] {
@@ -810,9 +847,13 @@ impl Grid {
                     hyperlink_id: hl_id,
                 };
             }
-            if let Some(coords) = &mut row_line.placeholders {
+            let abs_line = self.total_evicted_rows + self.scrollback.len() + row;
+            if let Some(coords) = self.row_placeholders.get_mut(&abs_line) {
                 for c in col..col + take {
                     coords.remove(&c);
+                }
+                if coords.is_empty() {
+                    self.row_placeholders.remove(&abs_line);
                 }
             }
             row_line.dirty.set(true);
@@ -846,8 +887,12 @@ impl Grid {
                 if !self.lines[row].dirty.get() {
                     self.lines[row].dirty.set(true);
                 }
-                if let Some(coords) = &mut self.lines[row].placeholders {
+                let abs_line = self.total_evicted_rows + self.scrollback.len() + row;
+                if let Some(coords) = self.row_placeholders.get_mut(&abs_line) {
                     coords.remove(&col);
+                    if coords.is_empty() {
+                        self.row_placeholders.remove(&abs_line);
+                    }
                 }
                 self.cursor.col += 1;
                 return;
@@ -867,8 +912,9 @@ impl Grid {
             {
                 let target_col = self.cursor.col - 1;
                 let target_row = self.cursor.row;
+                let abs_target_line = self.total_evicted_rows + self.scrollback.len() + target_row;
                 if self.lines[target_row].cells[target_col].c == KITTY_PLACEHOLDER
-                    && let Some(coords) = &mut self.lines[target_row].placeholders
+                    && let Some(coords) = self.row_placeholders.get_mut(&abs_target_line)
                     && let Some(coord) = coords.get_mut(&target_col)
                 {
                     match coord.2 {
@@ -910,9 +956,10 @@ impl Grid {
         };
         self.lines[row].dirty.set(true);
 
+        let abs_line = self.total_evicted_rows + self.scrollback.len() + row;
         if c == KITTY_PLACEHOLDER {
             let (img_row, img_col) = if col > 0
-                && let Some(coords) = &self.lines[row].placeholders
+                && let Some(coords) = self.row_placeholders.get(&abs_line)
                 && let Some(&(left_row, left_col, _)) = coords.get(&(col - 1))
                 && self.lines[row].cells[col - 1].fg == fg
             {
@@ -920,12 +967,15 @@ impl Grid {
             } else {
                 (0, 0)
             };
-            self.lines[row]
-                .placeholders
-                .get_or_insert_with(HashMap::new)
+            self.row_placeholders
+                .entry(abs_line)
+                .or_default()
                 .insert(col, (img_row, img_col, 0));
-        } else if let Some(coords) = &mut self.lines[row].placeholders {
+        } else if let Some(coords) = self.row_placeholders.get_mut(&abs_line) {
             coords.remove(&col);
+            if coords.is_empty() {
+                self.row_placeholders.remove(&abs_line);
+            }
         }
 
         if width == 2 && col + 1 < self.cols {

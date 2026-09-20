@@ -1,7 +1,6 @@
 //! Terminal cell and row representation, cell flags, and cursor state.
 
 pub(crate) use std::cell::Cell as DirtyCell;
-use std::collections::HashMap;
 use std::num::NonZeroU32;
 
 use crate::color::Color;
@@ -120,7 +119,6 @@ pub enum ClearMode {
 pub struct Row {
     pub cells: Vec<Cell>,
     pub wrapped: bool,
-    pub placeholders: Option<HashMap<usize, (u16, u16, u8)>>,
     pub dirty: DirtyCell<bool>,
 }
 
@@ -130,7 +128,6 @@ impl Row {
         Self {
             cells: vec![Cell::default(); cols],
             wrapped: false,
-            placeholders: None,
             dirty: DirtyCell::new(true),
         }
     }
@@ -146,9 +143,6 @@ impl Row {
                 self.cells[new_cols - 1] = Cell::default();
             }
             self.cells.truncate(new_cols);
-            if let Some(coords) = &mut self.placeholders {
-                coords.retain(|&col, _| col < new_cols);
-            }
             self.dirty.set(true);
         } else if new_cols > self.cells.len() {
             self.cells.resize(new_cols, Cell::default());
@@ -159,9 +153,6 @@ impl Row {
     pub fn reset(&mut self) {
         self.cells.fill(Cell::default());
         self.wrapped = false;
-        if let Some(coords) = &mut self.placeholders {
-            coords.clear();
-        }
         self.dirty.set(true);
     }
 }
