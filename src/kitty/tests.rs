@@ -450,3 +450,21 @@ fn test_image_remains_valid_for_placements_after_cpu_buffer_unload() {
     let total_stored: usize = grid.images.values().map(ImageData::byte_size).sum();
     assert_eq!(total_stored, 64 * 64 * 4);
 }
+
+#[test]
+fn test_convenience_filter_drops_oversized_scratch_allocation() {
+    let mut parser = KittyParser::new();
+    // Large clean output followed by a lone ESC forces the slow path with a big scratch buffer.
+    let mut payload = vec![b'x'; MAX_RECYCLED_CLEAN_BYTES + 16];
+    payload.push(0x1b);
+
+    let (text, _) = parser.filter_bytes(&payload);
+    assert_eq!(text.len(), MAX_RECYCLED_CLEAN_BYTES + 16);
+    // The retained scratch must respect the same bound as the recycled hot path.
+    assert!(parser.clean_scratch.capacity() <= MAX_RECYCLED_CLEAN_BYTES);
+
+    // Small inputs keep reusing a bounded scratch capacity.
+    let (_, _) = parser.filter_bytes(b"hello\x1b");
+    let cap = parser.clean_scratch.capacity();
+    assert!(cap > 0 && cap <= MAX_RECYCLED_CLEAN_BYTES);
+}

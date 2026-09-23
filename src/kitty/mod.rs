@@ -74,11 +74,16 @@ impl KittyParser {
         if self.is_fast_path(incoming) {
             return (incoming.to_vec(), Vec::new());
         }
-        // Convenience path: return an owned copy and keep the scratch capacity internal. The
-        // hot PTY path uses `filter_bytes_slow` + `recycle_clean_buffer` to avoid this copy.
+        // Convenience path: return an owned copy and keep the scratch capacity internal, bounded
+        // by the same retention limit as the recycled hot path. The PTY path uses
+        // `filter_bytes_slow` + `recycle_clean_buffer` to avoid this copy entirely.
         self.filter_internal(incoming);
         let text = self.clean_scratch.clone();
-        self.clean_scratch.clear();
+        if self.clean_scratch.capacity() > MAX_RECYCLED_CLEAN_BYTES {
+            self.clean_scratch = Vec::new();
+        } else {
+            self.clean_scratch.clear();
+        }
         let events = std::mem::take(&mut self.events_scratch);
         (text, events)
     }
