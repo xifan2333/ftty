@@ -32,7 +32,15 @@ pub struct Grid {
     pub scrollback: VecDeque<Row>,
     pub viewport_offset: usize,
 
-    pub images: HashMap<u32, ImageData>,
+    /// Stored Kitty images keyed by image id.
+    ///
+    /// Kept crate-private so the [`Self::image_bytes_total`] budget invariant cannot be broken by
+    /// outside code mutating the map or the size-defining [`ImageData`] fields directly. Use
+    /// [`Self::images`] for read-only access and the provided mutation methods to change state.
+    pub(crate) images: HashMap<u32, ImageData>,
+    /// Running sum of `ImageData::byte_size()` across `images`, kept in sync on every mutation
+    /// so eviction checks never re-sum the whole map.
+    pub(crate) image_bytes_total: usize,
     pub image_versions: HashMap<u32, u64>,
     pub placements: Vec<ImagePlacement>,
     pub virtual_placements: HashMap<u32, (usize, usize)>,
@@ -72,6 +80,7 @@ impl Grid {
             scrollback: VecDeque::new(),
             viewport_offset: 0,
             images: HashMap::new(),
+            image_bytes_total: 0,
             image_versions: HashMap::new(),
             placements: Vec::new(),
             virtual_placements: HashMap::new(),
@@ -123,11 +132,25 @@ impl Grid {
     /// Returns the sum of decoded RGBA byte sizes across all stored images.
     #[must_use]
     pub fn total_image_bytes(&self) -> usize {
-        self.images.values().map(ImageData::byte_size).sum()
+        self.image_bytes_total
+    }
+
+    /// Read-only view of stored images keyed by image id.
+    #[must_use]
+    pub fn images(&self) -> &HashMap<u32, ImageData> {
+        &self.images
+    }
+
+    /// Returns `true` if an image with the given id is currently stored.
+    #[must_use]
+    pub fn contains_image(&self, id: u32) -> bool {
+        self.images.contains_key(&id)
     }
 
     pub(crate) fn remove_image_internal(&mut self, k: u32) {
-        self.images.remove(&k);
+        if let Some(image) = self.images.remove(&k) {
+            self.image_bytes_total = self.image_bytes_total.saturating_sub(image.byte_size());
+        }
         self.image_versions.remove(&k);
         self.placements.retain(|p| p.image_id != k);
         self.alt_placements.retain(|p| p.image_id != k);
@@ -144,7 +167,11 @@ impl Grid {
 
         self.image_lru.retain(|&k| k != id);
         self.image_lru.push(id);
-        self.images.insert(id, image);
+        let byte_size = image.byte_size();
+        if let Some(previous) = self.images.insert(id, image) {
+            self.image_bytes_total = self.image_bytes_total.saturating_sub(previous.byte_size());
+        }
+        self.image_bytes_total = self.image_bytes_total.saturating_add(byte_size);
         let ver = self.image_versions.entry(id).or_insert(0);
         *ver = ver.wrapping_add(1);
 
@@ -230,6 +257,7 @@ impl Grid {
         match target {
             DeleteTarget::All => {
                 self.images.clear();
+                self.image_bytes_total = 0;
                 self.image_versions.clear();
                 self.placements.clear();
                 self.alt_placements.clear();

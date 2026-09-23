@@ -524,6 +524,40 @@ fn test_osc_8_hyperlinks() {
 }
 
 #[test]
+fn test_hyperlink_interning_is_idempotent_and_bounded() {
+    let mut term = TestTerm::new(80, 24, 100);
+
+    let a = term.get_or_intern_hyperlink("https://a.example".to_string());
+    let b = term.get_or_intern_hyperlink("https://b.example".to_string());
+    assert_ne!(a, b);
+
+    // Re-interning an existing URL must return the same id and not grow the tables.
+    let len_by_id = term.hyperlinks_by_id.len();
+    for _ in 0..50 {
+        assert_eq!(
+            term.get_or_intern_hyperlink("https://a.example".to_string()),
+            a
+        );
+    }
+    assert_eq!(term.hyperlinks_by_id.len(), len_by_id);
+    assert_eq!(term.hyperlinks_by_url.len(), len_by_id);
+    assert_eq!(term.hyperlink_order.len(), len_by_id);
+    assert_eq!(term.hyperlink_url(a), Some("https://a.example"));
+
+    // Filling beyond capacity keeps the three tables synchronized.
+    for i in 0..MAX_HYPERLINKS + 10 {
+        let _ = term.get_or_intern_hyperlink(format!("https://filler-{i}.example"));
+    }
+    assert_eq!(term.hyperlinks_by_id.len(), MAX_HYPERLINKS);
+    assert_eq!(term.hyperlinks_by_url.len(), MAX_HYPERLINKS);
+    assert_eq!(term.hyperlink_order.len(), MAX_HYPERLINKS);
+    // Every id currently tracked must resolve to its URL without aliasing.
+    for (&id, url) in &term.hyperlinks_by_id {
+        assert_eq!(term.hyperlink_url(id), Some(url.as_ref()));
+    }
+}
+
+#[test]
 fn test_kitty_keyboard_protocol_negotiation() {
     let mut term = TestTerm::new(80, 24, 100);
 

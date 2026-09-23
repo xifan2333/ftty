@@ -1,12 +1,14 @@
 //! Kitty graphics protocol texture management, image quad rendering, and placeholder matching.
 
+use std::collections::HashMap;
+
 use glow::HasContext;
 
 use crate::color::Color;
 use crate::font::CellMetrics;
 use crate::grid::Grid;
 use crate::render::text::{KITTY_PLACEHOLDER, push_quad};
-use crate::render::{RenderOptions, Renderer};
+use crate::render::{MAX_RETAINED_IMAGE_VERTEX_FLOATS, RenderOptions, Renderer};
 
 #[must_use]
 pub fn placeholder_image_id(color: Color) -> u32 {
@@ -17,7 +19,43 @@ pub fn placeholder_image_id(color: Color) -> u32 {
     }
 }
 
+/// Resolves each 24-bit placeholder id to a full texture id.
+///
+/// An id that already equals its own low 24 bits takes precedence over any aliasing id that
+/// only shares the same low 24 bits, matching the Kitty unicode-placeholder lookup rules.
+#[must_use]
+pub(crate) fn build_low24_index(texture_ids: impl Iterator<Item = u32>) -> HashMap<u32, u32> {
+    let mut index: HashMap<u32, u32> = HashMap::new();
+    for texture_id in texture_ids {
+        let low24 = texture_id & 0x00FF_FFFF;
+        if texture_id == low24 {
+            // An exact id always takes precedence over a 24-bit alias.
+            index.insert(low24, texture_id);
+        } else {
+            index.entry(low24).or_insert(texture_id);
+        }
+    }
+    index
+}
+
+/// Returns `buffer` unchanged when its capacity is within the retention cap, otherwise a fresh
+/// small vector so oversized transient allocations are deterministically released.
+#[must_use]
+pub(crate) fn bounded_image_vertex_buffer(buffer: Vec<f32>) -> Vec<f32> {
+    if buffer.capacity() <= MAX_RETAINED_IMAGE_VERTEX_FLOATS {
+        buffer
+    } else {
+        Vec::with_capacity(64)
+    }
+}
+
 impl Renderer {
+    /// Returns the image staging buffer to the renderer for reuse, dropping it when its capacity
+    /// exceeds [`MAX_RETAINED_IMAGE_VERTEX_FLOATS`] so oversized transient frames cannot pin memory.
+    fn recycle_image_vertices(&mut self, image_vertices: Vec<f32>) {
+        self.image_vertices = bounded_image_vertex_buffer(image_vertices);
+    }
+
     pub(crate) fn sync_image_textures(&mut self, grid: &mut Grid) {
         let gl = &self.gl;
         let mut to_delete = Vec::new();
@@ -44,6 +82,8 @@ impl Renderer {
             }
         }
 
+        // Upload newly decoded images. Clearing `rgba` here releases the CPU copy and is
+        // accounting-neutral because `ImageData::byte_size()` depends only on width/height.
         for (id, img) in &mut grid.images {
             if !self.image_textures.contains_key(id) {
                 let ver = grid.image_versions.get(id).copied().unwrap_or(0);
@@ -145,7 +185,10 @@ impl Renderer {
         img_h: f32,
         [x0, y0, x1, y1]: [f32; 4],
     ) {
-        let mut img_vertices = Vec::with_capacity(48);
+        // Move the shared staging buffer out so it can be borrowed while `self` is mutated,
+        // then hand it back to retain its capacity for the next image.
+        let mut img_vertices = std::mem::take(&mut self.image_vertices);
+        img_vertices.clear();
         push_quad(
             &mut img_vertices,
             [x0, y0, x1, y1],
@@ -153,6 +196,7 @@ impl Renderer {
             [1.0, 1.0, 1.0, 1.0],
         );
         self.render_image_quads(tex, img_w, img_h, &img_vertices);
+        self.recycle_image_vertices(img_vertices);
     }
 
     pub(crate) fn render_image_quads(
@@ -220,25 +264,24 @@ impl Renderer {
         let mut completed_boxes: Vec<RectBox> = Vec::new();
         let mut active_boxes: Vec<RectBox> = Vec::new();
 
+        // Built lazily on the first placeholder-bearing row so placement-only frames pay nothing.
+        // Once built it maps each 24-bit placeholder id to its full texture id in O(1) per cell.
+        let mut low24_index: Option<HashMap<u32, u32>> = None;
+
         for row in 0..grid.rows {
             let line = grid.visible_line(row);
             let mut row_segments: Vec<(u32, usize, usize)> = Vec::new();
 
             if line.placeholders.is_some() {
+                let low24_index = low24_index
+                    .get_or_insert_with(|| build_low24_index(self.image_textures.keys().copied()));
                 let mut current_run: Option<(u32, usize, usize)> = None;
 
                 for (col, cell) in line.cells.iter().enumerate() {
                     if cell.c == KITTY_PLACEHOLDER {
                         let id_low24 = placeholder_image_id(cell.fg) & 0x00FF_FFFF;
                         if id_low24 != 0 {
-                            let real_id = if self.image_textures.contains_key(&id_low24) {
-                                Some(id_low24)
-                            } else {
-                                self.image_textures
-                                    .keys()
-                                    .find(|&&k| (k & 0x00FF_FFFF) == id_low24)
-                                    .copied()
-                            };
+                            let real_id = low24_index.get(&id_low24).copied();
 
                             if let Some(matched_id) = real_id {
                                 match current_run {
@@ -318,8 +361,8 @@ impl Renderer {
             } else {
                 let total_c = virt_cols.max(1) as f32;
                 let total_r = virt_rows.max(1) as f32;
-                let num_cells = box_w * box_h;
-                let mut img_vertices = Vec::with_capacity(num_cells * 48);
+                let mut img_vertices = std::mem::take(&mut self.image_vertices);
+                img_vertices.clear();
 
                 for row in b.row_start..=b.row_end {
                     let line = grid.visible_line(row);
@@ -354,6 +397,7 @@ impl Renderer {
                 if !img_vertices.is_empty() {
                     self.render_image_quads(tex, img_w as f32, img_h as f32, &img_vertices);
                 }
+                self.recycle_image_vertices(img_vertices);
             }
         }
     }

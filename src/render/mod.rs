@@ -95,6 +95,11 @@ const DEFAULT_BG: Rgb = Rgb::new(24, 24, 24);
 
 const MAX_RENDER_CACHE_ROWS: usize = 512;
 
+// Retained capacity cap for the image vertex staging buffer. A single dense placeholder frame can
+// grow the buffer to tens of thousands of floats; without a cap that peak allocation would stay
+// resident forever. Anything above the cap is dropped at the end of the draw instead of recycled.
+const MAX_RETAINED_IMAGE_VERTEX_FLOATS: usize = 16 * 1024;
+
 /// Owns GL objects together with their EGL context, including on initialization failure.
 pub struct Renderer {
     pub(crate) gl: glow::Context,
@@ -110,6 +115,8 @@ pub struct Renderer {
     pub(crate) subpixel_mode: Option<glow::UniformLocation>,
     pub(crate) has_dual_source: bool,
     pub(crate) image_textures: HashMap<u32, (glow::Texture, u32, u32, u64)>,
+    /// Scratch vertex staging buffer reused across image draws within a frame.
+    pub(crate) image_vertices: Vec<f32>,
     pub(crate) vertices: Vec<f32>,
     pub(crate) static_vertices_len: usize,
     pub(crate) vbo_full_upload: bool,
@@ -190,6 +197,7 @@ impl Renderer {
             has_dual_source,
             image_textures: HashMap::new(),
             vertices: Vec::with_capacity(8192),
+            image_vertices: Vec::with_capacity(64),
             static_vertices_len: 0,
             vbo_full_upload: true,
             row_bg: Vec::new(),
