@@ -138,6 +138,7 @@ impl Selection {
         let (start, end) = self.normalized();
         let total_lines = grid.scrollback.len() + grid.lines.len();
         let mut result = String::new();
+        let mut line_str = String::with_capacity(grid.cols);
 
         let get_row = |idx: usize| -> Option<&Row> {
             if idx < grid.scrollback.len() {
@@ -168,7 +169,7 @@ impl Selection {
                 continue;
             }
 
-            let mut line_str = String::new();
+            line_str.clear();
             for cell in &row.cells[start_col..end_col] {
                 if !cell
                     .flags

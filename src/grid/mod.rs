@@ -533,9 +533,10 @@ impl Grid {
     #[must_use]
     pub fn extract_visible_text(&self) -> String {
         let mut result = String::new();
+        let mut line_str = String::with_capacity(self.cols);
         for r in 0..self.rows {
             let row = self.visible_line(r);
-            let mut line_str = String::new();
+            line_str.clear();
             for cell in &row.cells {
                 if !cell
                     .flags
@@ -558,8 +559,9 @@ impl Grid {
     #[must_use]
     pub fn extract_scrollback_text(&self) -> String {
         let mut result = String::new();
+        let mut line_str = String::with_capacity(self.cols);
         for row in self.scrollback.iter().chain(self.lines.iter()) {
-            let mut line_str = String::new();
+            line_str.clear();
             for cell in &row.cells {
                 if !cell
                     .flags
