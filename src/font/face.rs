@@ -6,7 +6,60 @@ use std::path::Path;
 use std::rc::Rc;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
+use freetype::RenderMode;
 use freetype::face::LoadFlag;
+
+use crate::config::{FreeTypeLoadFlags, FreeTypeLoadTarget, FreeTypeRenderTarget};
+
+/// Unified FreeType rasterization configuration aligned with WezTerm options.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FreeTypeConfig {
+    pub load_target: FreeTypeLoadTarget,
+    pub render_target: FreeTypeRenderTarget,
+    pub load_flags: FreeTypeLoadFlags,
+}
+
+impl Default for FreeTypeConfig {
+    fn default() -> Self {
+        Self {
+            load_target: FreeTypeLoadTarget::Light,
+            render_target: FreeTypeRenderTarget::HorizontalLcd,
+            load_flags: FreeTypeLoadFlags::Default,
+        }
+    }
+}
+
+impl FreeTypeConfig {
+    #[must_use]
+    pub fn compute_load_flags(self) -> LoadFlag {
+        let mut flags = match self.load_flags {
+            FreeTypeLoadFlags::NoHinting => LoadFlag::NO_HINTING,
+            FreeTypeLoadFlags::Default => LoadFlag::DEFAULT,
+        };
+        if self.load_flags != FreeTypeLoadFlags::NoHinting {
+            let target_flag = match self.load_target {
+                FreeTypeLoadTarget::Light => LoadFlag::TARGET_LIGHT,
+                FreeTypeLoadTarget::Normal => LoadFlag::TARGET_NORMAL,
+                FreeTypeLoadTarget::Mono => LoadFlag::TARGET_MONO,
+                FreeTypeLoadTarget::HorizontalLcd => LoadFlag::TARGET_LCD,
+            };
+            flags |= target_flag;
+        }
+        flags
+    }
+
+    #[must_use]
+    pub fn compute_render_mode(self, is_subpixel_preferred: bool) -> RenderMode {
+        match self.render_target {
+            FreeTypeRenderTarget::HorizontalLcd if is_subpixel_preferred => RenderMode::Lcd,
+            FreeTypeRenderTarget::HorizontalLcd | FreeTypeRenderTarget::Normal => {
+                RenderMode::Normal
+            }
+            FreeTypeRenderTarget::Light => RenderMode::Light,
+            FreeTypeRenderTarget::Mono => RenderMode::Mono,
+        }
+    }
+}
 
 fn ft_global_lock() -> MutexGuard<'static, ()> {
     static FT_LOCK: Mutex<()> = Mutex::new(());
@@ -231,7 +284,8 @@ impl Font {
         &self,
         glyph_index: u16,
         font_size: f32,
-        subpixel: bool,
+        ft_config: FreeTypeConfig,
+        subpixel_preferred: bool,
         bgr: bool,
     ) -> RasterizedGlyph {
         let guard = self.inner.borrow();
@@ -239,15 +293,15 @@ impl Font {
             return RasterizedGlyph::empty();
         };
         Self::set_font_size(face, font_size);
-        let flags = if subpixel {
-            LoadFlag::RENDER | LoadFlag::TARGET_LCD
-        } else {
-            LoadFlag::RENDER | LoadFlag::TARGET_LIGHT
-        };
-        if face.load_glyph(glyph_index as u32, flags).is_err() {
+        let load_flags = ft_config.compute_load_flags();
+        let render_mode = ft_config.compute_render_mode(subpixel_preferred);
+        if face.load_glyph(glyph_index as u32, load_flags).is_err() {
             return RasterizedGlyph::empty();
         }
         let slot = face.glyph();
+        if slot.render_glyph(render_mode).is_err() {
+            return RasterizedGlyph::empty();
+        }
         let bmp = slot.bitmap();
         let raw_width = bmp.width().max(0) as u32;
         let height = bmp.rows().max(0) as u32;
@@ -260,9 +314,11 @@ impl Font {
         let abs_pitch = pitch.unsigned_abs() as usize;
         let buffer = bmp.buffer();
 
-        if subpixel && bmp.pixel_mode() == Ok(freetype::bitmap::PixelMode::Lcd) {
+        if bmp.pixel_mode() == Ok(freetype::bitmap::PixelMode::Lcd) {
             // FreeType LCD bitmaps produce 3 horizontal subpixel coverage bytes per logical pixel.
-            // Store true RGBA8 subpixel masks with per-channel sRGB transfer curve for Dual-Source Blending.
+            // Aligned with WezTerm: RGB channels are gamma-mapped for Dual-Source Blending,
+            // while the Alpha channel strictly preserves the linear geometric coverage (linear_alpha)
+            // to eliminate over-darkening and bloated letter strokes.
             let logical_width = (raw_width / 3).max(1);
             let mut pixels = vec![0u8; (logical_width * height * 4) as usize];
             for y in 0..height {
@@ -276,13 +332,21 @@ impl Font {
                 for x in 0..logical_width {
                     let src_idx = src_row + (x as usize) * 3;
                     if src_idx + 2 < buffer.len() {
-                        let r = LINEAR_TO_SRGB[buffer[src_idx] as usize];
-                        let g = LINEAR_TO_SRGB[buffer[src_idx + 1] as usize];
-                        let b = LINEAR_TO_SRGB[buffer[src_idx + 2] as usize];
-                        let a = r.max(g).max(b);
+                        let raw_r = buffer[src_idx];
+                        let raw_g = buffer[src_idx + 1];
+                        let raw_b = buffer[src_idx + 2];
+                        let linear_alpha = raw_r.max(raw_g).max(raw_b);
+                        let r = LINEAR_TO_SRGB[raw_r as usize];
+                        let g = LINEAR_TO_SRGB[raw_g as usize];
+                        let b = LINEAR_TO_SRGB[raw_b as usize];
                         let (r_out, b_out) = if bgr { (b, r) } else { (r, b) };
                         let dst_idx = dst_row + (x as usize) * 4;
-                        pixels[dst_idx..dst_idx + 4].copy_from_slice(&[r_out, g, b_out, a]);
+                        pixels[dst_idx..dst_idx + 4].copy_from_slice(&[
+                            r_out,
+                            g,
+                            b_out,
+                            linear_alpha,
+                        ]);
                     }
                 }
             }
@@ -292,6 +356,38 @@ impl Font {
                 offset_x,
                 offset_y,
                 pitch: (logical_width * 4) as usize,
+                pixels,
+            }
+        } else if bmp.pixel_mode() == Ok(freetype::bitmap::PixelMode::Mono) {
+            // FreeType 1-bit monochrome bitmaps pack 8 pixels per byte, MSB-first.
+            let row_pixels = raw_width as usize;
+            let mut pixels = vec![0u8; (raw_width * height * 4) as usize];
+            for y in 0..height {
+                let src_y = if pitch < 0 {
+                    (height - 1 - y) as usize
+                } else {
+                    y as usize
+                };
+                let src_row = src_y * abs_pitch;
+                let dst_offset = (y as usize) * row_pixels * 4;
+                for x in 0..row_pixels {
+                    let byte_idx = src_row + (x / 8);
+                    let bit_val = if byte_idx < buffer.len() {
+                        (buffer[byte_idx] & (0x80 >> (x % 8))) != 0
+                    } else {
+                        false
+                    };
+                    let v = if bit_val { 255 } else { 0 };
+                    let dst_idx = dst_offset + x * 4;
+                    pixels[dst_idx..dst_idx + 4].copy_from_slice(&[v, v, v, v]);
+                }
+            }
+            RasterizedGlyph {
+                width: raw_width,
+                height,
+                offset_x,
+                offset_y,
+                pitch: row_pixels * 4,
                 pixels,
             }
         } else {
@@ -307,9 +403,15 @@ impl Font {
                 let dst_offset = (y as usize) * row_pixels * 4;
                 for x in 0..row_pixels {
                     if src_offset + x < buffer.len() {
-                        let gray = LINEAR_TO_SRGB[buffer[src_offset + x] as usize];
+                        let linear_gray = buffer[src_offset + x];
+                        let gray = LINEAR_TO_SRGB[linear_gray as usize];
                         let dst_idx = dst_offset + x * 4;
-                        pixels[dst_idx..dst_idx + 4].copy_from_slice(&[gray, gray, gray, gray]);
+                        pixels[dst_idx..dst_idx + 4].copy_from_slice(&[
+                            gray,
+                            gray,
+                            gray,
+                            linear_gray,
+                        ]);
                     }
                 }
             }

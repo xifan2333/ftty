@@ -141,8 +141,17 @@ impl AppState {
         config: Config,
         config_path: Option<PathBuf>,
     ) -> Result<Self, FttyError> {
-        let font_mgr =
-            FontManager::load_with_families(&config.font_families(), config.font_size())?;
+        let ft_config = crate::font::FreeTypeConfig {
+            load_target: config.freetype_load_target(),
+            render_target: config.freetype_render_target(),
+            load_flags: config.freetype_load_flags(),
+        };
+        let font_mgr = FontManager::load_with_families_and_config(
+            &config.font_families(),
+            config.font_size(),
+            ft_config,
+            true,
+        )?;
         Self::with_font_and_config(terminal, pty, font_mgr, config, config_path)
     }
 

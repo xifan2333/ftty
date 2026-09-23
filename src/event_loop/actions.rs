@@ -64,10 +64,19 @@ impl AppState {
             return;
         }
 
+        let new_ft_config = crate::font::FreeTypeConfig {
+            load_target: new_config.freetype_load_target(),
+            render_target: new_config.freetype_render_target(),
+            load_flags: new_config.freetype_load_flags(),
+        };
+        let ft_config_changed = self.font_mgr.ft_config != new_ft_config;
+
         let maybe_new_font = if families_changed {
-            match FontManager::load_with_families(
+            match FontManager::load_with_families_and_config(
                 &new_config.font_families(),
                 new_config.font_size(),
+                new_ft_config,
+                true,
             ) {
                 Ok(mgr) => Some(mgr),
                 Err(e) => {
@@ -125,10 +134,20 @@ impl AppState {
             self.atlas.clear();
             self.update_font_size(scaled_font_size);
             let _ = self.resize_terminal();
-        } else if size_changed {
-            self.update_font_size(scaled_font_size);
-        } else if padding_changed {
-            let _ = self.resize_terminal();
+        } else {
+            if ft_config_changed {
+                self.font_mgr.ft_config = new_ft_config;
+                self.atlas.clear();
+                self.terminal.grid.mark_all_dirty();
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.clear_cache();
+                }
+            }
+            if size_changed {
+                self.update_font_size(scaled_font_size);
+            } else if padding_changed {
+                let _ = self.resize_terminal();
+            }
         }
 
         self.needs_redraw = true;

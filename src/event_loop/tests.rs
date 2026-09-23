@@ -137,6 +137,73 @@ fn test_app_state_reload_config() {
 }
 
 #[test]
+fn test_combined_reload_updates_size_freetype_and_padding() {
+    use crate::config::{FreeTypeLoadFlags, FreeTypeLoadTarget};
+
+    let temp_dir = std::env::temp_dir().join(format!("ftty_reload_comb_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+    let config_path = temp_dir.join("ftty.toml");
+
+    std::fs::write(
+        &config_path,
+        r##"
+        [font]
+        size = 13.0
+        freetype_load_flags = "DEFAULT"
+        freetype_load_target = "Light"
+
+        [window]
+        padding = [10, 10]
+        "##,
+    )
+    .unwrap();
+
+    let term = Terminal::new(80, 24, 100);
+    let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
+    let mut app =
+        AppState::with_config(term, pty, Some(config_path.clone())).expect("AppState with_config");
+
+    assert_eq!(app.font_mgr.font_size(), 13.0);
+    assert_eq!(
+        app.font_mgr.ft_config.load_flags,
+        FreeTypeLoadFlags::Default
+    );
+
+    // Concurrently change font size, FreeType options, and window padding in one reload
+    std::fs::write(
+        &config_path,
+        r##"
+        [font]
+        size = 15.0
+        freetype_load_flags = "NO_HINTING"
+        freetype_load_target = "Normal"
+
+        [window]
+        padding = [25, 25]
+        "##,
+    )
+    .unwrap();
+
+    app.reload_config();
+
+    // Verify all 3 changes were applied coordinately without dropping any setting
+    assert_eq!(app.font_mgr.font_size(), 15.0);
+    assert_eq!(
+        app.font_mgr.ft_config.load_flags,
+        FreeTypeLoadFlags::NoHinting
+    );
+    assert_eq!(
+        app.font_mgr.ft_config.load_target,
+        FreeTypeLoadTarget::Normal
+    );
+    assert_eq!(app.config.padding_x(), 25);
+    assert_eq!(app.config.padding_y(), 25);
+    assert!(app.needs_redraw);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
 fn test_failed_reload_preserves_state() {
     use crate::grid::CursorShape;
 
