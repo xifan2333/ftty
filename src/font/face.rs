@@ -133,6 +133,13 @@ pub struct Font {
     inner: Rc<RefCell<FaceWrapper>>,
 }
 
+/// Converts font typography points to nominal pixels at standard 96 DPI (72 pt == 96 px).
+#[inline]
+#[must_use]
+pub(crate) fn points_to_pixels(points: f32) -> f32 {
+    points * (96.0 / 72.0)
+}
+
 impl Font {
     /// Opens a font face from a file path in sub-milliseconds without parsing glyph outlines.
     ///
@@ -232,13 +239,15 @@ impl Font {
                 }
             }
         }
-        (font_size * 0.6).ceil().max(1.0)
+        let nominal_px = points_to_pixels(font_size);
+        (nominal_px * 0.6).round().max(1.0)
     }
 
     /// Computes cell dimensions (cell_width, cell_height, ascent) for the active font at the given size.
     #[must_use]
     pub fn compute_cell_metrics(&self, font_size: f32) -> crate::font::CellMetrics {
         let cell_width = self.glyph_advance_width('0', font_size).round().max(1.0) as u32;
+        let nominal_px = points_to_pixels(font_size);
         let (cell_height, ascent) = self
             .horizontal_line_metrics(font_size)
             .map(|line| {
@@ -247,7 +256,10 @@ impl Font {
                     line.ascent.round() as i32,
                 )
             })
-            .unwrap_or((font_size.round().max(1.0) as u32, font_size.round() as i32));
+            .unwrap_or((
+                nominal_px.round().max(1.0) as u32,
+                nominal_px.round() as i32,
+            ));
 
         crate::font::CellMetrics {
             cell_width,

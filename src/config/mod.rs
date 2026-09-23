@@ -19,7 +19,7 @@ use xkbcommon::xkb;
 pub use include::{Include, default_config_path, resolve_path};
 
 const DEFAULT_FONT_FAMILY: &str = "monospace";
-const DEFAULT_FONT_SIZE: f32 = 10.0;
+const DEFAULT_FONT_SIZE: f32 = 9.0;
 const DEFAULT_FOREGROUND: Rgb = Rgb::new(220, 220, 220);
 const DEFAULT_BACKGROUND: Rgb = Rgb::new(24, 24, 24);
 

@@ -624,3 +624,13 @@ fn test_font_size_represents_points_at_standard_dpi() {
     assert!(fonts_9pt.metrics.cell_width >= 6 && fonts_9pt.metrics.cell_width <= 8);
     assert!(fonts_9pt.metrics.cell_height >= 12 && fonts_9pt.metrics.cell_height <= 18);
 }
+
+#[test]
+fn test_font_fallback_dimensions_use_nominal_pixels() {
+    use crate::font::face::points_to_pixels;
+
+    // 9.0 points at 96 DPI equals 12.0 nominal pixels
+    assert!((points_to_pixels(9.0) - 12.0).abs() < 1e-4);
+    // 72.0 points at 96 DPI equals 96.0 nominal pixels
+    assert!((points_to_pixels(72.0) - 96.0).abs() < 1e-4);
+}
