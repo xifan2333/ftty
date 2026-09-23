@@ -29,7 +29,7 @@ pub use error::{
     ConfigError, FontError, FttyError, KittyError, PtyError, RenderError, WaylandError,
 };
 pub use event_loop::{AppState, run_event_loop, run_event_loop_with_connection};
-pub use font::{CellMetrics, FontManager, GlyphAtlas};
+pub use font::{CellMetrics, FontManager, FreeTypeConfig, GlyphAtlas};
 pub use grid::{Cell, CellFlags, ClearMode, Cursor, CursorShape, Grid, Row};
 pub use input::ime::{ImeState, Preedit, calculate_cursor_rect};
 pub use input::mouse::{

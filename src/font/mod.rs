@@ -17,7 +17,7 @@ use crate::font::fallback::{FallbackCache, fontconfig, load_font_file, match_fam
 use crate::grid::CellFlags;
 
 pub use atlas::{CachedGlyph, GlyphAtlas, INITIAL_ATLAS_SIZE, MAX_ATLAS_SIZE};
-pub use face::{Font, LineMetrics, RasterizedGlyph};
+pub use face::{Font, FreeTypeConfig, LineMetrics, RasterizedGlyph};
 
 /// Cell size and baseline alignment metrics for the active font and font size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +63,7 @@ pub struct FontManager {
     fallbacks: RefCell<FallbackCache>,
     families: Vec<String>,
     font_size: f32,
+    pub ft_config: FreeTypeConfig,
     pub subpixel: bool,
     pub bgr: bool,
     pub metrics: CellMetrics,
@@ -125,7 +126,7 @@ impl FontManager {
     /// # Errors
     /// Returns an error for an invalid size, missing font, or unreadable font data.
     pub fn load_with_families(families: &[String], font_size: f32) -> io::Result<Self> {
-        Self::load_with_families_and_subpixel(families, font_size, true)
+        Self::load_with_families_and_config(families, font_size, FreeTypeConfig::default(), true)
     }
 
     /// Discovers and loads an ordered list of font families with explicit subpixel setting.
@@ -135,6 +136,24 @@ impl FontManager {
     pub fn load_with_families_and_subpixel(
         families: &[String],
         font_size: f32,
+        subpixel: bool,
+    ) -> io::Result<Self> {
+        Self::load_with_families_and_config(
+            families,
+            font_size,
+            FreeTypeConfig::default(),
+            subpixel,
+        )
+    }
+
+    /// Discovers and loads an ordered list of font families with FreeType rasterization configuration.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid size, missing font, or unreadable font data.
+    pub fn load_with_families_and_config(
+        families: &[String],
+        font_size: f32,
+        ft_config: FreeTypeConfig,
         subpixel: bool,
     ) -> io::Result<Self> {
         if !font_size.is_finite() || font_size < MIN_FONT_SIZE || font_size > MAX_FONT_SIZE {
@@ -172,6 +191,7 @@ impl FontManager {
                 fallbacks: RefCell::new(FallbackCache::default()),
                 families: valid_families,
                 font_size,
+                ft_config,
                 subpixel,
                 bgr: false,
                 metrics: cached.metrics,
@@ -228,6 +248,7 @@ impl FontManager {
             fallbacks: RefCell::new(FallbackCache::default()),
             families: valid_families,
             font_size,
+            ft_config,
             subpixel,
             bgr: false,
             metrics,
@@ -368,6 +389,7 @@ impl FontManager {
             return chain.primary.rasterize_indexed(
                 key.glyph,
                 self.font_size,
+                self.ft_config,
                 self.subpixel,
                 self.bgr,
             );
@@ -377,6 +399,7 @@ impl FontManager {
             return chain.fallbacks[fallback_idx].rasterize_indexed(
                 key.glyph,
                 self.font_size,
+                self.ft_config,
                 self.subpixel,
                 self.bgr,
             );
@@ -386,15 +409,20 @@ impl FontManager {
         drop(binding);
         let fallbacks = self.fallbacks.borrow();
         match fallbacks.faces.get(fallback_idx) {
-            Some(face) => {
-                face.font
-                    .rasterize_indexed(key.glyph, self.font_size, self.subpixel, self.bgr)
-            }
-            None => {
-                self.regular
-                    .primary
-                    .rasterize_indexed(0, self.font_size, self.subpixel, self.bgr)
-            }
+            Some(face) => face.font.rasterize_indexed(
+                key.glyph,
+                self.font_size,
+                self.ft_config,
+                self.subpixel,
+                self.bgr,
+            ),
+            None => self.regular.primary.rasterize_indexed(
+                0,
+                self.font_size,
+                self.ft_config,
+                self.subpixel,
+                self.bgr,
+            ),
         }
     }
 }
