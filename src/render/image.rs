@@ -1,5 +1,7 @@
 //! Kitty graphics protocol texture management, image quad rendering, and placeholder matching.
 
+use std::collections::HashMap;
+
 use glow::HasContext;
 
 use crate::color::Color;
@@ -15,6 +17,25 @@ pub fn placeholder_image_id(color: Color) -> u32 {
         Color::Indexed(idx) => idx as u32,
         _ => 0,
     }
+}
+
+/// Resolves each 24-bit placeholder id to a full texture id.
+///
+/// An id that already equals its own low 24 bits takes precedence over any aliasing id that
+/// only shares the same low 24 bits, matching the Kitty unicode-placeholder lookup rules.
+#[must_use]
+pub(crate) fn build_low24_index(texture_ids: impl Iterator<Item = u32>) -> HashMap<u32, u32> {
+    let mut index: HashMap<u32, u32> = HashMap::new();
+    for texture_id in texture_ids {
+        let low24 = texture_id & 0x00FF_FFFF;
+        if texture_id == low24 {
+            // An exact id always takes precedence over a 24-bit alias.
+            index.insert(low24, texture_id);
+        } else {
+            index.entry(low24).or_insert(texture_id);
+        }
+    }
+    index
 }
 
 impl Renderer {
@@ -208,6 +229,10 @@ impl Renderer {
             return;
         }
 
+        // Resolve each 24-bit placeholder id to its full texture id once, so the per-cell
+        // inner loop is O(1) rather than scanning every loaded texture.
+        let low24_index = build_low24_index(self.image_textures.keys().copied());
+
         let cw = metrics.cell_width as f32;
         let ch = metrics.cell_height as f32;
         let pad_x = f32::from(options.padding[0]);
@@ -235,14 +260,7 @@ impl Renderer {
                     if cell.c == KITTY_PLACEHOLDER {
                         let id_low24 = placeholder_image_id(cell.fg) & 0x00FF_FFFF;
                         if id_low24 != 0 {
-                            let real_id = if self.image_textures.contains_key(&id_low24) {
-                                Some(id_low24)
-                            } else {
-                                self.image_textures
-                                    .keys()
-                                    .find(|&&k| (k & 0x00FF_FFFF) == id_low24)
-                                    .copied()
-                            };
+                            let real_id = low24_index.get(&id_low24).copied();
 
                             if let Some(matched_id) = real_id {
                                 match current_run {

@@ -780,3 +780,23 @@ fn test_underline_cursor_overlay_quad_count() {
     build_dynamic_overlays(&mut overlay_vertices, &ctx);
     assert_eq!(overlay_vertices.len(), 48);
 }
+
+#[test]
+fn test_low24_placeholder_index_prefers_exact_id_and_resolves_aliases() {
+    use crate::render::image::build_low24_index;
+
+    // 0x10EEEE is an exact (24-bit) id; 0xAB10EEEE shares the same low 24 bits.
+    let index = build_low24_index([0xAB10_EEEE_u32, 0x10EEEE].into_iter());
+    assert_eq!(index.get(&0x10EEEE), Some(&0x10EEEE));
+
+    // An alias with no exact counterpart still resolves to the full texture id.
+    let alias_only = build_low24_index([0x1234_5678_u32].into_iter());
+    assert_eq!(alias_only.get(&0x345678), Some(&0x1234_5678));
+
+    // Order independence: an exact id encountered after an alias must win.
+    let reordered = build_low24_index([0xAB10_EEEE_u32, 0x10EEEE].into_iter().rev());
+    assert_eq!(reordered.get(&0x10EEEE), Some(&0x10EEEE));
+
+    // Unrelated ids do not collide.
+    assert_eq!(build_low24_index([1_u32].into_iter()).get(&2), None);
+}
