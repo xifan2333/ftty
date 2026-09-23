@@ -137,9 +137,7 @@ fn test_app_state_reload_config() {
 }
 
 #[test]
-fn test_combined_reload_updates_size_freetype_and_padding() {
-    use crate::config::{FreeTypeLoadFlags, FreeTypeLoadTarget};
-
+fn test_combined_reload_updates_size_and_padding() {
     let temp_dir = std::env::temp_dir().join(format!("ftty_reload_comb_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&temp_dir);
     let config_path = temp_dir.join("ftty.toml");
@@ -148,9 +146,7 @@ fn test_combined_reload_updates_size_freetype_and_padding() {
         &config_path,
         r##"
         [font]
-        size = 13.0
-        freetype_load_flags = "DEFAULT"
-        freetype_load_target = "Light"
+        size = 11.0
 
         [window]
         padding = [10, 10]
@@ -163,20 +159,15 @@ fn test_combined_reload_updates_size_freetype_and_padding() {
     let mut app =
         AppState::with_config(term, pty, Some(config_path.clone())).expect("AppState with_config");
 
-    assert_eq!(app.font_mgr.font_size(), 13.0);
-    assert_eq!(
-        app.font_mgr.ft_config.load_flags,
-        FreeTypeLoadFlags::Default
-    );
+    assert_eq!(app.font_mgr.font_size(), 11.0);
+    assert_eq!(app.config.padding_x(), 10);
 
-    // Concurrently change font size, FreeType options, and window padding in one reload
+    // Concurrently change font size and window padding in one reload
     std::fs::write(
         &config_path,
         r##"
         [font]
-        size = 15.0
-        freetype_load_flags = "NO_HINTING"
-        freetype_load_target = "Normal"
+        size = 13.0
 
         [window]
         padding = [25, 25]
@@ -186,67 +177,10 @@ fn test_combined_reload_updates_size_freetype_and_padding() {
 
     app.reload_config();
 
-    // Verify all 3 changes were applied coordinately without dropping any setting
-    assert_eq!(app.font_mgr.font_size(), 15.0);
-    assert_eq!(
-        app.font_mgr.ft_config.load_flags,
-        FreeTypeLoadFlags::NoHinting
-    );
-    assert_eq!(
-        app.font_mgr.ft_config.load_target,
-        FreeTypeLoadTarget::Normal
-    );
+    assert_eq!(app.font_mgr.font_size(), 13.0);
     assert_eq!(app.config.padding_x(), 25);
     assert_eq!(app.config.padding_y(), 25);
     assert!(app.needs_redraw);
-
-    let _ = std::fs::remove_dir_all(&temp_dir);
-}
-
-#[test]
-fn test_reload_config_synchronizes_subpixel_mode() {
-    let temp_dir =
-        std::env::temp_dir().join(format!("ftty_subpixel_reload_{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&temp_dir);
-    let config_path = temp_dir.join("ftty.toml");
-
-    std::fs::write(
-        &config_path,
-        r##"
-        [font]
-        size = 9.0
-        freetype_render_target = "Normal"
-        "##,
-    )
-    .unwrap();
-
-    let term = Terminal::new(80, 24, 100);
-    let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
-    let mut app =
-        AppState::with_config(term, pty, Some(config_path.clone())).expect("AppState with_config");
-
-    // Initially with Normal render target, subpixel must be disabled
-    assert!(!app.is_subpixel_enabled());
-    assert!(!app.font_mgr.subpixel);
-
-    // Reload with HorizontalLcd render target
-    std::fs::write(
-        &config_path,
-        r##"
-        [font]
-        size = 9.0
-        freetype_render_target = "HorizontalLcd"
-        "##,
-    )
-    .unwrap();
-
-    app.reload_config();
-    assert_eq!(
-        app.font_mgr.ft_config.render_target,
-        crate::config::FreeTypeRenderTarget::HorizontalLcd
-    );
-    // In headless test without a renderer, is_subpixel_enabled is safely false
-    assert_eq!(app.font_mgr.subpixel, app.is_subpixel_enabled());
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
@@ -584,6 +518,9 @@ fn test_font_chain_reload_and_zoom_preserves_fallbacks() {
     app.reload_config();
     assert_eq!(app.font_mgr.families(), &["monospace".to_string()]);
     assert_eq!(app.font_mgr.font_size(), 14.0);
+    // Subpixel and BGR output attributes must be preserved across family reload
+    assert_eq!(app.font_mgr.subpixel, app.is_subpixel_enabled());
+    assert_eq!(app.font_mgr.bgr, app.is_bgr_subpixel());
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }

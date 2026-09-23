@@ -23,13 +23,9 @@ fn font_metrics_and_rasterization() {
     assert!(fonts.metrics.cell_width > 0);
     assert!(fonts.metrics.cell_height >= fonts.metrics.ascent as u32);
     let glyph_idx = fonts.regular().lookup_glyph_index('M');
-    let raster = fonts.regular().rasterize_indexed(
-        glyph_idx,
-        fonts.font_size,
-        fonts.ft_config,
-        false,
-        false,
-    );
+    let raster = fonts
+        .regular()
+        .rasterize_indexed(glyph_idx, fonts.font_size, false, false);
     assert!(raster.width > 0 && raster.height > 0);
     assert!(raster.pixels.iter().any(|&pixel| pixel != 0));
 }
@@ -487,59 +483,6 @@ fn test_cell_metrics_uses_round_not_ceil() {
 }
 
 #[test]
-fn test_freetype_config_load_flags_and_render_modes() {
-    use crate::config::{FreeTypeLoadFlags, FreeTypeLoadTarget, FreeTypeRenderTarget};
-    use crate::font::FreeTypeConfig;
-    use freetype::RenderMode;
-    use freetype::face::LoadFlag;
-
-    let default_cfg = FreeTypeConfig::default();
-    assert_eq!(default_cfg.load_target, FreeTypeLoadTarget::Light);
-    assert_eq!(
-        default_cfg.render_target,
-        FreeTypeRenderTarget::HorizontalLcd
-    );
-    assert_eq!(default_cfg.load_flags, FreeTypeLoadFlags::Default);
-
-    // Compute load flags
-    assert!(
-        default_cfg
-            .compute_load_flags()
-            .contains(LoadFlag::TARGET_LIGHT)
-    );
-    assert!(
-        !default_cfg
-            .compute_load_flags()
-            .contains(LoadFlag::NO_HINTING)
-    );
-
-    let no_hint_cfg = FreeTypeConfig {
-        load_target: FreeTypeLoadTarget::Normal,
-        render_target: FreeTypeRenderTarget::Normal,
-        load_flags: FreeTypeLoadFlags::NoHinting,
-    };
-    assert!(
-        no_hint_cfg
-            .compute_load_flags()
-            .contains(LoadFlag::NO_HINTING)
-    );
-    assert!(matches!(
-        no_hint_cfg.compute_render_mode(true),
-        RenderMode::Normal
-    ));
-
-    // HorizontalLcd falls back to Normal when subpixel is not preferred
-    assert!(matches!(
-        default_cfg.compute_render_mode(false),
-        RenderMode::Normal
-    ));
-    assert!(matches!(
-        default_cfg.compute_render_mode(true),
-        RenderMode::Lcd
-    ));
-}
-
-#[test]
 fn test_atlas_dirty_rect_tracking_and_full_upload_reset() {
     let mut atlas = GlyphAtlas::new(128, 128);
     assert!(atlas.full_upload);
@@ -580,38 +523,19 @@ fn test_atlas_dirty_rect_tracking_and_full_upload_reset() {
 
 #[test]
 fn test_monochrome_glyph_rasterization_unpacks_bits() {
-    use crate::config::{FreeTypeLoadFlags, FreeTypeLoadTarget, FreeTypeRenderTarget};
-    use crate::font::FreeTypeConfig;
-
-    let mono_cfg = FreeTypeConfig {
-        load_target: FreeTypeLoadTarget::Mono,
-        render_target: FreeTypeRenderTarget::Mono,
-        load_flags: FreeTypeLoadFlags::Default,
-    };
-
     let fonts = fonts();
     let glyph_idx = fonts.regular().lookup_glyph_index('M');
     assert!(glyph_idx > 0);
 
-    let raster =
-        fonts
-            .regular()
-            .rasterize_indexed(glyph_idx, fonts.font_size, mono_cfg, false, false);
+    let raster = fonts
+        .regular()
+        .rasterize_indexed(glyph_idx, fonts.font_size, false, false);
     assert!(raster.width > 0 && raster.height > 0);
     assert_eq!(
         raster.pixels.len(),
         (raster.width * raster.height * 4) as usize
     );
-
-    // Every pixel channel in monochrome mode must strictly be either 0 or 255 (binary coverage)
-    for &p in &raster.pixels {
-        assert!(
-            p == 0 || p == 255,
-            "monochrome pixel value must be binary, got {p}"
-        );
-    }
-    // Must contain some non-zero coverage for letter 'M'
-    assert!(raster.pixels.contains(&255));
+    assert!(raster.pixels.iter().any(|&p| p > 0));
 }
 
 #[test]

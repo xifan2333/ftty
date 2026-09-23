@@ -41,149 +41,11 @@ impl FontFamilies {
     }
 }
 
-/// FreeType hinting and load target options (aligned with WezTerm).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum FreeTypeLoadTarget {
-    Normal,
-    #[default]
-    Light,
-    Mono,
-    HorizontalLcd,
-}
-
-impl<'de> Deserialize<'de> for FreeTypeLoadTarget {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        let norm: String = s
-            .chars()
-            .filter(|c| *c != '_' && *c != '-')
-            .flat_map(char::to_lowercase)
-            .collect();
-        match norm.as_str() {
-            "normal" => Ok(Self::Normal),
-            "light" => Ok(Self::Light),
-            "mono" => Ok(Self::Mono),
-            "horizontallcd" => Ok(Self::HorizontalLcd),
-            _ => Err(serde::de::Error::custom(format!(
-                "invalid freetype_load_target: '{s}', expected 'Normal', 'Light', 'Mono', or 'HorizontalLcd'"
-            ))),
-        }
-    }
-}
-
-impl Serialize for FreeTypeLoadTarget {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        match self {
-            Self::Normal => serializer.serialize_str("Normal"),
-            Self::Light => serializer.serialize_str("Light"),
-            Self::Mono => serializer.serialize_str("Mono"),
-            Self::HorizontalLcd => serializer.serialize_str("HorizontalLcd"),
-        }
-    }
-}
-
-/// FreeType rasterization render target options (aligned with WezTerm).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum FreeTypeRenderTarget {
-    Normal,
-    Light,
-    Mono,
-    #[default]
-    HorizontalLcd,
-}
-
-impl<'de> Deserialize<'de> for FreeTypeRenderTarget {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        let norm: String = s
-            .chars()
-            .filter(|c| *c != '_' && *c != '-')
-            .flat_map(char::to_lowercase)
-            .collect();
-        match norm.as_str() {
-            "normal" => Ok(Self::Normal),
-            "light" => Ok(Self::Light),
-            "mono" => Ok(Self::Mono),
-            "horizontallcd" => Ok(Self::HorizontalLcd),
-            _ => Err(serde::de::Error::custom(format!(
-                "invalid freetype_render_target: '{s}', expected 'Normal', 'Light', 'Mono', or 'HorizontalLcd'"
-            ))),
-        }
-    }
-}
-
-impl Serialize for FreeTypeRenderTarget {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        match self {
-            Self::Normal => serializer.serialize_str("Normal"),
-            Self::Light => serializer.serialize_str("Light"),
-            Self::Mono => serializer.serialize_str("Mono"),
-            Self::HorizontalLcd => serializer.serialize_str("HorizontalLcd"),
-        }
-    }
-}
-
-/// FreeType load flags controlling hinting algorithms (aligned with WezTerm).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum FreeTypeLoadFlags {
-    #[default]
-    Default,
-    NoHinting,
-}
-
-impl<'de> Deserialize<'de> for FreeTypeLoadFlags {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        let norm: String = s
-            .chars()
-            .filter(|c| *c != '_' && *c != '-')
-            .flat_map(char::to_lowercase)
-            .collect();
-        match norm.as_str() {
-            "default" => Ok(Self::Default),
-            "nohinting" => Ok(Self::NoHinting),
-            _ => Err(serde::de::Error::custom(format!(
-                "invalid freetype_load_flags: '{s}', expected 'DEFAULT' or 'NO_HINTING'"
-            ))),
-        }
-    }
-}
-
-impl Serialize for FreeTypeLoadFlags {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        match self {
-            Self::Default => serializer.serialize_str("DEFAULT"),
-            Self::NoHinting => serializer.serialize_str("NO_HINTING"),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
 pub struct FontConfig {
     #[serde(alias = "families")]
     pub family: Option<FontFamilies>,
     pub size: Option<f32>,
-    pub freetype_load_target: Option<FreeTypeLoadTarget>,
-    pub freetype_render_target: Option<FreeTypeRenderTarget>,
-    pub freetype_load_flags: Option<FreeTypeLoadFlags>,
 }
 
 /// Padding configuration: either a uniform scalar `padding = 4` or an array `padding = [4, 2]`.
@@ -577,15 +439,6 @@ impl Config {
         if let Some(size) = other.font.size {
             self.font.size = Some(size);
         }
-        if let Some(load_target) = other.font.freetype_load_target {
-            self.font.freetype_load_target = Some(load_target);
-        }
-        if let Some(render_target) = other.font.freetype_render_target {
-            self.font.freetype_render_target = Some(render_target);
-        }
-        if let Some(load_flags) = other.font.freetype_load_flags {
-            self.font.freetype_load_flags = Some(load_flags);
-        }
 
         if let Some(p) = other.window.padding {
             self.window.padding = Some(p);
@@ -644,21 +497,6 @@ impl Config {
     #[must_use]
     pub fn font_size(&self) -> f32 {
         self.font.size.unwrap_or(DEFAULT_FONT_SIZE)
-    }
-
-    #[must_use]
-    pub fn freetype_load_target(&self) -> FreeTypeLoadTarget {
-        self.font.freetype_load_target.unwrap_or_default()
-    }
-
-    #[must_use]
-    pub fn freetype_render_target(&self) -> FreeTypeRenderTarget {
-        self.font.freetype_render_target.unwrap_or_default()
-    }
-
-    #[must_use]
-    pub fn freetype_load_flags(&self) -> FreeTypeLoadFlags {
-        self.font.freetype_load_flags.unwrap_or_default()
     }
 
     #[must_use]

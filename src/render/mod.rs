@@ -95,13 +95,6 @@ const DEFAULT_BG: Rgb = Rgb::new(24, 24, 24);
 
 const MAX_RENDER_CACHE_ROWS: usize = 512;
 
-/// Cached `FTTY_DUMP_FRAME` lookup for the debug-only frame dump probe.
-#[cfg(debug_assertions)]
-fn frame_dump_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("FTTY_DUMP_FRAME").is_some())
-}
-
 // Retained capacity cap for the image vertex staging buffer. A single dense placeholder frame can
 // grow the buffer to tens of thousands of floats; without a cap that peak allocation would stay
 // resident forever. Anything above the cap is dropped at the end of the draw instead of recycled.
@@ -412,50 +405,7 @@ impl Renderer {
         // Pass 3: z >= 0 images (above text)
         self.render_image_placements(grid, false, fonts.metrics, options);
         self.render_unicode_placeholders(grid, fonts.metrics, options);
-
-        #[cfg(debug_assertions)]
-        if frame_dump_enabled() {
-            Self::dump_frame_to_file(&self.gl, width as u32, height as u32);
-        }
-
         Ok(())
-    }
-
-    /// Dumps the current GL back buffer to `/tmp/ftty_gpu_frame.png` for font debugging.
-    ///
-    /// Debug builds only, and only when `FTTY_DUMP_FRAME` is set, so release rendering pays
-    /// nothing and normal operation never touches the filesystem.
-    #[cfg(debug_assertions)]
-    fn dump_frame_to_file(gl: &glow::Context, width: u32, height: u32) {
-        let mut pixels = vec![0u8; (width * height * 4) as usize];
-        // SAFETY: EGL is current and `pixels` is sized for width * height RGBA8.
-        unsafe {
-            gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
-            gl.read_pixels(
-                0,
-                0,
-                width as i32,
-                height as i32,
-                glow::RGBA,
-                glow::UNSIGNED_BYTE,
-                glow::PixelPackData::Slice(Some(&mut pixels)),
-            );
-        }
-        let row_bytes = (width * 4) as usize;
-        let mut flipped = vec![0u8; pixels.len()];
-        for y in 0..height as usize {
-            let src_y = height as usize - 1 - y;
-            flipped[y * row_bytes..(y + 1) * row_bytes]
-                .copy_from_slice(&pixels[src_y * row_bytes..(src_y + 1) * row_bytes]);
-        }
-        if let Ok(file) = std::fs::File::create("/tmp/ftty_gpu_frame.png") {
-            let mut encoder = png::Encoder::new(file, width, height);
-            encoder.set_color(png::ColorType::Rgba);
-            encoder.set_depth(png::BitDepth::Eight);
-            if let Ok(mut writer) = encoder.write_header() {
-                let _ = writer.write_image_data(&flipped);
-            }
-        }
     }
 
     pub(crate) unsafe fn upload_vbo(
