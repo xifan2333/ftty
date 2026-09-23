@@ -16,6 +16,10 @@ use payload::decode_image_data;
 
 const MAX_APC_PAYLOAD: usize = 32 * 1024 * 1024;
 
+/// Upper bound on the clean-output scratch buffer retained for reuse. PTY reads are 64 KiB, so a
+/// normal buffer is always recycled; anything larger is dropped instead of pinned indefinitely.
+const MAX_RECYCLED_CLEAN_BYTES: usize = 256 * 1024;
+
 #[inline]
 fn may_contain_kitty_apc(bytes: &[u8]) -> bool {
     let mut rest = bytes;
@@ -70,21 +74,44 @@ impl KittyParser {
         if self.is_fast_path(incoming) {
             return (incoming.to_vec(), Vec::new());
         }
-        self.filter_bytes_slow(incoming)
+        // Convenience path: return an owned copy and keep the scratch capacity internal, bounded
+        // by the same retention limit as the recycled hot path. The PTY path uses
+        // `filter_bytes_slow` + `recycle_clean_buffer` to avoid this copy entirely.
+        self.filter_internal(incoming);
+        let text = self.clean_scratch.clone();
+        if self.clean_scratch.capacity() > MAX_RECYCLED_CLEAN_BYTES {
+            self.clean_scratch = Vec::new();
+        } else {
+            self.clean_scratch.clear();
+        }
+        let events = std::mem::take(&mut self.events_scratch);
+        (text, events)
     }
 
     /// Filters an incoming byte stream known to require slow-path APC filtering,
     /// bypassing redundant `is_fast_path` inspection.
+    ///
+    /// The cleaned bytes are transferred by move as the parser's own scratch buffer rather than
+    /// cloned. Hot-path callers must return that buffer via [`Self::recycle_clean_buffer`] once the
+    /// bytes have been consumed so its capacity can be reused.
     pub fn filter_bytes_slow(&mut self, incoming: &[u8]) -> (Vec<u8>, Vec<KittyEvent>) {
         self.filter_internal(incoming);
-        let text = if self.clean_scratch.is_empty() {
-            Vec::new()
-        } else {
-            self.clean_scratch.clone()
-        };
-        self.clean_scratch.clear();
+        let text = std::mem::take(&mut self.clean_scratch);
         let events = std::mem::take(&mut self.events_scratch);
         (text, events)
+    }
+
+    /// Returns a buffer previously handed out by [`Self::filter_bytes_slow`] for reuse.
+    ///
+    /// Capacity is retained only while it stays within [`MAX_RECYCLED_CLEAN_BYTES`]; larger
+    /// transient buffers are dropped to avoid pinning peak allocations.
+    pub fn recycle_clean_buffer(&mut self, mut buffer: Vec<u8>) {
+        buffer.clear();
+        self.clean_scratch = if buffer.capacity() <= MAX_RECYCLED_CLEAN_BYTES {
+            buffer
+        } else {
+            Vec::new()
+        };
     }
 
     fn filter_internal(&mut self, incoming: &[u8]) {

@@ -10,7 +10,7 @@ use nix::sys::stat::Mode;
 use crate::kitty::command::parse_control_keys;
 use crate::kitty::model::{DeleteTarget, KittyAction, KittyCommand, KittyEvent, KittyMedium};
 use crate::kitty::payload::{MAX_SHM_PAYLOAD, decode_image_data, read_shm_bytes, read_shm_payload};
-use crate::kitty::{KittyParser, kitty_response};
+use crate::kitty::{KittyParser, MAX_RECYCLED_CLEAN_BYTES, kitty_response};
 
 #[test]
 fn shared_memory_loads_images_and_rejects_oversized_payloads() {
@@ -337,6 +337,41 @@ fn test_scratch_buffer_reused_without_reallocation() {
 }
 
 #[test]
+fn test_slow_filter_recycles_clean_buffer_by_move() {
+    let mut parser = KittyParser::new();
+    let payload = b"start\x1b_Gi=10,a=q;\x1b\\end";
+
+    // The hot path hands the cleaned bytes over by move, leaving the parser scratch empty.
+    let (text, events) = parser.filter_bytes_slow(payload);
+    assert_eq!(text.as_slice(), b"startend");
+    assert!(parser.clean_scratch.is_empty());
+    let cap_text = text.capacity();
+    assert!(cap_text > 0);
+    // Events are transferred out, so the parser retains no event storage.
+    assert!(parser.events_scratch.is_empty());
+    drop(events);
+
+    // Recycling retains the capacity so the next slow filter reuses the same allocation.
+    parser.recycle_clean_buffer(text);
+    assert_eq!(parser.clean_scratch.capacity(), cap_text);
+
+    let (text2, _) = parser.filter_bytes_slow(payload);
+    assert_eq!(text2.as_slice(), b"startend");
+    assert!(text2.capacity() >= cap_text);
+    parser.recycle_clean_buffer(text2);
+}
+
+#[test]
+fn test_recycle_clean_buffer_drops_oversized_allocations() {
+    let mut parser = KittyParser::new();
+    parser.recycle_clean_buffer(Vec::with_capacity(MAX_RECYCLED_CLEAN_BYTES + 1));
+    assert_eq!(parser.clean_scratch.capacity(), 0);
+
+    parser.recycle_clean_buffer(Vec::with_capacity(4096));
+    assert!(parser.clean_scratch.capacity() >= 4096);
+}
+
+#[test]
 fn test_split_escape_crosses_chunk_into_processed() {
     let mut parser = KittyParser::new();
     // Chunk 1 ends with escape (not fast path)
@@ -414,4 +449,22 @@ fn test_image_remains_valid_for_placements_after_cpu_buffer_unload() {
     // Eviction budget accurately counts unloaded images
     let total_stored: usize = grid.images.values().map(ImageData::byte_size).sum();
     assert_eq!(total_stored, 64 * 64 * 4);
+}
+
+#[test]
+fn test_convenience_filter_drops_oversized_scratch_allocation() {
+    let mut parser = KittyParser::new();
+    // Large clean output followed by a lone ESC forces the slow path with a big scratch buffer.
+    let mut payload = vec![b'x'; MAX_RECYCLED_CLEAN_BYTES + 16];
+    payload.push(0x1b);
+
+    let (text, _) = parser.filter_bytes(&payload);
+    assert_eq!(text.len(), MAX_RECYCLED_CLEAN_BYTES + 16);
+    // The retained scratch must respect the same bound as the recycled hot path.
+    assert!(parser.clean_scratch.capacity() <= MAX_RECYCLED_CLEAN_BYTES);
+
+    // Small inputs keep reusing a bounded scratch capacity.
+    let (_, _) = parser.filter_bytes(b"hello\x1b");
+    let cap = parser.clean_scratch.capacity();
+    assert!(cap > 0 && cap <= MAX_RECYCLED_CLEAN_BYTES);
 }
