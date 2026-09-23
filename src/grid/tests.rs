@@ -1304,6 +1304,48 @@ fn test_stored_images_byte_budget_eviction() {
 }
 
 #[test]
+fn test_image_bytes_counter_tracks_add_replace_and_remove() {
+    let mut grid = Grid::new(80, 24, 100);
+    let size = |w: u32, h: u32| (w as usize) * (h as usize) * 4;
+
+    grid.add_image(ImageData {
+        id: 1,
+        width: 10,
+        height: 10,
+        rgba: None,
+    });
+    grid.add_image(ImageData {
+        id: 2,
+        width: 20,
+        height: 20,
+        rgba: None,
+    });
+    assert_eq!(grid.total_image_bytes(), size(10, 10) + size(20, 20));
+
+    // Replacing an existing id must not double count the old pixels.
+    grid.add_image(ImageData {
+        id: 1,
+        width: 30,
+        height: 5,
+        rgba: None,
+    });
+    assert_eq!(grid.total_image_bytes(), size(30, 5) + size(20, 20));
+
+    // Unloading the CPU buffer after GPU upload must not affect the decoded byte budget.
+    if let Some(img) = grid.images.get_mut(&2) {
+        img.rgba = None;
+    }
+    assert_eq!(grid.total_image_bytes(), size(30, 5) + size(20, 20));
+
+    grid.delete_images(crate::kitty::DeleteTarget::ById(1));
+    assert_eq!(grid.total_image_bytes(), size(20, 20));
+
+    grid.delete_images(crate::kitty::DeleteTarget::All);
+    assert_eq!(grid.total_image_bytes(), 0);
+    assert!(grid.images.is_empty());
+}
+
+#[test]
 fn test_single_oversized_image_rejected_without_exceeding_budget() {
     let mut grid = Grid::new(80, 24, 100);
     // 5000 x 5000 x 4 bytes = 100 MB > 64 MB cap
