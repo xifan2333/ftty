@@ -284,7 +284,7 @@ impl Grid {
         }
     }
 
-    /// Marks all rows in the visible screen, alternate screen, and scrollback as dirty.
+    /// Marks all rows in the visible screen, alternate screen, and currently displayed viewport rows as dirty.
     pub fn mark_all_dirty(&self) {
         for row in &self.lines {
             row.dirty.set(true);
@@ -295,9 +295,14 @@ impl Grid {
             }
         }
         if self.viewport_offset > 0 {
-            for row in &self.scrollback {
-                row.dirty.set(true);
-            }
+            self.mark_visible_dirty();
+        }
+    }
+
+    /// Marks all rows currently displayed in the visible viewport as dirty without traversing full scrollback history.
+    pub fn mark_visible_dirty(&self) {
+        for r in 0..self.rows {
+            self.visible_line(r).dirty.set(true);
         }
     }
 
@@ -404,7 +409,7 @@ impl Grid {
                 .min(self.scrollback.len());
             if new_offset != self.viewport_offset {
                 self.viewport_offset = new_offset;
-                self.mark_all_dirty();
+                self.mark_visible_dirty();
             }
         } else if let Some(&first) = self.prompt_marks.iter().next() {
             let rel_mark = first.saturating_sub(self.total_evicted_rows);
@@ -415,7 +420,7 @@ impl Grid {
                 .min(self.scrollback.len());
             if new_offset != self.viewport_offset {
                 self.viewport_offset = new_offset;
-                self.mark_all_dirty();
+                self.mark_visible_dirty();
             }
         }
     }
@@ -433,7 +438,7 @@ impl Grid {
             let new_offset = self.scrollback.len().saturating_sub(rel_mark);
             if new_offset != self.viewport_offset {
                 self.viewport_offset = new_offset;
-                self.mark_all_dirty();
+                self.mark_visible_dirty();
             }
         } else {
             self.scroll_viewport_bottom();
@@ -454,7 +459,7 @@ impl Grid {
         // If user is currently viewing history, keep the view anchored on the same lines
         if self.viewport_offset > 0 {
             self.viewport_offset = (self.viewport_offset + 1).min(self.scrollback.len());
-            self.mark_all_dirty();
+            self.mark_visible_dirty();
         }
     }
 
@@ -467,7 +472,7 @@ impl Grid {
         let new_offset = self.viewport_offset.saturating_add(delta).min(max_offset);
         if new_offset != self.viewport_offset {
             self.viewport_offset = new_offset;
-            self.mark_all_dirty();
+            self.mark_visible_dirty();
         }
     }
 
@@ -479,7 +484,7 @@ impl Grid {
         let new_offset = self.viewport_offset.saturating_sub(delta);
         if new_offset != self.viewport_offset {
             self.viewport_offset = new_offset;
-            self.mark_all_dirty();
+            self.mark_visible_dirty();
         }
     }
 
@@ -491,7 +496,7 @@ impl Grid {
         let max_offset = self.scrollback.len();
         if self.viewport_offset != max_offset {
             self.viewport_offset = max_offset;
-            self.mark_all_dirty();
+            self.mark_visible_dirty();
         }
     }
 
@@ -499,7 +504,7 @@ impl Grid {
     pub fn scroll_viewport_bottom(&mut self) {
         if self.viewport_offset != 0 {
             self.viewport_offset = 0;
-            self.mark_all_dirty();
+            self.mark_visible_dirty();
         }
     }
 
@@ -615,7 +620,7 @@ impl Grid {
                         if self.viewport_offset > 0 {
                             self.viewport_offset =
                                 (self.viewport_offset + 1).min(self.scrollback.len());
-                            self.mark_all_dirty();
+                            self.mark_visible_dirty();
                         }
                     }
                 } else {
