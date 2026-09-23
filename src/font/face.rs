@@ -9,58 +9,6 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use freetype::RenderMode;
 use freetype::face::LoadFlag;
 
-use crate::config::{FreeTypeLoadFlags, FreeTypeLoadTarget, FreeTypeRenderTarget};
-
-/// Unified FreeType rasterization configuration aligned with WezTerm options.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FreeTypeConfig {
-    pub load_target: FreeTypeLoadTarget,
-    pub render_target: FreeTypeRenderTarget,
-    pub load_flags: FreeTypeLoadFlags,
-}
-
-impl Default for FreeTypeConfig {
-    fn default() -> Self {
-        Self {
-            load_target: FreeTypeLoadTarget::Light,
-            render_target: FreeTypeRenderTarget::HorizontalLcd,
-            load_flags: FreeTypeLoadFlags::Default,
-        }
-    }
-}
-
-impl FreeTypeConfig {
-    #[must_use]
-    pub fn compute_load_flags(self) -> LoadFlag {
-        // WezTerm always folds the load target into the load flags, even when hinting is
-        // disabled: FT_LOAD_TARGET_LIGHT still governs sub-pixel outline rounding and must
-        // match the reference pipeline or glyphs gain an extra faint coverage row.
-        let mut flags = match self.load_flags {
-            FreeTypeLoadFlags::NoHinting => LoadFlag::NO_HINTING,
-            FreeTypeLoadFlags::Default => LoadFlag::DEFAULT,
-        };
-        flags |= match self.load_target {
-            FreeTypeLoadTarget::Light => LoadFlag::TARGET_LIGHT,
-            FreeTypeLoadTarget::Normal => LoadFlag::TARGET_NORMAL,
-            FreeTypeLoadTarget::Mono => LoadFlag::TARGET_MONO,
-            FreeTypeLoadTarget::HorizontalLcd => LoadFlag::TARGET_LCD,
-        };
-        flags
-    }
-
-    #[must_use]
-    pub fn compute_render_mode(self, is_subpixel_preferred: bool) -> RenderMode {
-        match self.render_target {
-            FreeTypeRenderTarget::HorizontalLcd if is_subpixel_preferred => RenderMode::Lcd,
-            FreeTypeRenderTarget::HorizontalLcd | FreeTypeRenderTarget::Normal => {
-                RenderMode::Normal
-            }
-            FreeTypeRenderTarget::Light => RenderMode::Light,
-            FreeTypeRenderTarget::Mono => RenderMode::Mono,
-        }
-    }
-}
-
 fn ft_global_lock() -> MutexGuard<'static, ()> {
     static FT_LOCK: Mutex<()> = Mutex::new(());
     FT_LOCK
@@ -274,8 +222,7 @@ impl Font {
         &self,
         glyph_index: u16,
         font_size: f32,
-        ft_config: FreeTypeConfig,
-        subpixel_preferred: bool,
+        subpixel: bool,
         bgr: bool,
     ) -> RasterizedGlyph {
         let guard = self.inner.borrow();
@@ -283,8 +230,12 @@ impl Font {
             return RasterizedGlyph::empty();
         };
         Self::set_font_size(face, font_size);
-        let load_flags = ft_config.compute_load_flags();
-        let render_mode = ft_config.compute_render_mode(subpixel_preferred);
+        let load_flags = LoadFlag::DEFAULT | LoadFlag::TARGET_LIGHT;
+        let render_mode = if subpixel {
+            RenderMode::Lcd
+        } else {
+            RenderMode::Normal
+        };
         if face.load_glyph(glyph_index as u32, load_flags).is_err() {
             return RasterizedGlyph::empty();
         }

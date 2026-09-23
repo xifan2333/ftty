@@ -128,23 +128,14 @@ fn main() {
     let _ = conn.flush();
 
     // Step 2: Load font manager synchronously with 100% fidelity
-    let ft_config = ftty::FreeTypeConfig {
-        load_target: config.freetype_load_target(),
-        render_target: config.freetype_render_target(),
-        load_flags: config.freetype_load_flags(),
-    };
-    let font_mgr = match ftty::FontManager::load_with_families_and_config(
-        &config.font_families(),
-        config.font_size(),
-        ft_config,
-        true,
-    ) {
-        Ok(fm) => fm,
-        Err(e) => {
-            eprintln!("ftty: failed to load fonts: {e}");
-            std::process::exit(1);
-        }
-    };
+    let font_mgr =
+        match ftty::FontManager::load_with_families(&config.font_families(), config.font_size()) {
+            Ok(fm) => fm,
+            Err(e) => {
+                eprintln!("ftty: failed to load fonts: {e}");
+                std::process::exit(1);
+            }
+        };
 
     let cols = 80;
     let rows = 24;
