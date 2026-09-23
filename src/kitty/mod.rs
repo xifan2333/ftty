@@ -70,7 +70,12 @@ impl KittyParser {
         if self.is_fast_path(incoming) {
             return (incoming.to_vec(), Vec::new());
         }
+        self.filter_bytes_slow(incoming)
+    }
 
+    /// Filters an incoming byte stream known to require slow-path APC filtering,
+    /// bypassing redundant `is_fast_path` inspection.
+    pub fn filter_bytes_slow(&mut self, incoming: &[u8]) -> (Vec<u8>, Vec<KittyEvent>) {
         self.filter_internal(incoming);
         let text = if self.clean_scratch.is_empty() {
             Vec::new()

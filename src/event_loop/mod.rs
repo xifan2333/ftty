@@ -382,7 +382,7 @@ pub fn run_event_loop_with_connection(
                                     state.process_terminal_output(incoming, &pty_qh);
                                 } else {
                                     let (clean_text, events) =
-                                        state.kitty_parser.filter_bytes(incoming);
+                                        state.kitty_parser.filter_bytes_slow(incoming);
                                     for event in &events {
                                         if let KittyEvent::Response(resp) = event {
                                             state.write_pty_blocking(resp);
