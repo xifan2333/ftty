@@ -7,7 +7,9 @@ pub(crate) mod sgr;
 #[cfg(test)]
 mod tests;
 
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::rc::Rc;
 
 pub use vte::Parser;
 use vte::{Params, Perform};
@@ -88,7 +90,11 @@ pub struct Terminal {
     /// Currently active hyperlink ID for incoming text.
     pub active_hyperlink: Option<u32>,
     pub(crate) next_hyperlink_id: u32,
-    pub(crate) hyperlink_pool: Vec<(u32, String)>,
+    /// O(1) interning tables for OSC 8 hyperlink URLs. A single `Rc<str>` allocation is shared
+    /// between both maps, and `hyperlink_order` tracks FIFO eviction order.
+    pub(crate) hyperlinks_by_url: HashMap<Rc<str>, u32>,
+    pub(crate) hyperlinks_by_id: HashMap<u32, Rc<str>>,
+    pub(crate) hyperlink_order: VecDeque<u32>,
     /// Active flags for the Kitty keyboard protocol.
     pub kitty_keyboard_flags: u8,
     pub kitty_keyboard_stack: Vec<u8>,
@@ -184,7 +190,9 @@ impl Terminal {
             progress: None,
             active_hyperlink: None,
             next_hyperlink_id: 1,
-            hyperlink_pool: Vec::new(),
+            hyperlinks_by_url: HashMap::new(),
+            hyperlinks_by_id: HashMap::new(),
+            hyperlink_order: VecDeque::new(),
             kitty_keyboard_flags: 0,
             kitty_keyboard_stack: Vec::new(),
             pending_kitty_keyboard: None,
@@ -272,21 +280,27 @@ impl Terminal {
     /// The pool is bounded to [`MAX_HYPERLINKS`]. When capacity is reached, the oldest
     /// entry is evicted via FIFO while preserving unique identifiers for surviving URLs.
     pub fn get_or_intern_hyperlink(&mut self, url: String) -> u32 {
-        if let Some((id, _)) = self.hyperlink_pool.iter().find(|(_, u)| u == &url) {
-            *id
-        } else {
-            if self.hyperlink_pool.len() >= MAX_HYPERLINKS {
-                self.hyperlink_pool.remove(0);
-            }
-            let id = self.next_hyperlink_id;
-            self.next_hyperlink_id = if self.next_hyperlink_id == u32::MAX {
-                1
-            } else {
-                self.next_hyperlink_id + 1
-            };
-            self.hyperlink_pool.push((id, url));
-            id
+        // Fast path: the URL is already interned (borrow lookup by `&str`).
+        if let Some(&id) = self.hyperlinks_by_url.get(url.as_str()) {
+            return id;
         }
+        if self.hyperlink_order.len() >= MAX_HYPERLINKS
+            && let Some(oldest) = self.hyperlink_order.pop_front()
+            && let Some(old_url) = self.hyperlinks_by_id.remove(&oldest)
+        {
+            self.hyperlinks_by_url.remove(old_url.as_ref());
+        }
+        let id = self.next_hyperlink_id;
+        self.next_hyperlink_id = if self.next_hyperlink_id == u32::MAX {
+            1
+        } else {
+            self.next_hyperlink_id + 1
+        };
+        let url: Rc<str> = Rc::from(url);
+        self.hyperlinks_by_url.insert(Rc::clone(&url), id);
+        self.hyperlinks_by_id.insert(id, url);
+        self.hyperlink_order.push_back(id);
+        id
     }
 
     /// Resolves a hyperlink ID to its underlying URL.
@@ -295,10 +309,7 @@ impl Terminal {
         if id == 0 {
             return None;
         }
-        self.hyperlink_pool
-            .iter()
-            .find(|(i, _)| *i == id)
-            .map(|(_, u)| u.as_str())
+        self.hyperlinks_by_id.get(&id).map(Rc::as_ref)
     }
 
     /// Drains pending clipboard updates received through OSC 52.
@@ -596,7 +607,9 @@ impl Perform for Terminal {
                 self.active_hyperlink = None;
                 self.grid.clear_all_hyperlinks();
                 self.grid.prompt_marks.clear();
-                self.hyperlink_pool.clear();
+                self.hyperlinks_by_url.clear();
+                self.hyperlinks_by_id.clear();
+                self.hyperlink_order.clear();
                 self.title.clear();
                 self.title_dirty = true;
                 self.default_fg = self.initial_default_fg;
