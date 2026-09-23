@@ -430,29 +430,7 @@ fn test_subpixel_and_grayscale_rasterization() {
 }
 
 #[test]
-fn test_srgb_optical_alpha_transfer_table() {
-    use crate::font::face::LINEAR_TO_SRGB;
-
-    // Boundaries must map identically to 0 and 255
-    assert_eq!(LINEAR_TO_SRGB[0], 0);
-    assert_eq!(LINEAR_TO_SRGB[255], 255);
-
-    // Curve must be strictly non-decreasing across the entire u8 domain
-    for i in 0..255 {
-        assert!(
-            LINEAR_TO_SRGB[i] <= LINEAR_TO_SRGB[i + 1],
-            "inversion at {i}: {} > {}",
-            LINEAR_TO_SRGB[i],
-            LINEAR_TO_SRGB[i + 1]
-        );
-    }
-
-    // Mid-tone (50% geometric coverage) must be perceptually expanded for sRGB displays (~73.5%)
-    assert_eq!(LINEAR_TO_SRGB[128], 188);
-    // Low-mid tone (25% coverage) must be expanded (~53.7%)
-    assert_eq!(LINEAR_TO_SRGB[64], 137);
-
-    // Rasterization must apply the sRGB table and boost anti-aliased edge coverage
+fn test_raw_linear_geometric_coverage_preservation() {
     let fonts =
         FontManager::load_with_families_and_subpixel(&["monospace".to_string()], 14.0, false)
             .expect("load font");
@@ -462,20 +440,21 @@ fn test_srgb_optical_alpha_transfer_table() {
     let max_val = glyph.pixels.iter().copied().max().unwrap_or(0);
     assert!(max_val >= 250);
 
-    // Compare raw FreeType buffer directly with LINEAR_TO_SRGB to ensure partial-coverage
-    // edge pixels are transformed rather than identity-mapped.
+    // Compare raw FreeType buffer directly with rasterized pixels to ensure raw linear geometric coverage
+    // is preserved identically (1:1), eliminating synthetic sRGB alpha bloat and over-darkening.
     let fc = fontconfig().expect("fontconfig must be initialized");
     let (path, index) = match_family(fc, "monospace", false, false).expect("system monospace");
     let lib = freetype::Library::init().expect("ft init");
     let face = lib.new_face(&path, index as isize).expect("new face");
-    face.set_char_size(0, (14.0 * 64.0) as isize, 72, 72)
-        .expect("set size");
+    face.set_pixel_sizes(0, 14).expect("set pixel size");
     face.load_glyph(
         face.get_char_index('M' as usize).unwrap_or(0),
-        freetype::face::LoadFlag::RENDER | freetype::face::LoadFlag::TARGET_LIGHT,
+        freetype::face::LoadFlag::TARGET_LIGHT,
     )
     .expect("load glyph");
     let slot = face.glyph();
+    slot.render_glyph(freetype::RenderMode::Normal)
+        .expect("render glyph");
     let bmp = slot.bitmap();
     let raw_buf = bmp.buffer();
     let raw_partial = raw_buf
@@ -483,26 +462,27 @@ fn test_srgb_optical_alpha_transfer_table() {
         .copied()
         .find(|&b| (20..=180).contains(&b))
         .expect("glyph must contain edge pixels with partial coverage");
-    let expected = LINEAR_TO_SRGB[raw_partial as usize];
-    assert!(
-        expected > raw_partial,
-        "sRGB transfer curve must strictly expand partial coverage {raw_partial} -> {expected}"
-    );
-    assert!(
-        glyph.pixels.contains(&expected),
-        "rasterized glyph pixels must contain the boosted sRGB value {expected} from raw {raw_partial}"
-    );
-    // Alpha channel must preserve raw linear coverage to eliminate bloated strokes
-    let linear_in_alpha = glyph
+
+    // All channels including alpha must contain the raw linear coverage without expansion
+    let contains_raw = glyph
         .pixels
         .as_chunks::<4>()
         .0
         .iter()
-        .any(|chunk| chunk[3] == raw_partial);
+        .any(|chunk| chunk[3] == raw_partial && chunk[0] == raw_partial);
     assert!(
-        linear_in_alpha,
-        "glyph alpha channel must preserve raw linear geometric coverage {raw_partial}"
+        contains_raw,
+        "rasterized glyph pixels must preserve raw FreeType linear coverage {raw_partial}"
     );
+}
+
+#[test]
+fn test_cell_metrics_uses_round_not_ceil() {
+    let fonts = fonts();
+    let adv = fonts.regular.primary.glyph_advance_width('0', 12.0);
+    let metrics = fonts.regular.primary.compute_cell_metrics(12.0);
+    // If advance width is 7.2, round() yields 7 while ceil() would bloat to 8
+    assert_eq!(metrics.cell_width, adv.round().max(1.0) as u32);
 }
 
 #[test]
