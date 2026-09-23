@@ -10,7 +10,7 @@ use nix::sys::stat::Mode;
 use crate::kitty::command::parse_control_keys;
 use crate::kitty::model::{DeleteTarget, KittyAction, KittyCommand, KittyEvent, KittyMedium};
 use crate::kitty::payload::{MAX_SHM_PAYLOAD, decode_image_data, read_shm_bytes, read_shm_payload};
-use crate::kitty::{KittyParser, kitty_response};
+use crate::kitty::{KittyParser, MAX_RECYCLED_CLEAN_BYTES, kitty_response};
 
 #[test]
 fn shared_memory_loads_images_and_rejects_oversized_payloads() {
@@ -334,6 +334,41 @@ fn test_scratch_buffer_reused_without_reallocation() {
         assert_eq!(parser.clean_scratch.capacity(), cap_text);
         assert!(parser.events_scratch.is_empty());
     }
+}
+
+#[test]
+fn test_slow_filter_recycles_clean_buffer_by_move() {
+    let mut parser = KittyParser::new();
+    let payload = b"start\x1b_Gi=10,a=q;\x1b\\end";
+
+    // The hot path hands the cleaned bytes over by move, leaving the parser scratch empty.
+    let (text, events) = parser.filter_bytes_slow(payload);
+    assert_eq!(text.as_slice(), b"startend");
+    assert!(parser.clean_scratch.is_empty());
+    let cap_text = text.capacity();
+    assert!(cap_text > 0);
+    // Events are transferred out, so the parser retains no event storage.
+    assert!(parser.events_scratch.is_empty());
+    drop(events);
+
+    // Recycling retains the capacity so the next slow filter reuses the same allocation.
+    parser.recycle_clean_buffer(text);
+    assert_eq!(parser.clean_scratch.capacity(), cap_text);
+
+    let (text2, _) = parser.filter_bytes_slow(payload);
+    assert_eq!(text2.as_slice(), b"startend");
+    assert!(text2.capacity() >= cap_text);
+    parser.recycle_clean_buffer(text2);
+}
+
+#[test]
+fn test_recycle_clean_buffer_drops_oversized_allocations() {
+    let mut parser = KittyParser::new();
+    parser.recycle_clean_buffer(Vec::with_capacity(MAX_RECYCLED_CLEAN_BYTES + 1));
+    assert_eq!(parser.clean_scratch.capacity(), 0);
+
+    parser.recycle_clean_buffer(Vec::with_capacity(4096));
+    assert!(parser.clean_scratch.capacity() >= 4096);
 }
 
 #[test]

@@ -389,6 +389,7 @@ pub fn run_event_loop_with_connection(
                                         }
                                     }
                                     state.process_terminal_output(&clean_text, &pty_qh);
+                                    state.kitty_parser.recycle_clean_buffer(clean_text);
                                     for event in events {
                                         if !matches!(event, KittyEvent::Response(_)) {
                                             state.handle_kitty_event(event);
