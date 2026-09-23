@@ -32,7 +32,12 @@ pub struct Grid {
     pub scrollback: VecDeque<Row>,
     pub viewport_offset: usize,
 
-    pub images: HashMap<u32, ImageData>,
+    /// Stored Kitty images keyed by image id.
+    ///
+    /// Kept crate-private so the [`Self::image_bytes_total`] budget invariant cannot be broken by
+    /// outside code mutating the map or the size-defining [`ImageData`] fields directly. Use
+    /// [`Self::images`] for read-only access and the provided mutation methods to change state.
+    pub(crate) images: HashMap<u32, ImageData>,
     /// Running sum of `ImageData::byte_size()` across `images`, kept in sync on every mutation
     /// so eviction checks never re-sum the whole map.
     pub(crate) image_bytes_total: usize,
@@ -128,6 +133,18 @@ impl Grid {
     #[must_use]
     pub fn total_image_bytes(&self) -> usize {
         self.image_bytes_total
+    }
+
+    /// Read-only view of stored images keyed by image id.
+    #[must_use]
+    pub fn images(&self) -> &HashMap<u32, ImageData> {
+        &self.images
+    }
+
+    /// Returns `true` if an image with the given id is currently stored.
+    #[must_use]
+    pub fn contains_image(&self, id: u32) -> bool {
+        self.images.contains_key(&id)
     }
 
     pub(crate) fn remove_image_internal(&mut self, k: u32) {

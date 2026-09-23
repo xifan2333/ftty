@@ -800,3 +800,19 @@ fn test_low24_placeholder_index_prefers_exact_id_and_resolves_aliases() {
     // Unrelated ids do not collide.
     assert_eq!(build_low24_index([1_u32].into_iter()).get(&2), None);
 }
+
+#[test]
+fn test_image_vertex_buffer_is_released_when_it_exceeds_retention_cap() {
+    use crate::render::MAX_RETAINED_IMAGE_VERTEX_FLOATS;
+    use crate::render::image::bounded_image_vertex_buffer;
+
+    // A modest staging buffer is retained for reuse (capacity preserved).
+    let small = Vec::<f32>::with_capacity(1024);
+    let retained = bounded_image_vertex_buffer(small);
+    assert!(retained.capacity() >= 1024);
+
+    // An oversized transient allocation is dropped rather than pinned for later frames.
+    let huge = Vec::<f32>::with_capacity(MAX_RETAINED_IMAGE_VERTEX_FLOATS + 1);
+    let released = bounded_image_vertex_buffer(huge);
+    assert!(released.capacity() <= 64);
+}
