@@ -24,7 +24,7 @@ pub mod wayland;
 
 pub use alloc::trim_memory;
 pub use color::{Color, Rgb, default_256_palette};
-pub use config::Config;
+pub use config::{Config, FreeTypeLoadFlags, FreeTypeLoadTarget, FreeTypeRenderTarget};
 pub use error::{
     ConfigError, FontError, FttyError, KittyError, PtyError, RenderError, WaylandError,
 };

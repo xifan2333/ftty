@@ -3,7 +3,7 @@ use std::fs;
 use xkbcommon::xkb;
 
 use crate::color::Rgb;
-use crate::config::Config;
+use crate::config::{Config, FreeTypeLoadFlags, FreeTypeLoadTarget, FreeTypeRenderTarget};
 use crate::grid::CursorShape;
 
 #[test]
@@ -333,4 +333,53 @@ fn test_legacy_palette_subtable_backward_compatibility() {
     let palette = config.build_palette();
     assert_eq!(palette[1], Rgb::new(255, 0, 0));
     assert_eq!(palette[4], Rgb::new(0, 0, 255));
+}
+
+#[test]
+fn test_case_insensitive_freetype_config_parsing() {
+    let toml_pascal = r#"
+    [font]
+    freetype_load_target = "Light"
+    freetype_render_target = "HorizontalLcd"
+    freetype_load_flags = "NO_HINTING"
+    "#;
+    let cfg1: Config = toml::from_str(toml_pascal).expect("parse pascal");
+    assert_eq!(cfg1.freetype_load_target(), FreeTypeLoadTarget::Light);
+    assert_eq!(
+        cfg1.freetype_render_target(),
+        FreeTypeRenderTarget::HorizontalLcd
+    );
+    assert_eq!(cfg1.freetype_load_flags(), FreeTypeLoadFlags::NoHinting);
+
+    let toml_snake_lower = r#"
+    [font]
+    freetype_load_target = "light"
+    freetype_render_target = "horizontal_lcd"
+    freetype_load_flags = "no_hinting"
+    "#;
+    let cfg2: Config = toml::from_str(toml_snake_lower).expect("parse snake lower");
+    assert_eq!(cfg2.freetype_load_target(), FreeTypeLoadTarget::Light);
+    assert_eq!(
+        cfg2.freetype_render_target(),
+        FreeTypeRenderTarget::HorizontalLcd
+    );
+    assert_eq!(cfg2.freetype_load_flags(), FreeTypeLoadFlags::NoHinting);
+
+    let toml_upper = r#"
+    [font]
+    freetype_load_target = "LIGHT"
+    freetype_render_target = "NORMAL"
+    freetype_load_flags = "DEFAULT"
+    "#;
+    let cfg3: Config = toml::from_str(toml_upper).expect("parse upper");
+    assert_eq!(cfg3.freetype_load_target(), FreeTypeLoadTarget::Light);
+    assert_eq!(cfg3.freetype_render_target(), FreeTypeRenderTarget::Normal);
+    assert_eq!(cfg3.freetype_load_flags(), FreeTypeLoadFlags::Default);
+
+    // Invalid values are rejected with informative errors
+    let toml_invalid = r#"
+    [font]
+    freetype_load_target = "super_heavy"
+    "#;
+    assert!(toml::from_str::<Config>(toml_invalid).is_err());
 }
