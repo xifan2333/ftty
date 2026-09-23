@@ -446,7 +446,8 @@ fn test_raw_linear_geometric_coverage_preservation() {
     let (path, index) = match_family(fc, "monospace", false, false).expect("system monospace");
     let lib = freetype::Library::init().expect("ft init");
     let face = lib.new_face(&path, index as isize).expect("new face");
-    face.set_pixel_sizes(0, 14).expect("set pixel size");
+    face.set_char_size(0, (14.0 * 64.0) as isize, 96, 96)
+        .expect("set char size");
     face.load_glyph(
         face.get_char_index('M' as usize).unwrap_or(0),
         freetype::face::LoadFlag::TARGET_LIGHT,
@@ -611,4 +612,25 @@ fn test_monochrome_glyph_rasterization_unpacks_bits() {
     }
     // Must contain some non-zero coverage for letter 'M'
     assert!(raster.pixels.contains(&255));
+}
+
+#[test]
+fn test_font_size_represents_points_at_standard_dpi() {
+    let fonts_9pt = FontManager::load_with_families(&["JetBrainsMono Nerd Font".to_string()], 9.0)
+        .or_else(|_| FontManager::load_with_families(&["monospace".to_string()], 9.0))
+        .expect("load 9.0pt font");
+    // At standard 96 DPI, 9.0 pt corresponds to 12.0 px height.
+    // For monospace fonts (aspect ratio ~0.6), cell width should be ~7px, not 5px.
+    assert!(fonts_9pt.metrics.cell_width >= 6 && fonts_9pt.metrics.cell_width <= 8);
+    assert!(fonts_9pt.metrics.cell_height >= 12 && fonts_9pt.metrics.cell_height <= 18);
+}
+
+#[test]
+fn test_font_fallback_dimensions_use_nominal_pixels() {
+    use crate::font::face::points_to_pixels;
+
+    // 9.0 points at 96 DPI equals 12.0 nominal pixels
+    assert!((points_to_pixels(9.0) - 12.0).abs() < 1e-4);
+    // 72.0 points at 96 DPI equals 96.0 nominal pixels
+    assert!((points_to_pixels(72.0) - 96.0).abs() < 1e-4);
 }

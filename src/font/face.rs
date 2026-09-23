@@ -133,6 +133,13 @@ pub struct Font {
     inner: Rc<RefCell<FaceWrapper>>,
 }
 
+/// Converts font typography points to nominal pixels at standard 96 DPI (72 pt == 96 px).
+#[inline]
+#[must_use]
+pub(crate) fn points_to_pixels(points: f32) -> f32 {
+    points * (96.0 / 72.0)
+}
+
 impl Font {
     /// Opens a font face from a file path in sub-milliseconds without parsing glyph outlines.
     ///
@@ -189,11 +196,12 @@ impl Font {
             .unwrap_or(0) as u16
     }
 
-    /// Sets the active character size on the face using 26.6 fractional units for sub-pixel precision.
+    /// Sets the active character size on the face using 26.6 fractional units at standard 96 DPI.
+    /// In accordance with industry standards (WezTerm, Foot, Fontconfig), font_size represents
+    /// typography points (e.g. 9.0 pt = 12.0 px at 96 DPI).
     fn set_font_size(face: &freetype::Face, font_size: f32) {
         let size_in_26_6 = (font_size * 64.0).round().max(64.0) as isize;
-        // 72 DPI ensures 1 point == 1 pixel, allowing exact fractional pixel sizing
-        let _ = face.set_char_size(0, size_in_26_6, 72, 72);
+        let _ = face.set_char_size(0, size_in_26_6, 96, 96);
     }
 
     /// Retrieves line height and baseline ascent metrics.
@@ -231,13 +239,15 @@ impl Font {
                 }
             }
         }
-        (font_size * 0.6).ceil().max(1.0)
+        let nominal_px = points_to_pixels(font_size);
+        (nominal_px * 0.6).round().max(1.0)
     }
 
     /// Computes cell dimensions (cell_width, cell_height, ascent) for the active font at the given size.
     #[must_use]
     pub fn compute_cell_metrics(&self, font_size: f32) -> crate::font::CellMetrics {
         let cell_width = self.glyph_advance_width('0', font_size).round().max(1.0) as u32;
+        let nominal_px = points_to_pixels(font_size);
         let (cell_height, ascent) = self
             .horizontal_line_metrics(font_size)
             .map(|line| {
@@ -246,7 +256,10 @@ impl Font {
                     line.ascent.round() as i32,
                 )
             })
-            .unwrap_or((font_size.round().max(1.0) as u32, font_size.round() as i32));
+            .unwrap_or((
+                nominal_px.round().max(1.0) as u32,
+                nominal_px.round() as i32,
+            ));
 
         crate::font::CellMetrics {
             cell_width,
