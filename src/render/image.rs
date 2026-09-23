@@ -145,7 +145,10 @@ impl Renderer {
         img_h: f32,
         [x0, y0, x1, y1]: [f32; 4],
     ) {
-        let mut img_vertices = Vec::with_capacity(48);
+        // Move the shared staging buffer out so it can be borrowed while `self` is mutated,
+        // then hand it back to retain its capacity for the next image.
+        let mut img_vertices = std::mem::take(&mut self.image_vertices);
+        img_vertices.clear();
         push_quad(
             &mut img_vertices,
             [x0, y0, x1, y1],
@@ -153,6 +156,7 @@ impl Renderer {
             [1.0, 1.0, 1.0, 1.0],
         );
         self.render_image_quads(tex, img_w, img_h, &img_vertices);
+        self.image_vertices = img_vertices;
     }
 
     pub(crate) fn render_image_quads(
@@ -318,8 +322,8 @@ impl Renderer {
             } else {
                 let total_c = virt_cols.max(1) as f32;
                 let total_r = virt_rows.max(1) as f32;
-                let num_cells = box_w * box_h;
-                let mut img_vertices = Vec::with_capacity(num_cells * 48);
+                let mut img_vertices = std::mem::take(&mut self.image_vertices);
+                img_vertices.clear();
 
                 for row in b.row_start..=b.row_end {
                     let line = grid.visible_line(row);
@@ -354,6 +358,7 @@ impl Renderer {
                 if !img_vertices.is_empty() {
                     self.render_image_quads(tex, img_w as f32, img_h as f32, &img_vertices);
                 }
+                self.image_vertices = img_vertices;
             }
         }
     }

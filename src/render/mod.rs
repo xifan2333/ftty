@@ -110,6 +110,8 @@ pub struct Renderer {
     pub(crate) subpixel_mode: Option<glow::UniformLocation>,
     pub(crate) has_dual_source: bool,
     pub(crate) image_textures: HashMap<u32, (glow::Texture, u32, u32, u64)>,
+    /// Scratch vertex staging buffer reused across image draws within a frame.
+    pub(crate) image_vertices: Vec<f32>,
     pub(crate) vertices: Vec<f32>,
     pub(crate) static_vertices_len: usize,
     pub(crate) vbo_full_upload: bool,
@@ -190,6 +192,7 @@ impl Renderer {
             has_dual_source,
             image_textures: HashMap::new(),
             vertices: Vec::with_capacity(8192),
+            image_vertices: Vec::with_capacity(64),
             static_vertices_len: 0,
             vbo_full_upload: true,
             row_bg: Vec::new(),
