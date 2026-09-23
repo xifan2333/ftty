@@ -134,17 +134,20 @@ impl AppState {
             self.atlas.clear();
             self.update_font_size(scaled_font_size);
             let _ = self.resize_terminal();
-        } else if size_changed {
-            self.update_font_size(scaled_font_size);
-        } else if ft_config_changed {
-            self.font_mgr.ft_config = new_ft_config;
-            self.atlas.clear();
-            self.terminal.grid.mark_all_dirty();
-            if let Some(renderer) = &mut self.renderer {
-                renderer.clear_cache();
+        } else {
+            if ft_config_changed {
+                self.font_mgr.ft_config = new_ft_config;
+                self.atlas.clear();
+                self.terminal.grid.mark_all_dirty();
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.clear_cache();
+                }
             }
-        } else if padding_changed {
-            let _ = self.resize_terminal();
+            if size_changed {
+                self.update_font_size(scaled_font_size);
+            } else if padding_changed {
+                let _ = self.resize_terminal();
+            }
         }
 
         self.needs_redraw = true;

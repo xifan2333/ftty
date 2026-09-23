@@ -358,6 +358,38 @@ impl Font {
                 pitch: (logical_width * 4) as usize,
                 pixels,
             }
+        } else if bmp.pixel_mode() == Ok(freetype::bitmap::PixelMode::Mono) {
+            // FreeType 1-bit monochrome bitmaps pack 8 pixels per byte, MSB-first.
+            let row_pixels = raw_width as usize;
+            let mut pixels = vec![0u8; (raw_width * height * 4) as usize];
+            for y in 0..height {
+                let src_y = if pitch < 0 {
+                    (height - 1 - y) as usize
+                } else {
+                    y as usize
+                };
+                let src_row = src_y * abs_pitch;
+                let dst_offset = (y as usize) * row_pixels * 4;
+                for x in 0..row_pixels {
+                    let byte_idx = src_row + (x / 8);
+                    let bit_val = if byte_idx < buffer.len() {
+                        (buffer[byte_idx] & (0x80 >> (x % 8))) != 0
+                    } else {
+                        false
+                    };
+                    let v = if bit_val { 255 } else { 0 };
+                    let dst_idx = dst_offset + x * 4;
+                    pixels[dst_idx..dst_idx + 4].copy_from_slice(&[v, v, v, v]);
+                }
+            }
+            RasterizedGlyph {
+                width: raw_width,
+                height,
+                offset_x,
+                offset_y,
+                pitch: row_pixels * 4,
+                pixels,
+            }
         } else {
             let row_pixels = raw_width as usize;
             let mut pixels = vec![0u8; (raw_width * height * 4) as usize];

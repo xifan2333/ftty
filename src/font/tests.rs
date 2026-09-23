@@ -596,3 +596,39 @@ fn test_atlas_dirty_rect_tracking_and_full_upload_reset() {
     assert!(atlas.dirty);
     assert!(atlas.dirty_rect.is_none());
 }
+
+#[test]
+fn test_monochrome_glyph_rasterization_unpacks_bits() {
+    use crate::config::{FreeTypeLoadFlags, FreeTypeLoadTarget, FreeTypeRenderTarget};
+    use crate::font::FreeTypeConfig;
+
+    let mono_cfg = FreeTypeConfig {
+        load_target: FreeTypeLoadTarget::Mono,
+        render_target: FreeTypeRenderTarget::Mono,
+        load_flags: FreeTypeLoadFlags::Default,
+    };
+
+    let fonts = fonts();
+    let glyph_idx = fonts.regular().lookup_glyph_index('M');
+    assert!(glyph_idx > 0);
+
+    let raster =
+        fonts
+            .regular()
+            .rasterize_indexed(glyph_idx, fonts.font_size, mono_cfg, false, false);
+    assert!(raster.width > 0 && raster.height > 0);
+    assert_eq!(
+        raster.pixels.len(),
+        (raster.width * raster.height * 4) as usize
+    );
+
+    // Every pixel channel in monochrome mode must strictly be either 0 or 255 (binary coverage)
+    for &p in &raster.pixels {
+        assert!(
+            p == 0 || p == 255,
+            "monochrome pixel value must be binary, got {p}"
+        );
+    }
+    // Must contain some non-zero coverage for letter 'M'
+    assert!(raster.pixels.contains(&255));
+}
