@@ -32,19 +32,19 @@ impl Default for FreeTypeConfig {
 impl FreeTypeConfig {
     #[must_use]
     pub fn compute_load_flags(self) -> LoadFlag {
+        // WezTerm always folds the load target into the load flags, even when hinting is
+        // disabled: FT_LOAD_TARGET_LIGHT still governs sub-pixel outline rounding and must
+        // match the reference pipeline or glyphs gain an extra faint coverage row.
         let mut flags = match self.load_flags {
             FreeTypeLoadFlags::NoHinting => LoadFlag::NO_HINTING,
             FreeTypeLoadFlags::Default => LoadFlag::DEFAULT,
         };
-        if self.load_flags != FreeTypeLoadFlags::NoHinting {
-            let target_flag = match self.load_target {
-                FreeTypeLoadTarget::Light => LoadFlag::TARGET_LIGHT,
-                FreeTypeLoadTarget::Normal => LoadFlag::TARGET_NORMAL,
-                FreeTypeLoadTarget::Mono => LoadFlag::TARGET_MONO,
-                FreeTypeLoadTarget::HorizontalLcd => LoadFlag::TARGET_LCD,
-            };
-            flags |= target_flag;
-        }
+        flags |= match self.load_target {
+            FreeTypeLoadTarget::Light => LoadFlag::TARGET_LIGHT,
+            FreeTypeLoadTarget::Normal => LoadFlag::TARGET_NORMAL,
+            FreeTypeLoadTarget::Mono => LoadFlag::TARGET_MONO,
+            FreeTypeLoadTarget::HorizontalLcd => LoadFlag::TARGET_LCD,
+        };
         flags
     }
 
@@ -100,6 +100,28 @@ pub struct RasterizedGlyph {
     pub pitch: usize,
     pub pixels: Vec<u8>,
 }
+
+/// Precomputed linear-geometric-coverage to sRGB8 transfer table.
+///
+/// Byte-identical to WezTerm's `linear_u8_to_srgb8`. FreeType reports linear geometric
+/// coverage; expanding it before blending keeps anti-aliased edges optically dense on the
+/// non-linear sRGB framebuffer, preventing washed-out, fuzzy-looking strokes.
+pub const LINEAR_TO_SRGB: [u8; 256] = [
+    0, 13, 22, 28, 34, 38, 42, 46, 50, 53, 56, 59, 61, 64, 66, 69, 71, 73, 75, 77, 79, 81, 83, 85,
+    86, 88, 90, 92, 93, 95, 96, 98, 99, 101, 102, 104, 105, 106, 108, 109, 110, 112, 113, 114, 115,
+    117, 118, 119, 120, 121, 122, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136,
+    137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 148, 149, 150, 151, 152, 153, 154,
+    155, 155, 156, 157, 158, 159, 159, 160, 161, 162, 163, 163, 164, 165, 166, 167, 167, 168, 169,
+    170, 170, 171, 172, 173, 173, 174, 175, 175, 176, 177, 178, 178, 179, 180, 180, 181, 182, 182,
+    183, 184, 185, 185, 186, 187, 187, 188, 189, 189, 190, 190, 191, 192, 192, 193, 194, 194, 195,
+    196, 196, 197, 197, 198, 199, 199, 200, 200, 201, 202, 202, 203, 203, 204, 205, 205, 206, 206,
+    207, 208, 208, 209, 209, 210, 210, 211, 212, 212, 213, 213, 214, 214, 215, 215, 216, 216, 217,
+    218, 218, 219, 219, 220, 220, 221, 221, 222, 222, 223, 223, 224, 224, 225, 226, 226, 227, 227,
+    228, 228, 229, 229, 230, 230, 231, 231, 232, 232, 233, 233, 234, 234, 235, 235, 236, 236, 237,
+    237, 238, 238, 238, 239, 239, 240, 240, 241, 241, 242, 242, 243, 243, 244, 244, 245, 245, 246,
+    246, 246, 247, 247, 248, 248, 249, 249, 250, 250, 251, 251, 251, 252, 252, 253, 253, 254, 254,
+    255, 255,
+];
 
 impl RasterizedGlyph {
     #[must_use]
@@ -306,8 +328,9 @@ impl Font {
 
         if bmp.pixel_mode() == Ok(freetype::bitmap::PixelMode::Lcd) {
             // FreeType LCD bitmaps produce 3 horizontal subpixel coverage bytes per logical pixel.
-            // Raw linear geometric coverage is preserved across both RGB stripes and Alpha channel,
-            // matching WezTerm and Foot to eliminate over-darkened and bloated stroke outlines.
+            // RGB stripes are gamma-expanded for sRGB blending (WezTerm's `linear_u8_to_srgb8`),
+            // while the Alpha channel keeps the raw linear geometric coverage. Blending uses the
+            // RGB stripes, so the expansion is what keeps edges optically dense instead of fuzzy.
             let logical_width = (raw_width / 3).max(1);
             let mut pixels = vec![0u8; (logical_width * height * 4) as usize];
             for y in 0..height {
@@ -325,11 +348,14 @@ impl Font {
                         let raw_g = buffer[src_idx + 1];
                         let raw_b = buffer[src_idx + 2];
                         let linear_alpha = raw_r.max(raw_g).max(raw_b);
-                        let (r_out, b_out) = if bgr { (raw_b, raw_r) } else { (raw_r, raw_b) };
+                        let r = LINEAR_TO_SRGB[raw_r as usize];
+                        let g = LINEAR_TO_SRGB[raw_g as usize];
+                        let b = LINEAR_TO_SRGB[raw_b as usize];
+                        let (r_out, b_out) = if bgr { (b, r) } else { (r, b) };
                         let dst_idx = dst_row + (x as usize) * 4;
                         pixels[dst_idx..dst_idx + 4].copy_from_slice(&[
                             r_out,
-                            raw_g,
+                            g,
                             b_out,
                             linear_alpha,
                         ]);
@@ -390,11 +416,12 @@ impl Font {
                 for x in 0..row_pixels {
                     if src_offset + x < buffer.len() {
                         let linear_gray = buffer[src_offset + x];
+                        let gray = LINEAR_TO_SRGB[linear_gray as usize];
                         let dst_idx = dst_offset + x * 4;
                         pixels[dst_idx..dst_idx + 4].copy_from_slice(&[
-                            linear_gray,
-                            linear_gray,
-                            linear_gray,
+                            gray,
+                            gray,
+                            gray,
                             linear_gray,
                         ]);
                     }
