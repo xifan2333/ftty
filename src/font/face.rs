@@ -189,11 +189,12 @@ impl Font {
             .unwrap_or(0) as u16
     }
 
-    /// Sets the active character size on the face using 26.6 fractional units for sub-pixel precision.
+    /// Sets the active character size on the face using 26.6 fractional units at standard 96 DPI.
+    /// In accordance with industry standards (WezTerm, Foot, Fontconfig), font_size represents
+    /// typography points (e.g. 9.0 pt = 12.0 px at 96 DPI).
     fn set_font_size(face: &freetype::Face, font_size: f32) {
         let size_in_26_6 = (font_size * 64.0).round().max(64.0) as isize;
-        // 72 DPI ensures 1 point == 1 pixel, allowing exact fractional pixel sizing
-        let _ = face.set_char_size(0, size_in_26_6, 72, 72);
+        let _ = face.set_char_size(0, size_in_26_6, 96, 96);
     }
 
     /// Retrieves line height and baseline ascent metrics.

@@ -10,7 +10,7 @@ use crate::grid::CursorShape;
 fn test_default_config_values() {
     let config = Config::default();
     assert_eq!(config.font_family(), "monospace");
-    assert_eq!(config.font_size(), 14.0);
+    assert_eq!(config.font_size(), 10.0);
     assert_eq!(config.padding(), [0, 0]);
     assert_eq!(config.cursor_shape(), CursorShape::Block);
     assert_eq!(config.foreground(), Rgb::new(220, 220, 220));
