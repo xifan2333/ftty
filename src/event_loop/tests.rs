@@ -204,6 +204,54 @@ fn test_combined_reload_updates_size_freetype_and_padding() {
 }
 
 #[test]
+fn test_reload_config_synchronizes_subpixel_mode() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("ftty_subpixel_reload_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+    let config_path = temp_dir.join("ftty.toml");
+
+    std::fs::write(
+        &config_path,
+        r##"
+        [font]
+        size = 9.0
+        freetype_render_target = "Normal"
+        "##,
+    )
+    .unwrap();
+
+    let term = Terminal::new(80, 24, 100);
+    let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
+    let mut app =
+        AppState::with_config(term, pty, Some(config_path.clone())).expect("AppState with_config");
+
+    // Initially with Normal render target, subpixel must be disabled
+    assert!(!app.is_subpixel_enabled());
+    assert!(!app.font_mgr.subpixel);
+
+    // Reload with HorizontalLcd render target
+    std::fs::write(
+        &config_path,
+        r##"
+        [font]
+        size = 9.0
+        freetype_render_target = "HorizontalLcd"
+        "##,
+    )
+    .unwrap();
+
+    app.reload_config();
+    assert_eq!(
+        app.font_mgr.ft_config.render_target,
+        crate::config::FreeTypeRenderTarget::HorizontalLcd
+    );
+    // In headless test without a renderer, is_subpixel_enabled is safely false
+    assert_eq!(app.font_mgr.subpixel, app.is_subpixel_enabled());
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
 fn test_failed_reload_preserves_state() {
     use crate::grid::CursorShape;
 

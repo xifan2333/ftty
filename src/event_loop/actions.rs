@@ -71,12 +71,21 @@ impl AppState {
         };
         let ft_config_changed = self.font_mgr.ft_config != new_ft_config;
 
+        let new_subpixel = {
+            let configured = matches!(
+                new_config.freetype_render_target(),
+                crate::config::FreeTypeRenderTarget::HorizontalLcd
+            );
+            let has_dual_source = self.renderer.as_ref().is_some_and(|r| r.has_dual_source);
+            configured && has_dual_source && self.is_subpixel_preferred()
+        };
+
         let maybe_new_font = if families_changed {
             match FontManager::load_with_families_and_config(
                 &new_config.font_families(),
                 new_config.font_size(),
                 new_ft_config,
-                true,
+                new_subpixel,
             ) {
                 Ok(mgr) => Some(mgr),
                 Err(e) => {
@@ -129,13 +138,16 @@ impl AppState {
             crate::font::MAX_RASTER_FONT_SIZE,
         );
 
+        let subpixel_changed = self.font_mgr.subpixel != new_subpixel;
+        self.font_mgr.subpixel = new_subpixel;
+
         if let Some(new_font_mgr) = maybe_new_font {
             self.font_mgr = new_font_mgr;
             self.atlas.clear();
             self.update_font_size(scaled_font_size);
             let _ = self.resize_terminal();
         } else {
-            if ft_config_changed {
+            if ft_config_changed || subpixel_changed {
                 self.font_mgr.ft_config = new_ft_config;
                 self.atlas.clear();
                 self.terminal.grid.mark_all_dirty();

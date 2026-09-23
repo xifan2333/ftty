@@ -124,6 +124,17 @@ impl AppState {
         )
     }
 
+    /// Returns `true` if horizontal LCD subpixel rendering is configured, supported by GPU, and preferred by output.
+    #[must_use]
+    pub fn is_subpixel_enabled(&self) -> bool {
+        let configured = matches!(
+            self.config.freetype_render_target(),
+            crate::config::FreeTypeRenderTarget::HorizontalLcd
+        );
+        let has_dual_source = self.renderer.as_ref().is_some_and(|r| r.has_dual_source);
+        configured && has_dual_source && self.is_subpixel_preferred()
+    }
+
     /// Returns `true` if the reported Wayland output geometry has a BGR horizontal subpixel layout.
     #[must_use]
     pub fn is_bgr_subpixel(&self) -> bool {
@@ -146,11 +157,15 @@ impl AppState {
             render_target: config.freetype_render_target(),
             load_flags: config.freetype_load_flags(),
         };
+        let initial_subpixel = matches!(
+            config.freetype_render_target(),
+            crate::config::FreeTypeRenderTarget::HorizontalLcd
+        );
         let font_mgr = FontManager::load_with_families_and_config(
             &config.font_families(),
             config.font_size(),
             ft_config,
-            true,
+            initial_subpixel,
         )?;
         Self::with_font_and_config(terminal, pty, font_mgr, config, config_path)
     }
