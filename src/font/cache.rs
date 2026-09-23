@@ -9,7 +9,7 @@ use std::time::SystemTime;
 use crate::font::{CellMetrics, MAX_FONT_SIZE, MIN_FONT_SIZE};
 
 const CACHE_MAGIC: &[u8; 8] = b"FTTYFONT";
-const CACHE_VERSION: u32 = 6;
+const CACHE_VERSION: u32 = 7;
 
 /// Maximum number of font family names supported in a single cache entry.
 pub const MAX_CACHED_FAMILIES: usize = 64;
@@ -464,6 +464,7 @@ mod tests {
         assert!(deserialize_cache(b"FTTYFONT\x03\x00\x00\x00").is_none()); // Version 3 mismatch
         assert!(deserialize_cache(b"FTTYFONT\x04\x00\x00\x00").is_none()); // Version 4 mismatch
         assert!(deserialize_cache(b"FTTYFONT\x05\x00\x00\x00").is_none()); // Version 5 mismatch
+        assert!(deserialize_cache(b"FTTYFONT\x06\x00\x00\x00").is_none()); // Version 6 mismatch
     }
 
     #[test]

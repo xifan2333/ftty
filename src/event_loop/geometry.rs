@@ -103,7 +103,12 @@ impl AppState {
                 .ok_or(WaylandError::WindowNotCreated)?;
             let renderer = Renderer::new(surface, connection, physical_size)?;
             // Automatically align font rasterization mode with GPU dual-source blending and output subpixel layout
-            let enable_subpixel = renderer.has_dual_source && self.is_subpixel_preferred();
+            let configured_subpixel = matches!(
+                self.config.freetype_render_target(),
+                crate::config::FreeTypeRenderTarget::HorizontalLcd
+            );
+            let enable_subpixel =
+                configured_subpixel && renderer.has_dual_source && self.is_subpixel_preferred();
             let bgr = self.is_bgr_subpixel();
             if self.font_mgr.subpixel != enable_subpixel || self.font_mgr.bgr != bgr {
                 self.font_mgr.subpixel = enable_subpixel;

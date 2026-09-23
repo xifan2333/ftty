@@ -431,7 +431,6 @@ fn test_subpixel_and_grayscale_rasterization() {
 
 #[test]
 fn test_raw_linear_geometric_coverage_preservation() {
-    use crate::font::face::LINEAR_TO_SRGB;
     let fonts =
         FontManager::load_with_families_and_subpixel(&["monospace".to_string()], 14.0, false)
             .expect("load font");
@@ -465,24 +464,16 @@ fn test_raw_linear_geometric_coverage_preservation() {
         .find(|&b| (20..=180).contains(&b))
         .expect("glyph must contain edge pixels with partial coverage");
 
-    // Alpha must carry the raw linear coverage; RGB must carry the sRGB-expanded value.
-    let alpha_has_raw = glyph
+    // Both RGB channels and Alpha must carry raw linear coverage without synthetic expansion
+    let contains_raw = glyph
         .pixels
         .as_chunks::<4>()
         .0
         .iter()
-        .any(|chunk| chunk[3] == raw_partial);
+        .any(|chunk| chunk[3] == raw_partial && chunk[0] == raw_partial);
     assert!(
-        alpha_has_raw,
-        "glyph alpha must preserve raw FreeType linear coverage {raw_partial}"
-    );
-    let rgb_expanded =
-        glyph.pixels.as_chunks::<4>().0.iter().any(|chunk| {
-            chunk[3] == raw_partial && chunk[0] == LINEAR_TO_SRGB[raw_partial as usize]
-        });
-    assert!(
-        rgb_expanded,
-        "glyph RGB must carry the sRGB-expanded coverage of {raw_partial}"
+        contains_raw,
+        "rasterized glyph pixels must preserve raw FreeType linear coverage {raw_partial}"
     );
 }
 
@@ -645,9 +636,7 @@ fn test_font_fallback_dimensions_use_nominal_pixels() {
 }
 
 #[test]
-fn lcd_mask_expands_rgb_but_keeps_linear_alpha() {
-    use crate::font::face::LINEAR_TO_SRGB;
-
+fn lcd_mask_preserves_raw_linear_geometric_coverage() {
     let fonts = FontManager::load_with_families_and_subpixel(&["monospace".to_string()], 9.0, true)
         .expect("load lcd font");
     let glyph = fonts.rasterize(fonts.face_key('d', CellFlags::empty()));
@@ -660,13 +649,10 @@ fn lcd_mask_expands_rgb_but_keeps_linear_alpha() {
         if a == 0 {
             continue;
         }
-        // The most-covered subpixel equals the raw linear maximum, so after expansion it must
-        // equal LINEAR_TO_SRGB[alpha] exactly (WezTerm's linear_u8_to_srgb8 invariant).
         let max_rgb = r.max(g).max(b);
         assert_eq!(
-            max_rgb, LINEAR_TO_SRGB[a as usize],
-            "expanded max stripe {max_rgb} must equal LINEAR_TO_SRGB[{a}] = {}",
-            LINEAR_TO_SRGB[a as usize]
+            max_rgb, a,
+            "max subpixel stripe {max_rgb} must equal linear alpha {a}"
         );
         checked += 1;
     }
@@ -674,9 +660,7 @@ fn lcd_mask_expands_rgb_but_keeps_linear_alpha() {
 }
 
 #[test]
-fn grayscale_mask_expands_rgb_but_keeps_linear_alpha() {
-    use crate::font::face::LINEAR_TO_SRGB;
-
+fn grayscale_mask_preserves_raw_linear_geometric_coverage() {
     let fonts =
         FontManager::load_with_families_and_subpixel(&["monospace".to_string()], 9.0, false)
             .expect("load gray font");
@@ -688,7 +672,7 @@ fn grayscale_mask_expands_rgb_but_keeps_linear_alpha() {
         let [r, g, b, a] = *px;
         assert_eq!(r, g);
         assert_eq!(g, b);
-        assert_eq!(r, LINEAR_TO_SRGB[a as usize]);
+        assert_eq!(b, a);
         checked += 1;
     }
     assert!(checked > 0, "glyph must contain pixels");
