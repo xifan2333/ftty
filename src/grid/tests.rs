@@ -1347,3 +1347,40 @@ fn test_extract_visible_and_scrollback_text() {
     assert!(scrollback.contains("Line 1 in history"));
     assert!(scrollback.contains("Line 2 visible"));
 }
+
+#[test]
+fn test_viewport_scroll_marks_visible_rows_dirty_without_full_scrollback_scan() {
+    let mut grid = Grid::new(80, 5, 100);
+    for i in 0..20 {
+        for c in format!("line {i}").chars() {
+            grid.write_char(
+                c,
+                Color::DefaultForeground,
+                Color::DefaultBackground,
+                CellFlags::empty(),
+            );
+        }
+        grid.scroll_up(1);
+    }
+
+    // Clear all dirty flags across lines and scrollback
+    for row in &grid.lines {
+        row.dirty.set(false);
+    }
+    for row in &grid.scrollback {
+        row.dirty.set(false);
+    }
+
+    // Scroll up by 3 lines into scrollback
+    grid.scroll_viewport_up(3);
+    assert_eq!(grid.viewport_offset(), 3);
+
+    // Visible lines must now be dirty
+    for r in 0..grid.rows {
+        assert!(grid.visible_line(r).dirty.get());
+    }
+
+    // Deep scrollback row that is outside the visible viewport should NOT be marked dirty
+    // scrollback has 20 rows, visible covers 12..=16 when offset=3
+    assert!(!grid.scrollback[0].dirty.get());
+}

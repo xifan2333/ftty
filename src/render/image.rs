@@ -200,6 +200,10 @@ impl Renderer {
         metrics: CellMetrics,
         options: RenderOptions<'_>,
     ) {
+        if self.image_textures.is_empty() {
+            return;
+        }
+
         let cw = metrics.cell_width as f32;
         let ch = metrics.cell_height as f32;
         let pad_x = f32::from(options.padding[0]);
@@ -219,46 +223,49 @@ impl Renderer {
         for row in 0..grid.rows {
             let line = grid.visible_line(row);
             let mut row_segments: Vec<(u32, usize, usize)> = Vec::new();
-            let mut current_run: Option<(u32, usize, usize)> = None;
 
-            for (col, cell) in line.cells.iter().enumerate() {
-                if cell.c == KITTY_PLACEHOLDER {
-                    let id_low24 = placeholder_image_id(cell.fg) & 0x00FF_FFFF;
-                    if id_low24 != 0 {
-                        let real_id = if self.image_textures.contains_key(&id_low24) {
-                            Some(id_low24)
-                        } else {
-                            self.image_textures
-                                .keys()
-                                .find(|&&k| (k & 0x00FF_FFFF) == id_low24)
-                                .copied()
-                        };
+            if line.placeholders.is_some() {
+                let mut current_run: Option<(u32, usize, usize)> = None;
 
-                        if let Some(matched_id) = real_id {
-                            match current_run {
-                                Some((cur_id, start, end))
-                                    if cur_id == matched_id && end + 1 == col =>
-                                {
-                                    current_run = Some((cur_id, start, col));
+                for (col, cell) in line.cells.iter().enumerate() {
+                    if cell.c == KITTY_PLACEHOLDER {
+                        let id_low24 = placeholder_image_id(cell.fg) & 0x00FF_FFFF;
+                        if id_low24 != 0 {
+                            let real_id = if self.image_textures.contains_key(&id_low24) {
+                                Some(id_low24)
+                            } else {
+                                self.image_textures
+                                    .keys()
+                                    .find(|&&k| (k & 0x00FF_FFFF) == id_low24)
+                                    .copied()
+                            };
+
+                            if let Some(matched_id) = real_id {
+                                match current_run {
+                                    Some((cur_id, start, end))
+                                        if cur_id == matched_id && end + 1 == col =>
+                                    {
+                                        current_run = Some((cur_id, start, col));
+                                    }
+                                    Some(prev) => {
+                                        row_segments.push(prev);
+                                        current_run = Some((matched_id, col, col));
+                                    }
+                                    None => {
+                                        current_run = Some((matched_id, col, col));
+                                    }
                                 }
-                                Some(prev) => {
-                                    row_segments.push(prev);
-                                    current_run = Some((matched_id, col, col));
-                                }
-                                None => {
-                                    current_run = Some((matched_id, col, col));
-                                }
+                                continue;
                             }
-                            continue;
                         }
                     }
+                    if let Some(prev) = current_run.take() {
+                        row_segments.push(prev);
+                    }
                 }
-                if let Some(prev) = current_run.take() {
+                if let Some(prev) = current_run {
                     row_segments.push(prev);
                 }
-            }
-            if let Some(prev) = current_run {
-                row_segments.push(prev);
             }
 
             // Merge matching row segments with active boxes from the previous row
