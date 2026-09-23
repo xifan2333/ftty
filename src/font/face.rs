@@ -101,29 +101,6 @@ pub struct RasterizedGlyph {
     pub pixels: Vec<u8>,
 }
 
-/// Precomputed sRGB transfer curve converting FreeType linear geometric coverage (0..=255)
-/// into sRGB non-linear alpha values.
-///
-/// Blending linear alpha directly onto an sRGB surface causes anti-aliased edge pixels to lose
-/// substantial perceived luminance (~alpha^2.2). This transfer curve ensures proper edge optical
-/// density and stroke body, identical to WezTerm (`linear_u8_to_srgb8`).
-pub const LINEAR_TO_SRGB: [u8; 256] = [
-    0, 13, 22, 28, 34, 38, 42, 46, 50, 53, 56, 59, 61, 64, 66, 69, 71, 73, 75, 77, 79, 81, 83, 85,
-    86, 88, 90, 92, 93, 95, 96, 98, 99, 101, 102, 104, 105, 106, 108, 109, 110, 112, 113, 114, 115,
-    117, 118, 119, 120, 121, 122, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136,
-    137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 148, 149, 150, 151, 152, 153, 154,
-    155, 155, 156, 157, 158, 159, 159, 160, 161, 162, 163, 163, 164, 165, 166, 167, 167, 168, 169,
-    170, 170, 171, 172, 173, 173, 174, 175, 175, 176, 177, 178, 178, 179, 180, 180, 181, 182, 182,
-    183, 184, 185, 185, 186, 187, 187, 188, 189, 189, 190, 190, 191, 192, 192, 193, 194, 194, 195,
-    196, 196, 197, 197, 198, 199, 199, 200, 200, 201, 202, 202, 203, 203, 204, 205, 205, 206, 206,
-    207, 208, 208, 209, 209, 210, 210, 211, 212, 212, 213, 213, 214, 214, 215, 215, 216, 216, 217,
-    218, 218, 219, 219, 220, 220, 221, 221, 222, 222, 223, 223, 224, 224, 225, 226, 226, 227, 227,
-    228, 228, 229, 229, 230, 230, 231, 231, 232, 232, 233, 233, 234, 234, 235, 235, 236, 236, 237,
-    237, 238, 238, 238, 239, 239, 240, 240, 241, 241, 242, 242, 243, 243, 244, 244, 245, 245, 246,
-    246, 246, 247, 247, 248, 248, 249, 249, 250, 250, 251, 251, 251, 252, 252, 253, 253, 254, 254,
-    255, 255,
-];
-
 impl RasterizedGlyph {
     #[must_use]
     pub fn empty() -> Self {
@@ -260,16 +237,16 @@ impl Font {
     /// Computes cell dimensions (cell_width, cell_height, ascent) for the active font at the given size.
     #[must_use]
     pub fn compute_cell_metrics(&self, font_size: f32) -> crate::font::CellMetrics {
-        let cell_width = self.glyph_advance_width('0', font_size).ceil().max(1.0) as u32;
+        let cell_width = self.glyph_advance_width('0', font_size).round().max(1.0) as u32;
         let (cell_height, ascent) = self
             .horizontal_line_metrics(font_size)
             .map(|line| {
                 (
-                    line.new_line_size.ceil().max(1.0) as u32,
-                    line.ascent.ceil() as i32,
+                    line.new_line_size.round().max(1.0) as u32,
+                    line.ascent.round() as i32,
                 )
             })
-            .unwrap_or((font_size.ceil().max(1.0) as u32, font_size.ceil() as i32));
+            .unwrap_or((font_size.round().max(1.0) as u32, font_size.round() as i32));
 
         crate::font::CellMetrics {
             cell_width,
@@ -316,9 +293,8 @@ impl Font {
 
         if bmp.pixel_mode() == Ok(freetype::bitmap::PixelMode::Lcd) {
             // FreeType LCD bitmaps produce 3 horizontal subpixel coverage bytes per logical pixel.
-            // Aligned with WezTerm: RGB channels are gamma-mapped for Dual-Source Blending,
-            // while the Alpha channel strictly preserves the linear geometric coverage (linear_alpha)
-            // to eliminate over-darkening and bloated letter strokes.
+            // Raw linear geometric coverage is preserved across both RGB stripes and Alpha channel,
+            // matching WezTerm and Foot to eliminate over-darkened and bloated stroke outlines.
             let logical_width = (raw_width / 3).max(1);
             let mut pixels = vec![0u8; (logical_width * height * 4) as usize];
             for y in 0..height {
@@ -336,14 +312,11 @@ impl Font {
                         let raw_g = buffer[src_idx + 1];
                         let raw_b = buffer[src_idx + 2];
                         let linear_alpha = raw_r.max(raw_g).max(raw_b);
-                        let r = LINEAR_TO_SRGB[raw_r as usize];
-                        let g = LINEAR_TO_SRGB[raw_g as usize];
-                        let b = LINEAR_TO_SRGB[raw_b as usize];
-                        let (r_out, b_out) = if bgr { (b, r) } else { (r, b) };
+                        let (r_out, b_out) = if bgr { (raw_b, raw_r) } else { (raw_r, raw_b) };
                         let dst_idx = dst_row + (x as usize) * 4;
                         pixels[dst_idx..dst_idx + 4].copy_from_slice(&[
                             r_out,
-                            g,
+                            raw_g,
                             b_out,
                             linear_alpha,
                         ]);
@@ -404,12 +377,11 @@ impl Font {
                 for x in 0..row_pixels {
                     if src_offset + x < buffer.len() {
                         let linear_gray = buffer[src_offset + x];
-                        let gray = LINEAR_TO_SRGB[linear_gray as usize];
                         let dst_idx = dst_offset + x * 4;
                         pixels[dst_idx..dst_idx + 4].copy_from_slice(&[
-                            gray,
-                            gray,
-                            gray,
+                            linear_gray,
+                            linear_gray,
+                            linear_gray,
                             linear_gray,
                         ]);
                     }
