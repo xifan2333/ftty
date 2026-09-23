@@ -1,6 +1,6 @@
 [package]
 name = "ftty"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 authors = ["xifan2333 <xifan233@163.com>"]
 description = "Ultra-lightweight, minimalist Wayland terminal emulator with native Kitty graphics protocol, written in Rust"
