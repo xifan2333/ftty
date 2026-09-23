@@ -518,6 +518,9 @@ fn test_font_chain_reload_and_zoom_preserves_fallbacks() {
     app.reload_config();
     assert_eq!(app.font_mgr.families(), &["monospace".to_string()]);
     assert_eq!(app.font_mgr.font_size(), 14.0);
+    // Subpixel and BGR output attributes must be preserved across family reload
+    assert_eq!(app.font_mgr.subpixel, app.is_subpixel_enabled());
+    assert_eq!(app.font_mgr.bgr, app.is_bgr_subpixel());
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }

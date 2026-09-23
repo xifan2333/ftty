@@ -64,12 +64,18 @@ impl AppState {
             return;
         }
 
+        let active_subpixel = self.is_subpixel_enabled();
+        let active_bgr = self.is_bgr_subpixel();
         let maybe_new_font = if families_changed {
-            match FontManager::load_with_families(
+            match FontManager::load_with_families_and_subpixel(
                 &new_config.font_families(),
                 new_config.font_size(),
+                active_subpixel,
             ) {
-                Ok(mgr) => Some(mgr),
+                Ok(mut mgr) => {
+                    mgr.bgr = active_bgr;
+                    Some(mgr)
+                }
                 Err(e) => {
                     eprintln!("ftty: failed to reload font face: {e}");
                     return;
