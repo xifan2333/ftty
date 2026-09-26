@@ -1,14 +1,16 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::io::{Read, Write};
 use std::time::Duration;
 
-use crate::color::Rgb;
-use crate::event_loop::{AppState, terminal_size};
-use crate::font::CellMetrics;
-use crate::input::KeyAction;
-use crate::input::selection::{Selection, SelectionPoint, SelectionType};
-use crate::parser::Terminal;
-use crate::pty::Pty;
-use crate::render::HoveredHyperlinkSpan;
+use ftty::color::Rgb;
+use ftty::event_loop::{AppState, terminal_size};
+use ftty::font::CellMetrics;
+use ftty::input::KeyAction;
+use ftty::input::selection::{Selection, SelectionPoint, SelectionType};
+use ftty::parser::Terminal;
+use ftty::pty::Pty;
+use ftty::render::HoveredHyperlinkSpan;
 
 #[test]
 fn terminal_dimensions_use_metrics_and_fit_the_pty() {
@@ -78,7 +80,7 @@ fn test_pty_and_terminal_roundtrip() {
 
 #[test]
 fn test_app_state_reload_config() {
-    use crate::grid::CursorShape;
+    use ftty::grid::CursorShape;
 
     let temp_dir = std::env::temp_dir().join(format!("ftty_reload_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&temp_dir);
@@ -187,7 +189,7 @@ fn test_combined_reload_updates_size_and_padding() {
 
 #[test]
 fn test_failed_reload_preserves_state() {
-    use crate::grid::CursorShape;
+    use ftty::grid::CursorShape;
 
     let temp_dir = std::env::temp_dir().join(format!("ftty_reload_fail_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&temp_dir);
@@ -222,7 +224,7 @@ fn test_failed_reload_preserves_state() {
         app.terminal
             .grid
             .scrollback
-            .push_back(crate::grid::Row::new(80));
+            .push_back(ftty::grid::Row::new(80));
     }
     assert_eq!(app.terminal.grid.scrollback.len(), 10);
 
@@ -263,8 +265,8 @@ fn test_failed_reload_preserves_state() {
 
 #[test]
 fn test_handle_key_actions_scrolling_and_zoom() {
-    use crate::color::Color;
-    use crate::grid::CellFlags;
+    use ftty::color::Color;
+    use ftty::grid::CellFlags;
 
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
@@ -317,8 +319,8 @@ fn test_handle_key_actions_scrolling_and_zoom() {
 
 #[test]
 fn test_copy_and_paste_clipboard() {
-    use crate::color::Color;
-    use crate::grid::CellFlags;
+    use ftty::color::Color;
+    use ftty::grid::CellFlags;
 
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
@@ -347,8 +349,8 @@ fn test_copy_and_paste_clipboard() {
 
 #[test]
 fn test_pipe_visible_action_execution() {
-    use crate::color::Color;
-    use crate::grid::CellFlags;
+    use ftty::color::Color;
+    use ftty::grid::CellFlags;
 
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
@@ -389,7 +391,7 @@ fn test_pipe_visible_action_execution() {
 
 #[test]
 fn x11_buttons_map_to_protocol_indexes() {
-    use crate::wayland::seat::x11_button_index;
+    use ftty::wayland::seat::x11_button_index;
 
     assert_eq!(x11_button_index(0x110), Some(0));
     assert_eq!(x11_button_index(0x111), Some(1));
@@ -399,7 +401,7 @@ fn x11_buttons_map_to_protocol_indexes() {
 
 #[test]
 fn mouse_reports_are_forwarded_only_when_tracking_is_enabled() {
-    use crate::input::mouse::{MouseEncoding, MouseTracking};
+    use ftty::input::mouse::{MouseEncoding, MouseTracking};
 
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
@@ -611,7 +613,7 @@ fn test_update_hover_state_and_pointer_shape() {
 fn test_app_state_with_loaded_config() {
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
-    let config = crate::config::Config::default();
+    let config = ftty::config::Config::default();
     let app = AppState::with_loaded_config(term, pty, config, None).expect("with_loaded_config");
     assert_eq!(app.terminal.grid.cols, 80);
     assert_eq!(app.terminal.grid.rows, 24);
@@ -622,8 +624,8 @@ fn test_app_state_with_loaded_config() {
 fn test_app_state_with_font_and_config() {
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
-    let config = crate::config::Config::default();
-    let font_mgr = crate::font::FontManager::load(14.0).expect("load font");
+    let config = ftty::config::Config::default();
+    let font_mgr = ftty::font::FontManager::load(14.0).expect("load font");
     let app = AppState::with_font_and_config(term, pty, font_mgr, config, None)
         .expect("with_font_and_config");
     assert_eq!(app.terminal.grid.cols, 80);
@@ -636,9 +638,9 @@ fn test_app_state_with_font_and_config() {
 fn test_app_state_with_font_and_config_initialization() {
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
-    let config = crate::config::Config::default();
+    let config = ftty::config::Config::default();
     let font_mgr =
-        crate::font::FontManager::load_with_families(&config.font_families(), config.font_size())
+        ftty::font::FontManager::load_with_families(&config.font_families(), config.font_size())
             .expect("load font");
     let app = AppState::with_font_and_config(term, pty, font_mgr, config, None)
         .expect("with_font_and_config");
@@ -660,7 +662,7 @@ fn test_pre_event_loop_window_creation_and_surface_setup() {
     // Before binding globals, window remains unmapped
     assert_eq!(
         app.wayland.window_state,
-        crate::wayland::WindowState::Unmapped
+        ftty::wayland::WindowState::Unmapped
     );
     assert!(app.wayland.surface.is_none());
 
@@ -683,7 +685,7 @@ fn test_pre_event_loop_window_creation_and_surface_setup() {
     assert!(app.wayland.xdg_toplevel.is_some());
     assert_eq!(
         app.wayland.window_state,
-        crate::wayland::WindowState::Initializing
+        ftty::wayland::WindowState::Initializing
     );
 
     // Flushing connection succeeds without error
@@ -704,7 +706,7 @@ fn test_pty_registration_guarded_by_wayland_configured() {
     // 2. Initializing state: still unconfigured, must reject registration
     assert!(
         app.wayland
-            .transition_window_to(crate::wayland::WindowState::Initializing)
+            .transition_window_to(ftty::wayland::WindowState::Initializing)
             .is_ok()
     );
     assert!(!app.should_register_pty());
@@ -712,7 +714,7 @@ fn test_pty_registration_guarded_by_wayland_configured() {
     // 3. Configured state: must accept registration
     assert!(
         app.wayland
-            .transition_window_to(crate::wayland::WindowState::Configured)
+            .transition_window_to(ftty::wayland::WindowState::Configured)
             .is_ok()
     );
     assert!(app.wayland.configured);
@@ -735,8 +737,8 @@ fn test_configure_renderer_requires_window_surface() {
     assert!(app.wayland.surface.is_none());
     assert!(matches!(
         app.configure_renderer(&conn),
-        Err(crate::error::FttyError::Wayland(
-            crate::error::WaylandError::WindowNotCreated
+        Err(ftty::error::FttyError::Wayland(
+            ftty::error::WaylandError::WindowNotCreated
         ))
     ));
     drop(server);

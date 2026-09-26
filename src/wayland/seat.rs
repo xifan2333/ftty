@@ -517,12 +517,8 @@ impl AppState {
     ///
     /// Mouse reports are suppressed while tracking is disabled and while Shift is held,
     /// which is the conventional override that hands the pointer back to text selection.
-    pub(crate) fn mouse_report_bytes(
-        &self,
-        button: u8,
-        pressed: bool,
-        motion: bool,
-    ) -> Option<Vec<u8>> {
+    #[doc(hidden)]
+    pub fn mouse_report_bytes(&self, button: u8, pressed: bool, motion: bool) -> Option<Vec<u8>> {
         if !self.terminal.mouse.is_reporting() {
             return None;
         }
