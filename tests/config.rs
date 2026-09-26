@@ -1,10 +1,12 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::fs;
 
 use xkbcommon::xkb;
 
-use crate::color::Rgb;
-use crate::config::Config;
-use crate::grid::CursorShape;
+use ftty::color::Rgb;
+use ftty::config::Config;
+use ftty::grid::CursorShape;
 
 #[test]
 fn test_default_config_values() {
@@ -120,7 +122,7 @@ fn test_parse_scrollback_and_keybindings() {
     assert!(pipe_u.is_some());
     assert_eq!(
         pipe_u.unwrap().1,
-        crate::input::KeyAction::PipeVisible(vec!["urlscan".to_string()])
+        ftty::input::KeyAction::PipeVisible(vec!["urlscan".to_string()])
     );
 
     let pipe_y = resolved.iter().find(|((_, sym), _)| {
@@ -130,7 +132,7 @@ fn test_parse_scrollback_and_keybindings() {
     assert!(pipe_y.is_some());
     assert_eq!(
         pipe_y.unwrap().1,
-        crate::input::KeyAction::PipeSelection(vec![
+        ftty::input::KeyAction::PipeSelection(vec![
             "sh".to_string(),
             "-c".to_string(),
             "wl-copy".to_string()
@@ -226,11 +228,11 @@ fn test_include_keybindings_prompt_navigation() {
     let mut inc = Config::default();
     inc.keybindings.bindings.insert(
         "Ctrl+Shift+K".to_string(),
-        crate::config::ActionDef::Simple("prompt_prev".to_string()),
+        ftty::config::ActionDef::Simple("prompt_prev".to_string()),
     );
     inc.keybindings.bindings.insert(
         "Ctrl+Shift+J".to_string(),
-        crate::config::ActionDef::Simple("prompt_next".to_string()),
+        ftty::config::ActionDef::Simple("prompt_next".to_string()),
     );
     base.merge(inc);
     let resolved = base.keybindings.resolve_bindings();
@@ -239,7 +241,7 @@ fn test_include_keybindings_prompt_navigation() {
             || *sym == xkb::Keysym::new(xkb::keysyms::KEY_K)
     });
     assert!(prev.is_some());
-    assert_eq!(prev.unwrap().1, crate::input::KeyAction::PromptPrev);
+    assert_eq!(prev.unwrap().1, ftty::input::KeyAction::PromptPrev);
 }
 
 #[test]
