@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 
@@ -5,12 +7,12 @@ use wayland_client::protocol::wl_data_device_manager::WlDataDeviceManager;
 use wayland_client::protocol::wl_seat::WlSeat;
 use wayland_client::{Connection, Proxy};
 
-use crate::event_loop::AppState;
-use crate::input::mouse::{MouseEncoding, MouseTracking};
-use crate::input::selection::SelectionPoint;
-use crate::parser::Terminal;
-use crate::pty::Pty;
-use crate::wayland::{WaylandState, WindowState};
+use ftty::event_loop::AppState;
+use ftty::input::mouse::{MouseEncoding, MouseTracking};
+use ftty::input::selection::SelectionPoint;
+use ftty::parser::Terminal;
+use ftty::pty::Pty;
+use ftty::wayland::{WaylandState, WindowState};
 
 #[test]
 fn test_wayland_state_initialization() {
@@ -315,8 +317,8 @@ fn pointer_events_from_the_wire_drive_mouse_reports() {
 
 #[test]
 fn test_find_url_at_col() {
-    use crate::grid::Row;
-    use crate::wayland::seat::find_url_at_col;
+    use ftty::grid::Row;
+    use ftty::wayland::seat::find_url_at_col;
 
     let mut row = Row::new(50);
     let s = "Check https://github.com/xifan2333/ftty. Great!";
@@ -341,8 +343,8 @@ fn test_find_url_at_col() {
 
 #[test]
 fn test_find_url_in_grid_wrapped_lines() {
-    use crate::grid::Grid;
-    use crate::wayland::seat::find_url_in_grid;
+    use ftty::grid::Grid;
+    use ftty::wayland::seat::find_url_in_grid;
 
     let mut grid = Grid::new(20, 2, 0);
     for (i, c) in "https://example.com/".chars().enumerate() {
@@ -366,8 +368,8 @@ fn test_find_url_in_grid_wrapped_lines() {
 
 #[test]
 fn test_find_url_hidden_and_wide_char() {
-    use crate::grid::{CellFlags, Grid};
-    use crate::wayland::seat::find_url_in_grid;
+    use ftty::grid::{CellFlags, Grid};
+    use ftty::wayland::seat::find_url_in_grid;
 
     let mut grid = Grid::new(30, 1, 0);
     let prefix = "https://example.com/";

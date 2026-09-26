@@ -68,7 +68,8 @@ pub struct AppState {
     pub running: bool,
     pub needs_redraw: bool,
     pub(crate) frame_callback: Option<WlCallback>,
-    pub(crate) pending_size: Option<[u32; 2]>,
+    #[doc(hidden)]
+    pub pending_size: Option<[u32; 2]>,
     /// Set by an `xdg_surface.configure`; the resize is applied once the queue is drained so a
     /// burst of configures collapses into a single, final size.
     pub(crate) configure_pending: bool,
