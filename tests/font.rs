@@ -1,12 +1,14 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::fs;
 use std::io;
 
-use crate::font::FontManager;
-use crate::font::atlas::{GlyphAtlas, Shelf};
-use crate::font::fallback::{
+use ftty::font::FontManager;
+use ftty::font::atlas::{GlyphAtlas, Shelf};
+use ftty::font::fallback::{
     FallbackCache, MAX_RESOLVED_CACHE, fontconfig, load_font_bytes, load_font_file, match_family,
 };
-use crate::grid::CellFlags;
+use ftty::grid::CellFlags;
 
 fn fonts() -> &'static FontManager {
     thread_local! {
@@ -551,7 +553,7 @@ fn test_font_size_represents_points_at_standard_dpi() {
 
 #[test]
 fn test_font_fallback_dimensions_use_nominal_pixels() {
-    use crate::font::face::points_to_pixels;
+    use ftty::font::face::points_to_pixels;
 
     // 9.0 points at 96 DPI equals 12.0 nominal pixels
     assert!((points_to_pixels(9.0) - 12.0).abs() < 1e-4);
