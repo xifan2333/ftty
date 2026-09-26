@@ -1,8 +1,10 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::path::Path;
 
-use crate::color::{Color, Rgb};
-use crate::grid::CellFlags;
-use crate::parser::{MAX_HYPERLINKS, ProgressState, ShellIntegrationState, Terminal, VtParser};
+use ftty::color::{Color, Rgb};
+use ftty::grid::CellFlags;
+use ftty::parser::{MAX_HYPERLINKS, ProgressState, ShellIntegrationState, Terminal, VtParser};
 
 struct TestTerm {
     term: Terminal,
@@ -105,7 +107,7 @@ fn window_geometry_queries_are_answered_in_height_width_order() {
 
 #[test]
 fn test_mouse_tracking_modes() {
-    use crate::input::mouse::{MouseEncoding, MouseTracking};
+    use ftty::input::mouse::{MouseEncoding, MouseTracking};
 
     let mut term = TestTerm::new(80, 24, 100);
     assert!(!term.mouse.is_reporting());
