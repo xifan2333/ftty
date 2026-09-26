@@ -1,6 +1,10 @@
-use super::*;
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use ftty::error::*;
 use std::error::Error;
+use std::io;
 use std::io::ErrorKind;
+use std::path::PathBuf;
 
 #[test]
 fn test_ftty_error_display_and_source() {

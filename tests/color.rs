@@ -1,5 +1,7 @@
-use crate::color::palette::default_256_palette;
-use crate::color::{Color, Rgb};
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use ftty::color::palette::default_256_palette;
+use ftty::color::{Color, Rgb};
 
 #[test]
 fn test_default_palette_values() {
@@ -46,7 +48,7 @@ fn test_rgb_from_hex_and_serde() {
 
 #[test]
 fn test_parse_color_spec() {
-    use crate::color::parse_color_spec;
+    use ftty::color::parse_color_spec;
 
     assert_eq!(parse_color_spec("#181818"), Some(Rgb::new(24, 24, 24)));
     assert_eq!(parse_color_spec("#fff"), Some(Rgb::new(255, 255, 255)));

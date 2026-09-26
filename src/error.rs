@@ -4,9 +4,6 @@ use std::fmt;
 use std::io;
 use std::path::PathBuf;
 
-#[cfg(test)]
-mod tests;
-
 /// Top-level domain error enum encapsulating all ftty failure modes.
 #[derive(Debug)]
 pub enum FttyError {
