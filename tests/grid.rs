@@ -1,7 +1,9 @@
-use crate::color::Color;
-use crate::grid::diacritics::KITTY_PLACEHOLDER;
-use crate::grid::{Cell, CellFlags, ClearMode, Grid, MAX_ROW_POOL_CAPACITY, Row};
-use crate::kitty::{ImageData, ImagePlacement};
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use ftty::color::Color;
+use ftty::grid::diacritics::KITTY_PLACEHOLDER;
+use ftty::grid::{Cell, CellFlags, ClearMode, Grid, MAX_ROW_POOL_CAPACITY, Row};
+use ftty::kitty::{ImageData, ImagePlacement};
 
 #[test]
 fn test_grid_initialization() {
@@ -685,8 +687,8 @@ fn test_horizontal_shrink_and_grow_pads_with_default_cells() {
     for c in text.chars() {
         grid.write_char(
             c,
-            crate::color::Color::DefaultForeground,
-            crate::color::Color::DefaultBackground,
+            ftty::color::Color::DefaultForeground,
+            ftty::color::Color::DefaultBackground,
             CellFlags::empty(),
         );
     }
@@ -961,8 +963,8 @@ fn test_ascii_fast_path_writing_and_wrapping() {
 
 #[test]
 fn test_cell_memory_footprint() {
-    assert!(std::mem::size_of::<crate::grid::Cell>() <= 24);
-    assert!(std::mem::size_of::<crate::grid::Row>() <= 40);
+    assert!(std::mem::size_of::<ftty::grid::Cell>() <= 24);
+    assert!(std::mem::size_of::<ftty::grid::Row>() <= 40);
 }
 
 #[test]
@@ -1291,10 +1293,10 @@ fn test_stored_images_byte_budget_eviction() {
     }
 
     assert!(
-        grid.total_image_bytes() <= crate::grid::MAX_STORED_IMAGE_BYTES,
+        grid.total_image_bytes() <= ftty::grid::MAX_STORED_IMAGE_BYTES,
         "total bytes {} must not exceed MAX_STORED_IMAGE_BYTES {}",
         grid.total_image_bytes(),
-        crate::grid::MAX_STORED_IMAGE_BYTES
+        ftty::grid::MAX_STORED_IMAGE_BYTES
     );
     // Oldest images (1 and 2) must have been evicted by LRU
     assert!(!grid.images.contains_key(&1));
@@ -1337,10 +1339,10 @@ fn test_image_bytes_counter_tracks_add_replace_and_remove() {
     }
     assert_eq!(grid.total_image_bytes(), size(30, 5) + size(20, 20));
 
-    grid.delete_images(crate::kitty::DeleteTarget::ById(1));
+    grid.delete_images(ftty::kitty::DeleteTarget::ById(1));
     assert_eq!(grid.total_image_bytes(), size(20, 20));
 
-    grid.delete_images(crate::kitty::DeleteTarget::All);
+    grid.delete_images(ftty::kitty::DeleteTarget::All);
     assert_eq!(grid.total_image_bytes(), 0);
     assert!(grid.images.is_empty());
 }
