@@ -1,13 +1,15 @@
-use crate::color::{Color, default_256_palette};
-use crate::font::{FontManager, GlyphAtlas};
-use crate::grid::{Cell, CellFlags, Grid};
-use crate::input::ime::Preedit;
-use crate::render::shader::FRAGMENT_SHADER;
-use crate::render::text::{
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use ftty::color::{Color, default_256_palette};
+use ftty::font::{FontManager, GlyphAtlas};
+use ftty::grid::{Cell, CellFlags, Grid};
+use ftty::input::ime::Preedit;
+use ftty::render::shader::FRAGMENT_SHADER;
+use ftty::render::text::{
     KITTY_PLACEHOLDER, SELECTION_BG, build_dynamic_overlays, build_row_backgrounds,
     build_row_foregrounds, build_vertices, cell_colors, cursor_cell, prepare_atlas,
 };
-use crate::render::{
+use ftty::render::{
     ColorScheme, DEFAULT_BG, DEFAULT_FG, HoveredHyperlinkSpan, RenderOptions, native_size,
 };
 
@@ -520,7 +522,7 @@ fn test_incremental_dirty_tracking_only_regenerates_modified_row() {
 
     let mut row_bg = vec![Vec::new(); 5];
     let mut row_fg = vec![Vec::new(); 5];
-    let ctx = crate::render::text::RenderContext {
+    let ctx = ftty::render::text::RenderContext {
         grid: &grid,
         colors,
         metrics: fonts.metrics,
@@ -583,7 +585,7 @@ fn test_column_resize_regenerates_row_foregrounds_and_backgrounds() {
 
     let mut row_bg = vec![Vec::new(); 5];
     let mut row_fg = vec![Vec::new(); 5];
-    let ctx = crate::render::text::RenderContext {
+    let ctx = ftty::render::text::RenderContext {
         grid: &grid,
         colors,
         metrics: fonts.metrics,
@@ -613,7 +615,7 @@ fn test_column_resize_regenerates_row_foregrounds_and_backgrounds() {
     );
 
     prepare_atlas(&grid, &fonts, &mut atlas, None);
-    let ctx_expanded = crate::render::text::RenderContext {
+    let ctx_expanded = ftty::render::text::RenderContext {
         grid: &grid,
         colors,
         metrics: fonts.metrics,
@@ -635,7 +637,7 @@ fn test_column_resize_regenerates_row_foregrounds_and_backgrounds() {
 
 #[test]
 fn test_row_cache_needs_reset_on_column_or_row_change() {
-    use crate::render::row_cache_needs_reset;
+    use ftty::render::row_cache_needs_reset;
 
     // Same rows, expanded columns (the exact bug case): must trigger reset
     assert!(row_cache_needs_reset(24, 24, 80, 150, false));
@@ -658,7 +660,7 @@ fn test_contiguous_background_cells_merge_into_single_quad() {
     let atlas = GlyphAtlas::new(16, 16);
     let mut bg_vertices = Vec::new();
     let palette = default_256_palette();
-    let ctx = crate::render::text::RenderContext {
+    let ctx = ftty::render::text::RenderContext {
         grid: &grid,
         colors: ColorScheme::new(&palette, DEFAULT_FG, DEFAULT_BG),
         metrics: fonts.metrics,
@@ -701,7 +703,7 @@ fn test_preedit_overlay_vertex_regeneration() {
 fn test_dynamic_overlay_separation_and_layering() {
     let mut grid = Grid::new(10, 2, 0);
     grid.cursor.visible = true;
-    grid.cursor.shape = crate::grid::CursorShape::Beam;
+    grid.cursor.shape = ftty::grid::CursorShape::Beam;
     grid.lines[0].cells[0].c = 'A';
     grid.lines[0].cells[0].bg = Color::Rgb(10, 20, 30);
 
@@ -712,7 +714,7 @@ fn test_dynamic_overlay_separation_and_layering() {
     let palette = default_256_palette();
     let colors = ColorScheme::new(&palette, DEFAULT_FG, DEFAULT_BG);
     let cursor = cursor_cell(&grid);
-    let ctx = crate::render::text::RenderContext {
+    let ctx = ftty::render::text::RenderContext {
         grid: &grid,
         colors,
         metrics: fonts.metrics,
@@ -742,7 +744,7 @@ fn test_dynamic_overlay_separation_and_layering() {
     assert_eq!(vertices.len(), static_len);
 
     // 4. When cursor hidden, overlay appends 0 floats
-    let ctx_hidden = crate::render::text::RenderContext {
+    let ctx_hidden = ftty::render::text::RenderContext {
         grid: &grid,
         colors,
         metrics: fonts.metrics,
@@ -759,14 +761,14 @@ fn test_dynamic_overlay_separation_and_layering() {
 fn test_underline_cursor_overlay_quad_count() {
     let mut grid = Grid::new(10, 2, 0);
     grid.cursor.visible = true;
-    grid.cursor.shape = crate::grid::CursorShape::Underline;
+    grid.cursor.shape = ftty::grid::CursorShape::Underline;
 
     let fonts = FontManager::load(14.0).expect("system monospace font");
     let atlas = GlyphAtlas::new(16, 16);
     let palette = default_256_palette();
     let colors = ColorScheme::new(&palette, DEFAULT_FG, DEFAULT_BG);
     let cursor = cursor_cell(&grid);
-    let ctx = crate::render::text::RenderContext {
+    let ctx = ftty::render::text::RenderContext {
         grid: &grid,
         colors,
         metrics: fonts.metrics,
@@ -783,7 +785,7 @@ fn test_underline_cursor_overlay_quad_count() {
 
 #[test]
 fn test_low24_placeholder_index_prefers_exact_id_and_resolves_aliases() {
-    use crate::render::image::build_low24_index;
+    use ftty::render::image::build_low24_index;
 
     // 0x10EEEE is an exact (24-bit) id; 0xAB10EEEE shares the same low 24 bits.
     let index = build_low24_index([0xAB10_EEEE_u32, 0x10EEEE].into_iter());
@@ -803,8 +805,8 @@ fn test_low24_placeholder_index_prefers_exact_id_and_resolves_aliases() {
 
 #[test]
 fn test_image_vertex_buffer_is_released_when_it_exceeds_retention_cap() {
-    use crate::render::MAX_RETAINED_IMAGE_VERTEX_FLOATS;
-    use crate::render::image::bounded_image_vertex_buffer;
+    use ftty::render::MAX_RETAINED_IMAGE_VERTEX_FLOATS;
+    use ftty::render::image::bounded_image_vertex_buffer;
 
     // A modest staging buffer is retained for reuse (capacity preserved).
     let small = Vec::<f32>::with_capacity(1024);
