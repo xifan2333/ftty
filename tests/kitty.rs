@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::fs;
 use std::io;
 
@@ -7,10 +9,10 @@ use nix::fcntl::OFlag;
 use nix::sys::mman::shm_open;
 use nix::sys::stat::Mode;
 
-use crate::kitty::command::parse_control_keys;
-use crate::kitty::model::{DeleteTarget, KittyAction, KittyCommand, KittyEvent, KittyMedium};
-use crate::kitty::payload::{MAX_SHM_PAYLOAD, decode_image_data, read_shm_bytes, read_shm_payload};
-use crate::kitty::{KittyParser, MAX_RECYCLED_CLEAN_BYTES, kitty_response};
+use ftty::kitty::command::parse_control_keys;
+use ftty::kitty::model::{DeleteTarget, KittyAction, KittyCommand, KittyEvent, KittyMedium};
+use ftty::kitty::payload::{MAX_SHM_PAYLOAD, decode_image_data, read_shm_bytes, read_shm_payload};
+use ftty::kitty::{KittyParser, MAX_RECYCLED_CLEAN_BYTES, kitty_response};
 
 #[test]
 fn shared_memory_loads_images_and_rejects_oversized_payloads() {
@@ -413,8 +415,8 @@ fn test_is_fast_path() {
 
 #[test]
 fn test_image_remains_valid_for_placements_after_cpu_buffer_unload() {
-    use crate::grid::Grid;
-    use crate::kitty::model::{ImageData, ImagePlacement};
+    use ftty::grid::Grid;
+    use ftty::kitty::model::{ImageData, ImagePlacement};
 
     let mut grid = Grid::new(80, 24, 100);
     let image = ImageData::new(42, 64, 64, vec![255; 64 * 64 * 4]);

@@ -37,7 +37,8 @@ pub struct Grid {
     /// Kept crate-private so the [`Self::image_bytes_total`] budget invariant cannot be broken by
     /// outside code mutating the map or the size-defining [`ImageData`] fields directly. Use
     /// [`Self::images`] for read-only access and the provided mutation methods to change state.
-    pub(crate) images: HashMap<u32, ImageData>,
+    #[doc(hidden)]
+    pub images: HashMap<u32, ImageData>,
     /// Running sum of `ImageData::byte_size()` across `images`, kept in sync on every mutation
     /// so eviction checks never re-sum the whole map.
     pub(crate) image_bytes_total: usize,
