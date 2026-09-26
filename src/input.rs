@@ -1,15 +1,14 @@
-//! Keyboard input handling and key-to-VT escape sequence translation via xkbcommon.
+//! Input handling: keyboard, mouse, selection, and IME.
 
-pub mod ime;
-pub mod mouse;
-pub mod selection;
-
+use crate::config::KeybindingsConfig;
+use crate::font::CellMetrics;
+use crate::grid::{CellFlags, Grid, Row};
 use std::collections::HashMap;
 use std::io::Read;
 use std::os::fd::OwnedFd;
 use xkbcommon::xkb::{self, Context, KEYMAP_FORMAT_TEXT_V1, Keycode, Keymap, State, keysyms};
 
-use crate::config::KeybindingsConfig;
+// --- Keyboard Handler & Actions ---
 
 /// Semantic actions triggered by key combinations.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -150,9 +149,12 @@ impl KittyKeyboardFlags {
 
 /// Handles key events and produces VT escape sequences or UTF-8 byte streams.
 pub struct KeyboardHandler {
-    context: Context,
-    keymap: Option<Keymap>,
-    state: Option<State>,
+    #[doc(hidden)]
+    pub context: Context,
+    #[doc(hidden)]
+    pub keymap: Option<Keymap>,
+    #[doc(hidden)]
+    pub state: Option<State>,
     pub kitty_flags: u8,
     pub kitty_stack: Vec<u8>,
     pub(crate) resolved_bindings: HashMap<(Modifiers, xkb::Keysym), KeyAction>,
@@ -323,7 +325,8 @@ impl KeyboardHandler {
         }
     }
 
-    fn encode_kitty_key(
+    #[doc(hidden)]
+    pub fn encode_kitty_key(
         &self,
         sym: u32,
         keycode: Keycode,
@@ -620,5 +623,587 @@ impl KeyboardHandler {
     }
 }
 
-#[cfg(test)]
-mod tests;
+// --- IME ---
+
+/// Active pre-edit text and cursor range from the input method.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Preedit {
+    pub text: String,
+    pub cursor_begin: i32,
+    pub cursor_end: i32,
+}
+
+/// Double-buffered pending events for `text-input-v3` batches committed upon `Done`.
+#[derive(Debug, Clone, Default)]
+pub struct PendingImeEvents {
+    pub delete_surrounding: Option<(u32, u32)>,
+    pub commit_text: Option<String>,
+    pub preedit: Option<Option<Preedit>>,
+}
+
+/// Tracks the active IME session state, pre-edit text, and double-buffered batches.
+#[derive(Debug, Clone, Default)]
+pub struct ImeState {
+    pub active: bool,
+    pub preedit: Option<Preedit>,
+    pub pending: PendingImeEvents,
+}
+
+impl ImeState {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Stages a surrounding text deletion event into the pending batch.
+    pub fn stage_delete(&mut self, before_length: u32, after_length: u32) {
+        self.pending.delete_surrounding = Some((before_length, after_length));
+    }
+
+    /// Stages committed text into the pending batch.
+    pub fn stage_commit(&mut self, text: Option<String>) {
+        self.pending.commit_text = text;
+    }
+
+    /// Stages pre-edit string updates into the pending batch.
+    pub fn stage_preedit(&mut self, text: Option<String>, cursor_begin: i32, cursor_end: i32) {
+        match text {
+            Some(t) if !t.is_empty() => {
+                self.pending.preedit = Some(Some(Preedit {
+                    text: t,
+                    cursor_begin,
+                    cursor_end,
+                }));
+            }
+            _ => {
+                self.pending.preedit = Some(None);
+            }
+        }
+    }
+
+    /// Atomically applies the pending batch upon `zwp_text_input_v3.done`.
+    ///
+    /// Returns `(delete_surrounding, commit_text)` ordered so deletion precedes commit.
+    pub fn apply_done(&mut self) -> (Option<(u32, u32)>, Option<String>) {
+        let delete = self.pending.delete_surrounding.take();
+        let commit = self.pending.commit_text.take();
+
+        if let Some(preedit_update) = self.pending.preedit.take() {
+            self.preedit = preedit_update;
+        } else if commit.is_some() {
+            self.preedit = None;
+        }
+
+        (delete, commit)
+    }
+
+    /// Clears any active composition and pending batches upon focus loss or reset.
+    pub fn clear(&mut self) {
+        self.active = false;
+        self.preedit = None;
+        self.pending = PendingImeEvents::default();
+    }
+}
+
+/// Computes the pixel-accurate bounding rectangle of the terminal cursor for IME popup positioning.
+///
+/// Returns `(x, y, width, height)` in surface-local pixels.
+#[must_use]
+pub fn calculate_cursor_rect(
+    grid: &Grid,
+    metrics: CellMetrics,
+    padding: [u16; 2],
+) -> (i32, i32, i32, i32) {
+    let cw = metrics.cell_width as i32;
+    let ch = metrics.cell_height as i32;
+    let pad_x = i32::from(padding[0]);
+    let pad_y = i32::from(padding[1]);
+
+    let row = grid.cursor.row.min(grid.rows.saturating_sub(1));
+    let mut col = grid.cursor.col.min(grid.cols.saturating_sub(1));
+
+    // If placed on a wide character spacer, anchor to the leading wide character cell
+    if row < grid.lines.len() {
+        let line = &grid.lines[row];
+        if col > 0
+            && col < line.cells.len()
+            && line.cells[col].flags.contains(CellFlags::WIDE_CHAR_SPACER)
+        {
+            col -= 1;
+        }
+    }
+
+    let is_wide = if row < grid.lines.len() {
+        let line = &grid.lines[row];
+        if col < line.cells.len() {
+            line.cells[col].flags.contains(CellFlags::WIDE_CHAR)
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    let width = if is_wide {
+        2.min(grid.cols.saturating_sub(col)) as i32 * cw
+    } else {
+        cw
+    };
+    let x = pad_x + (col as i32) * cw;
+    let y = pad_y + (row as i32) * ch;
+
+    (x, y, width, ch)
+}
+
+// --- Mouse ---
+
+/// DECSET/DECRST private mode controlling which pointer events are reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MouseTracking {
+    /// `?1000` is off: pointer events stay local to the terminal for text selection.
+    #[default]
+    Disabled,
+    /// `?1000`: report button press and release only.
+    Click,
+    /// `?1002`: report press/release plus motion while a button is held.
+    Drag,
+    /// `?1003`: report every pointer motion.
+    Motion,
+}
+
+/// Wire encoding used for mouse reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MouseEncoding {
+    /// Legacy `CSI M` followed by three offset bytes (X10).
+    #[default]
+    X10,
+    /// `?1005` UTF-8 extended coordinates.
+    Utf8,
+    /// `?1015` `CSI b;x;y M` with decimal coordinates.
+    Urxvt,
+    /// `?1006` SGR `CSI <b;x;y M/m`, which has no coordinate limit.
+    Sgr,
+}
+
+/// Modifier bits carried inside the mouse report button field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MouseModifiers {
+    pub shift: bool,
+    pub alt: bool,
+    pub ctrl: bool,
+}
+
+/// Active mouse protocol as negotiated by the application.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MouseState {
+    pub tracking: MouseTracking,
+    pub encoding: MouseEncoding,
+    pub utf8_mode: bool,
+    pub sgr_mode: bool,
+    pub urxvt_mode: bool,
+}
+
+impl MouseState {
+    fn update_encoding(&mut self) {
+        self.encoding = if self.sgr_mode {
+            MouseEncoding::Sgr
+        } else if self.urxvt_mode {
+            MouseEncoding::Urxvt
+        } else if self.utf8_mode {
+            MouseEncoding::Utf8
+        } else {
+            MouseEncoding::X10
+        };
+    }
+
+    /// Applies a DECSET (`enabled`) or DECRST private mode. Returns `true` when the
+    /// mode is a mouse mode owned by this state.
+    pub fn apply_private_mode(&mut self, mode: u16, enabled: bool) -> bool {
+        match mode {
+            1000 => {
+                if enabled {
+                    self.tracking = MouseTracking::Click;
+                } else if self.tracking == MouseTracking::Click {
+                    self.tracking = MouseTracking::Disabled;
+                }
+            }
+            1002 => {
+                if enabled {
+                    self.tracking = MouseTracking::Drag;
+                } else if self.tracking == MouseTracking::Drag {
+                    self.tracking = MouseTracking::Disabled;
+                }
+            }
+            1003 => {
+                if enabled {
+                    self.tracking = MouseTracking::Motion;
+                } else if self.tracking == MouseTracking::Motion {
+                    self.tracking = MouseTracking::Disabled;
+                }
+            }
+            1005 => {
+                self.utf8_mode = enabled;
+                self.update_encoding();
+            }
+            1006 => {
+                self.sgr_mode = enabled;
+                self.update_encoding();
+            }
+            1015 => {
+                self.urxvt_mode = enabled;
+                self.update_encoding();
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Whether pointer events must be forwarded to the application.
+    #[must_use]
+    pub fn is_reporting(&self) -> bool {
+        self.tracking != MouseTracking::Disabled
+    }
+
+    /// Whether motion is reported given whether a button is currently held down.
+    #[must_use]
+    pub fn reports_motion(&self, button_held: bool) -> bool {
+        match self.tracking {
+            MouseTracking::Disabled | MouseTracking::Click => false,
+            MouseTracking::Drag => button_held,
+            MouseTracking::Motion => true,
+        }
+    }
+}
+
+/// Encodes a mouse report for a terminal application.
+///
+/// `button` is the X11 button number (`0` left, `1` middle, `2` right, `64` wheel up,
+/// `65` wheel down), `col`/`row` are zero-based cell coordinates and `motion` marks a
+/// pure motion event. Returns `None` when the requested coordinates cannot be encoded.
+#[must_use]
+pub fn encode_mouse_event(
+    encoding: MouseEncoding,
+    button: u8,
+    col: usize,
+    row: usize,
+    pressed: bool,
+    motion: bool,
+    modifiers: MouseModifiers,
+) -> Option<Vec<u8>> {
+    let mut code = u16::from(button);
+    if motion {
+        code |= 32;
+    }
+    if modifiers.shift {
+        code |= 4;
+    }
+    if modifiers.alt {
+        code |= 8;
+    }
+    if modifiers.ctrl {
+        code |= 16;
+    }
+    let x = u16::try_from(col).ok()?.saturating_add(1);
+    let y = u16::try_from(row).ok()?.saturating_add(1);
+
+    match encoding {
+        MouseEncoding::Sgr => {
+            let terminator = if pressed { 'M' } else { 'm' };
+            Some(format!("\x1b[<{code};{x};{y}{terminator}").into_bytes())
+        }
+        MouseEncoding::Urxvt => {
+            let code = if pressed || motion {
+                code
+            } else {
+                (code & !3) | 3
+            };
+            Some(format!("\x1b[{};{x};{y}M", code + 32).into_bytes())
+        }
+        MouseEncoding::Utf8 => {
+            if col > 2015 || row > 2015 {
+                return None;
+            }
+            let code = if pressed || motion {
+                code
+            } else {
+                (code & !3) | 3
+            };
+            let mut out = b"\x1b[M".to_vec();
+            for value in [code + 32, x + 32, y + 32] {
+                push_utf8(&mut out, value);
+            }
+            Some(out)
+        }
+        MouseEncoding::X10 => {
+            // The legacy encoding has no way to say which button was released.
+            let code = if pressed || motion {
+                code
+            } else {
+                (code & !3) | 3
+            };
+            let values = [code + 32, x + 32, y + 32];
+            if values.iter().any(|value| *value > u16::from(u8::MAX)) {
+                return None;
+            }
+            let mut out = b"\x1b[M".to_vec();
+            out.extend(values.iter().map(|value| *value as u8));
+            Some(out)
+        }
+    }
+}
+
+fn push_utf8(out: &mut Vec<u8>, value: u16) {
+    match char::from_u32(u32::from(value)) {
+        Some(c) => {
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+        }
+        None => out.push(b'?'),
+    }
+}
+
+// --- Selection ---
+
+/// A point in the terminal grid history or active screen buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SelectionPoint {
+    pub line: usize,
+    pub col: usize,
+}
+
+impl SelectionPoint {
+    #[must_use]
+    pub const fn new(line: usize, col: usize) -> Self {
+        Self { line, col }
+    }
+}
+
+/// The mode of mouse selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SelectionType {
+    #[default]
+    Simple,
+    Word,
+    Line,
+}
+
+/// Represents an active or completed text selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Selection {
+    pub start: SelectionPoint,
+    pub end: SelectionPoint,
+    pub kind: SelectionType,
+}
+
+impl Default for Selection {
+    fn default() -> Self {
+        Self {
+            start: SelectionPoint::new(0, 0),
+            end: SelectionPoint::new(0, 0),
+            kind: SelectionType::Simple,
+        }
+    }
+}
+
+impl Selection {
+    #[must_use]
+    pub fn new(start: SelectionPoint, end: SelectionPoint, kind: SelectionType) -> Self {
+        Self { start, end, kind }
+    }
+
+    /// Normalizes the selection range into `(start, end)` where `start <= end` in reading order.
+    #[must_use]
+    pub fn normalized(&self) -> (SelectionPoint, SelectionPoint) {
+        if self.start <= self.end {
+            (self.start, self.end)
+        } else {
+            (self.end, self.start)
+        }
+    }
+
+    /// Clears the selection by resetting start and end to (0, 0).
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Checks whether the selection spans zero characters.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.start == self.end && self.kind == SelectionType::Simple
+    }
+
+    /// Returns `true` if the cell at absolute line and column is contained within the selection.
+    #[must_use]
+    pub fn contains(&self, line: usize, col: usize) -> bool {
+        if self.is_empty() {
+            return false;
+        }
+        let (start, end) = self.normalized();
+        let point = SelectionPoint::new(line, col);
+
+        match self.kind {
+            SelectionType::Simple | SelectionType::Word => point >= start && point <= end,
+            SelectionType::Line => line >= start.line && line <= end.line,
+        }
+    }
+
+    /// Returns true if this selection spans across the given line.
+    #[must_use]
+    pub fn spans_line(&self, line: usize) -> bool {
+        if self.is_empty() {
+            return false;
+        }
+        let (start, end) = self.normalized();
+        line >= start.line && line <= end.line
+    }
+
+    /// Returns the column span `Some((start_col, end_col))` selected on the given line, if any.
+    #[must_use]
+    pub fn line_span(&self, line: usize, cols: usize) -> Option<(usize, usize)> {
+        if self.is_empty() || cols == 0 {
+            return None;
+        }
+        let (start, end) = self.normalized();
+        if line < start.line || line > end.line {
+            return None;
+        }
+        let max_col = cols.saturating_sub(1);
+        let start_col = if line == start.line && self.kind != SelectionType::Line {
+            if start.col > max_col {
+                return None;
+            }
+            start.col
+        } else {
+            0
+        };
+        let end_col = if line == end.line && self.kind != SelectionType::Line {
+            end.col.min(max_col)
+        } else {
+            max_col
+        };
+        if start_col <= end_col {
+            Some((start_col, end_col))
+        } else {
+            None
+        }
+    }
+
+    /// Extracts clean UTF-8 text from the grid within this selection range.
+    ///
+    /// Respects wrapped lines (omits newline) and trims trailing spaces from rows.
+    #[must_use]
+    pub fn extract_text(&self, grid: &Grid) -> String {
+        if self.is_empty() {
+            return String::new();
+        }
+
+        let (start, end) = self.normalized();
+        let total_lines = grid.scrollback.len() + grid.lines.len();
+        let mut result = String::new();
+        let mut line_str = String::with_capacity(grid.cols);
+
+        let get_row = |idx: usize| -> Option<&Row> {
+            if idx < grid.scrollback.len() {
+                grid.scrollback.get(idx)
+            } else {
+                grid.lines.get(idx - grid.scrollback.len())
+            }
+        };
+
+        for line_idx in start.line..=end.line.min(total_lines.saturating_sub(1)) {
+            let Some(row) = get_row(line_idx) else {
+                break;
+            };
+
+            let start_col = if line_idx == start.line && self.kind != SelectionType::Line {
+                start.col.min(row.cells.len())
+            } else {
+                0
+            };
+
+            let end_col = if line_idx == end.line && self.kind != SelectionType::Line {
+                (end.col + 1).min(row.cells.len())
+            } else {
+                row.cells.len()
+            };
+
+            if start_col >= end_col {
+                continue;
+            }
+
+            line_str.clear();
+            for cell in &row.cells[start_col..end_col] {
+                if !cell
+                    .flags
+                    .intersects(CellFlags::WIDE_CHAR_SPACER | CellFlags::WRAP_SPACER)
+                {
+                    line_str.push(cell.c);
+                }
+            }
+
+            // Only trim trailing whitespace if this is the last line or an unwrapped line
+            if line_idx == end.line || !row.wrapped {
+                let trimmed_len = line_str.trim_end_matches(' ').len();
+                line_str.truncate(trimmed_len);
+            }
+
+            result.push_str(&line_str);
+
+            // Add newline if unwrapped and not the final line
+            if !row.wrapped && line_idx < end.line {
+                result.push('\n');
+            }
+        }
+
+        result
+    }
+}
+
+/// Identifies word boundaries around a given column index in a row.
+#[must_use]
+pub fn find_word_boundaries(row: &Row, col: usize) -> (usize, usize) {
+    if row.cells.is_empty() {
+        return (0, 0);
+    }
+    let col = col.min(row.cells.len().saturating_sub(1));
+    let target_char = row.cells[col].c;
+
+    let is_word_char = |c: char| c.is_alphanumeric() || c == '_';
+    let target_is_word = is_word_char(target_char);
+
+    // Expand left
+    let mut start = col;
+    while start > 0 {
+        let prev = row.cells[start - 1].c;
+        if is_word_char(prev) == target_is_word && !prev.is_whitespace() {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+
+    // Expand right
+    let mut end = col;
+    while end + 1 < row.cells.len() {
+        let next = row.cells[end + 1].c;
+        if is_word_char(next) == target_is_word && !next.is_whitespace() {
+            end += 1;
+        } else {
+            break;
+        }
+    }
+
+    (start, end)
+}
+
+pub mod ime {
+    pub use super::{ImeState, Preedit, calculate_cursor_rect};
+}
+
+pub mod mouse {
+    pub use super::{MouseEncoding, MouseModifiers, MouseState, MouseTracking, encode_mouse_event};
+}
+
+pub mod selection {
+    pub use super::{Selection, SelectionPoint, SelectionType, find_word_boundaries};
+}

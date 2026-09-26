@@ -1,7 +1,9 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use xkbcommon::xkb::{self, KEYMAP_FORMAT_TEXT_V1, Keymap, keysyms};
 
-use crate::config::KeybindingsConfig;
-use crate::input::{KeyAction, KeyboardHandler, KittyKeyboardFlags, parse_key_combo};
+use ftty::config::KeybindingsConfig;
+use ftty::input::{KeyAction, KeyboardHandler, KittyKeyboardFlags, parse_key_combo};
 
 #[test]
 fn keymap_fd_loads_the_advertised_bytes_and_strips_the_trailing_nul() {
@@ -255,7 +257,7 @@ fn test_check_action_default_bindings() {
     let custom_paste_config = KeybindingsConfig {
         bindings: std::collections::HashMap::from([(
             "Ctrl+Shift+V".to_string(),
-            crate::config::ActionDef::Simple("none".to_string()),
+            ftty::config::ActionDef::Simple("none".to_string()),
         )]),
     };
     handler.update_modifiers(5, 0, 0, 0);
@@ -271,7 +273,7 @@ fn test_check_action_default_bindings() {
     let custom_primary_config = KeybindingsConfig {
         bindings: std::collections::HashMap::from([(
             "Shift+Insert".to_string(),
-            crate::config::ActionDef::Simple("none".to_string()),
+            ftty::config::ActionDef::Simple("none".to_string()),
         )]),
     };
     assert_eq!(handler.check_action(110, &custom_primary_config), None);
@@ -280,7 +282,7 @@ fn test_check_action_default_bindings() {
     let custom_config = KeybindingsConfig {
         bindings: std::collections::HashMap::from([(
             "Ctrl+Shift+C".to_string(),
-            crate::config::ActionDef::Simple("none".to_string()),
+            ftty::config::ActionDef::Simple("none".to_string()),
         )]),
     };
     handler.update_modifiers(5, 0, 0, 0);
@@ -290,8 +292,8 @@ fn test_check_action_default_bindings() {
     let custom_pipe_config = KeybindingsConfig {
         bindings: std::collections::HashMap::from([(
             "Ctrl+Shift+U".to_string(),
-            crate::config::ActionDef::Pipe(crate::config::PipeActionDef::PipeVisible(
-                crate::config::CommandDef::List(vec!["urlscan".to_string()]),
+            ftty::config::ActionDef::Pipe(ftty::config::PipeActionDef::PipeVisible(
+                ftty::config::CommandDef::List(vec!["urlscan".to_string()]),
             )),
         )]),
     };
@@ -416,7 +418,7 @@ fn test_kitty_arrow_and_functional_keys_encoding() {
     let f13_bytes = handler.encode_kitty_key(
         xkbcommon::xkb::keysyms::KEY_F13,
         xkbcommon::xkb::Keycode::new(0),
-        crate::input::Modifiers::default(),
+        ftty::input::Modifiers::default(),
         1,
     );
     assert_eq!(f13_bytes, Some(b"\x1b[57376u".to_vec()));
@@ -424,8 +426,399 @@ fn test_kitty_arrow_and_functional_keys_encoding() {
     let f35_bytes = handler.encode_kitty_key(
         xkbcommon::xkb::keysyms::KEY_F35,
         xkbcommon::xkb::Keycode::new(0),
-        crate::input::Modifiers::default(),
+        ftty::input::Modifiers::default(),
         1,
     );
     assert_eq!(f35_bytes, Some(b"\x1b[57398u".to_vec()));
+}
+
+mod ime_tests {
+    use ftty::font::CellMetrics;
+    use ftty::grid::{CellFlags, Grid};
+    use ftty::input::ime::*;
+
+    #[test]
+    fn test_ime_batch_application_order() {
+        let mut ime = ImeState::new();
+
+        // Stage delete, commit, and preedit out of order
+        ime.stage_commit(Some("你好".to_string()));
+        ime.stage_delete(2, 0);
+        ime.stage_preedit(Some("test".to_string()), 0, 4);
+
+        let (delete, commit) = ime.apply_done();
+        assert_eq!(delete, Some((2, 0)));
+        assert_eq!(commit, Some("你好".to_string()));
+        assert_eq!(
+            ime.preedit,
+            Some(Preedit {
+                text: "test".to_string(),
+                cursor_begin: 0,
+                cursor_end: 4,
+            })
+        );
+
+        // Subsequent commit without preedit update clears preedit
+        ime.stage_commit(Some("世界".to_string()));
+        let (_, commit) = ime.apply_done();
+        assert_eq!(commit, Some("世界".to_string()));
+        assert!(ime.preedit.is_none());
+    }
+
+    #[test]
+    fn test_calculate_cursor_rect_with_padding() {
+        let mut grid = Grid::new(80, 24, 0);
+        grid.cursor.row = 5;
+        grid.cursor.col = 10;
+
+        let metrics = CellMetrics {
+            cell_width: 10,
+            cell_height: 20,
+            ascent: 15,
+        };
+
+        // Without padding
+        let (x, y, w, h) = calculate_cursor_rect(&grid, metrics, [0, 0]);
+        assert_eq!((x, y, w, h), (100, 100, 10, 20));
+
+        // With padding [15, 25]
+        let (x, y, w, h) = calculate_cursor_rect(&grid, metrics, [15, 25]);
+        assert_eq!((x, y, w, h), (115, 125, 10, 20));
+    }
+
+    #[test]
+    fn test_calculate_cursor_rect_wide_char_and_spacer() {
+        let mut grid = Grid::new(80, 24, 0);
+        grid.cursor.row = 2;
+        grid.cursor.col = 4;
+        grid.lines[2].cells[4].flags = CellFlags::WIDE_CHAR;
+        grid.lines[2].cells[5].flags = CellFlags::WIDE_CHAR_SPACER;
+
+        let metrics = CellMetrics {
+            cell_width: 9,
+            cell_height: 18,
+            ascent: 14,
+        };
+
+        // Directly on leading wide char
+        let (x, y, w, h) = calculate_cursor_rect(&grid, metrics, [5, 5]);
+        assert_eq!(x, 5 + 4 * 9);
+        assert_eq!(y, 5 + 2 * 18);
+        assert_eq!(w, 18);
+        assert_eq!(h, 18);
+
+        // Cursor positioned on the spacer cell (index 5) must anchor back to index 4
+        grid.cursor.col = 5;
+        let (sx, sy, sw, sh) = calculate_cursor_rect(&grid, metrics, [5, 5]);
+        assert_eq!(sx, 5 + 4 * 9);
+        assert_eq!(sy, 5 + 2 * 18);
+        assert_eq!(sw, 18);
+        assert_eq!(sh, 18);
+    }
+
+    #[test]
+    fn test_calculate_cursor_rect_clamping() {
+        let mut grid = Grid::new(80, 24, 0);
+        grid.cursor.row = 999;
+        grid.cursor.col = 999;
+
+        let metrics = CellMetrics {
+            cell_width: 10,
+            cell_height: 20,
+            ascent: 15,
+        };
+
+        let (x, y, w, h) = calculate_cursor_rect(&grid, metrics, [0, 0]);
+        // Should clamp to (79, 23)
+        assert_eq!(x, 79 * 10);
+        assert_eq!(y, 23 * 20);
+        assert_eq!(w, 10);
+        assert_eq!(h, 20);
+    }
+}
+
+mod mouse_tests {
+    use ftty::input::mouse::*;
+
+    fn sgr() -> MouseEncoding {
+        MouseEncoding::Sgr
+    }
+
+    #[test]
+    fn private_modes_toggle_tracking_and_encoding() {
+        let mut state = MouseState::default();
+        assert!(!state.is_reporting());
+        assert!(state.apply_private_mode(1000, true));
+        assert_eq!(state.tracking, MouseTracking::Click);
+        assert!(state.is_reporting());
+        assert!(state.apply_private_mode(1006, true));
+        assert_eq!(state.encoding, MouseEncoding::Sgr);
+        assert!(state.apply_private_mode(1000, false));
+        assert!(!state.is_reporting());
+        assert!(state.apply_private_mode(1006, false));
+        assert_eq!(state.encoding, MouseEncoding::X10);
+
+        assert!(state.apply_private_mode(1002, true));
+        assert_eq!(state.tracking, MouseTracking::Drag);
+        assert!(state.apply_private_mode(1003, true));
+        assert_eq!(state.tracking, MouseTracking::Motion);
+        assert!(state.apply_private_mode(1005, true));
+        assert_eq!(state.encoding, MouseEncoding::Utf8);
+        assert!(state.apply_private_mode(1015, true));
+        assert_eq!(state.encoding, MouseEncoding::Urxvt);
+
+        // Cursor visibility and alternate screen modes are not mouse modes.
+        assert!(!state.apply_private_mode(25, true));
+        assert!(!state.apply_private_mode(1049, true));
+    }
+
+    #[test]
+    fn mode_resets_only_disable_matching_active_modes() {
+        let mut state = MouseState::default();
+        // Enable Drag (1002), then attempt to reset Click (1000)
+        state.apply_private_mode(1002, true);
+        assert_eq!(state.tracking, MouseTracking::Drag);
+        state.apply_private_mode(1000, false);
+        assert_eq!(
+            state.tracking,
+            MouseTracking::Drag,
+            "resetting 1000 must not disable 1002"
+        );
+
+        // Enable Sgr (1006), then attempt to reset Utf8 (1005)
+        state.apply_private_mode(1006, true);
+        assert_eq!(state.encoding, MouseEncoding::Sgr);
+        state.apply_private_mode(1005, false);
+        assert_eq!(
+            state.encoding,
+            MouseEncoding::Sgr,
+            "resetting 1005 must not revert 1006"
+        );
+    }
+
+    #[test]
+    fn utf8_rejects_coordinates_beyond_2015() {
+        let none = MouseModifiers::default();
+        assert!(
+            encode_mouse_event(MouseEncoding::Utf8, 0, 2015, 2015, true, false, none).is_some()
+        );
+        assert!(encode_mouse_event(MouseEncoding::Utf8, 0, 2016, 0, true, false, none).is_none());
+        assert!(encode_mouse_event(MouseEncoding::Utf8, 0, 0, 2016, true, false, none).is_none());
+    }
+
+    #[test]
+    fn motion_reporting_depends_on_tracking_mode() {
+        let mut state = MouseState::default();
+        assert!(!state.reports_motion(true));
+        state.tracking = MouseTracking::Click;
+        assert!(!state.reports_motion(true));
+        state.tracking = MouseTracking::Drag;
+        assert!(state.reports_motion(true));
+        assert!(!state.reports_motion(false));
+        state.tracking = MouseTracking::Motion;
+        assert!(state.reports_motion(false));
+    }
+
+    #[test]
+    fn sgr_encodes_press_release_and_motion() {
+        let none = MouseModifiers::default();
+        assert_eq!(
+            encode_mouse_event(sgr(), 0, 4, 2, true, false, none),
+            Some(b"\x1b[<0;5;3M".to_vec())
+        );
+        assert_eq!(
+            encode_mouse_event(sgr(), 2, 4, 2, false, false, none),
+            Some(b"\x1b[<2;5;3m".to_vec())
+        );
+        assert_eq!(
+            encode_mouse_event(sgr(), 0, 4, 2, true, true, none),
+            Some(b"\x1b[<32;5;3M".to_vec())
+        );
+        assert_eq!(
+            encode_mouse_event(sgr(), 64, 0, 0, true, false, none),
+            Some(b"\x1b[<64;1;1M".to_vec())
+        );
+    }
+
+    #[test]
+    fn modifiers_are_encoded_in_the_button_field() {
+        let mods = MouseModifiers {
+            shift: true,
+            alt: true,
+            ctrl: true,
+        };
+        assert_eq!(
+            encode_mouse_event(sgr(), 1, 0, 0, true, false, mods),
+            Some(b"\x1b[<29;1;1M".to_vec())
+        );
+    }
+
+    #[test]
+    fn x10_and_utf8_encodings_use_offset_bytes() {
+        let none = MouseModifiers::default();
+        assert_eq!(
+            encode_mouse_event(MouseEncoding::X10, 0, 0, 0, true, false, none),
+            Some(b"\x1b[M \x21\x21".to_vec())
+        );
+        // Legacy release reports button 3 and ignores the actual button identity.
+        assert_eq!(
+            encode_mouse_event(MouseEncoding::X10, 0, 0, 0, false, false, none),
+            Some(b"\x1b[M#!!".to_vec())
+        );
+        // 233 = U+00E9, which is two UTF-8 bytes.
+        assert_eq!(
+            encode_mouse_event(MouseEncoding::Utf8, 0, 200, 0, true, false, none),
+            Some(b"\x1b[M \xc3\xa9!".to_vec())
+        );
+        // Coordinates beyond the single-byte legacy range are rejected instead of wrapped.
+        assert_eq!(
+            encode_mouse_event(MouseEncoding::X10, 0, 300, 0, true, false, none),
+            None
+        );
+        assert_eq!(
+            encode_mouse_event(MouseEncoding::Urxvt, 0, 4, 2, true, false, none),
+            Some(b"\x1b[32;5;3M".to_vec())
+        );
+        // Urxvt and Utf8 normalize release button code to 3 while preserving modifiers.
+        assert_eq!(
+            encode_mouse_event(MouseEncoding::Urxvt, 1, 4, 2, false, false, none),
+            Some(b"\x1b[35;5;3M".to_vec())
+        );
+        let shift = MouseModifiers {
+            shift: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            encode_mouse_event(MouseEncoding::Urxvt, 1, 4, 2, false, false, shift),
+            Some(b"\x1b[39;5;3M".to_vec())
+        );
+        assert_eq!(
+            encode_mouse_event(MouseEncoding::Utf8, 1, 0, 0, false, false, none),
+            Some(b"\x1b[M#!!".to_vec())
+        );
+        assert_eq!(
+            encode_mouse_event(MouseEncoding::Utf8, 1, 0, 0, false, false, shift),
+            Some(b"\x1b[M'!!".to_vec())
+        );
+    }
+}
+
+mod selection_tests {
+    use ftty::grid::{Grid, Row};
+    use ftty::input::selection::*;
+
+    #[test]
+    fn test_selection_normalization() {
+        let forward = Selection::new(
+            SelectionPoint::new(1, 5),
+            SelectionPoint::new(2, 10),
+            SelectionType::Simple,
+        );
+        assert_eq!(
+            forward.normalized(),
+            (SelectionPoint::new(1, 5), SelectionPoint::new(2, 10))
+        );
+
+        let backward = Selection::new(
+            SelectionPoint::new(3, 15),
+            SelectionPoint::new(1, 2),
+            SelectionType::Simple,
+        );
+        assert_eq!(
+            backward.normalized(),
+            (SelectionPoint::new(1, 2), SelectionPoint::new(3, 15))
+        );
+    }
+
+    #[test]
+    fn test_selection_contains() {
+        let sel = Selection::new(
+            SelectionPoint::new(2, 5),
+            SelectionPoint::new(2, 15),
+            SelectionType::Simple,
+        );
+
+        assert!(!sel.contains(2, 4));
+        assert!(sel.contains(2, 5));
+        assert!(sel.contains(2, 10));
+        assert!(sel.contains(2, 15));
+        assert!(!sel.contains(2, 16));
+        assert!(!sel.contains(1, 10));
+        assert!(!sel.contains(3, 10));
+    }
+
+    #[test]
+    fn test_word_boundary_detection() {
+        let mut row = Row::new(20);
+        let text = "hello_world 123";
+        for (i, c) in text.chars().enumerate() {
+            row.cells[i].c = c;
+        }
+
+        // Inside "hello_world"
+        assert_eq!(find_word_boundaries(&row, 4), (0, 10));
+        // Inside "123"
+        assert_eq!(find_word_boundaries(&row, 13), (12, 14));
+    }
+
+    #[test]
+    fn test_selection_text_extraction() {
+        let mut grid = Grid::new(20, 3, 10);
+        // Write line 0
+        for (i, c) in "echo hello".chars().enumerate() {
+            grid.lines[0].cells[i].c = c;
+        }
+        // Write line 1
+        for (i, c) in "world".chars().enumerate() {
+            grid.lines[1].cells[i].c = c;
+        }
+
+        let sel = Selection::new(
+            SelectionPoint::new(0, 5),
+            SelectionPoint::new(1, 4),
+            SelectionType::Simple,
+        );
+
+        let text = sel.extract_text(&grid);
+        assert_eq!(text, "hello\nworld");
+    }
+
+    #[test]
+    fn test_selection_line_span() {
+        let sel = Selection::new(
+            SelectionPoint::new(1, 5),
+            SelectionPoint::new(3, 10),
+            SelectionType::Simple,
+        );
+
+        // Outside selection
+        assert_eq!(sel.line_span(0, 80), None);
+        assert_eq!(sel.line_span(4, 80), None);
+
+        // Start line: col 5 to max_col 79
+        assert_eq!(sel.line_span(1, 80), Some((5, 79)));
+
+        // Intermediate line: col 0 to max_col 79
+        assert_eq!(sel.line_span(2, 80), Some((0, 79)));
+
+        // End line: col 0 to col 10
+        assert_eq!(sel.line_span(3, 80), Some((0, 10)));
+
+        // Empty selection
+        let empty = Selection::new(
+            SelectionPoint::new(1, 5),
+            SelectionPoint::new(1, 5),
+            SelectionType::Simple,
+        );
+        assert_eq!(empty.line_span(1, 80), None);
+
+        // Start column beyond grid width (e.g. after shrink) yields None on start line
+        let shrunk = Selection::new(
+            SelectionPoint::new(1, 100),
+            SelectionPoint::new(2, 20),
+            SelectionType::Simple,
+        );
+        assert_eq!(shrunk.line_span(1, 80), None);
+        assert_eq!(shrunk.line_span(2, 80), Some((0, 20)));
+    }
 }
