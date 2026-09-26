@@ -180,11 +180,7 @@ impl WaylandState {
     #[must_use]
     pub fn is_fractional_scale_active(&self) -> bool {
         (self.fractional_scale.is_some() && self.viewport.is_some())
-            || ((cfg!(test)
-                || std::env::current_exe()
-                    .ok()
-                    .is_some_and(|p| p.components().any(|c| c.as_os_str() == "deps")))
-                && (self.scale_factor - 1.0).abs() > 0.001)
+            || (self.fractional_scale.is_none() && (self.scale_factor - 1.0).abs() > 0.001)
     }
 
     /// Creates and initializes the toplevel window once compositor and xdg_wm_base globals are bound.

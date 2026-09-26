@@ -2878,11 +2878,14 @@ impl Drop for Renderer {
 }
 
 pub mod box_drawing {
-    pub use super::{is_procedural_glyph, render_procedural_glyph};
+    pub use super::{
+        Stroke, is_procedural_glyph, render_block_element, render_box_drawing,
+        render_procedural_glyph,
+    };
 }
 
 pub mod shader {
-    pub use super::FRAGMENT_SHADER;
+    pub use super::{FRAGMENT_SHADER, VERTEX_SHADER};
 }
 
 pub mod text {
@@ -2894,5 +2897,5 @@ pub mod text {
 }
 
 pub mod image {
-    pub use super::{bounded_image_vertex_buffer, build_low24_index};
+    pub use super::{bounded_image_vertex_buffer, build_low24_index, placeholder_image_id};
 }

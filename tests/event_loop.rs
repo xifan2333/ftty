@@ -4,6 +4,12 @@ use std::io::{Read, Write};
 use std::time::Duration;
 
 use ftty::color::Rgb;
+use ftty::config::Config;
+use ftty::error::FttyError;
+
+fn new_test_app(term: Terminal, pty: Pty) -> Result<AppState, FttyError> {
+    AppState::with_loaded_config(term, pty, Config::default(), None)
+}
 use ftty::event_loop::{AppState, terminal_size};
 use ftty::font::CellMetrics;
 use ftty::input::KeyAction;
@@ -32,7 +38,7 @@ fn terminal_dimensions_use_metrics_and_fit_the_pty() {
 fn test_app_state_initialization() {
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
-    let app = AppState::new(term, pty).expect("AppState new");
+    let app = new_test_app(term, pty).expect("AppState new");
 
     assert!(app.running);
     assert_eq!(app.terminal.grid.cols, 80);
@@ -46,7 +52,7 @@ fn test_app_state_initialization() {
 fn test_pty_and_terminal_roundtrip() {
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
-    let mut app = AppState::new(term, pty).expect("AppState new");
+    let mut app = new_test_app(term, pty).expect("AppState new");
 
     // Send a command to shell via PTY
     app.pty
@@ -270,7 +276,7 @@ fn test_handle_key_actions_scrolling_and_zoom() {
 
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
-    let mut app = AppState::new(term, pty).expect("AppState new");
+    let mut app = new_test_app(term, pty).expect("AppState new");
 
     // Populate lines and scrollback
     for _ in 0..50 {
@@ -324,7 +330,7 @@ fn test_copy_and_paste_clipboard() {
 
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
-    let mut app = AppState::new(term, pty).expect("AppState new");
+    let mut app = new_test_app(term, pty).expect("AppState new");
 
     for c in "copied_text".chars() {
         app.terminal.grid.write_char(
@@ -354,7 +360,7 @@ fn test_pipe_visible_action_execution() {
 
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
-    let mut app = AppState::new(term, pty).expect("AppState new");
+    let mut app = new_test_app(term, pty).expect("AppState new");
 
     for c in "ftty_pipe_test".chars() {
         app.terminal.grid.write_char(
@@ -405,7 +411,7 @@ fn mouse_reports_are_forwarded_only_when_tracking_is_enabled() {
 
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
-    let mut app = AppState::new(term, pty).expect("AppState new");
+    let mut app = new_test_app(term, pty).expect("AppState new");
     let cw = f64::from(app.font_mgr.metrics.cell_width);
     let ch = f64::from(app.font_mgr.metrics.cell_height);
     app.mouse_pos = [cw * 2.5, ch * 1.5];
@@ -438,7 +444,7 @@ fn mouse_reports_are_forwarded_only_when_tracking_is_enabled() {
 fn test_cell_at_pointer_calculation() {
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
-    let app = AppState::new(term, pty).expect("AppState new");
+    let app = new_test_app(term, pty).expect("AppState new");
 
     let cw = f64::from(app.font_mgr.metrics.cell_width);
     let ch = f64::from(app.font_mgr.metrics.cell_height);
@@ -453,7 +459,7 @@ fn test_cell_at_pointer_calculation() {
 fn test_fractional_scale_pointer_and_state() {
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
-    let mut app = AppState::new(term, pty).expect("AppState new");
+    let mut app = new_test_app(term, pty).expect("AppState new");
 
     assert_eq!(app.wayland.scale_factor, 1.0);
     assert_eq!(app.wayland.preferred_scale_120, 120);
@@ -531,7 +537,7 @@ fn test_font_chain_reload_and_zoom_preserves_fallbacks() {
 fn test_update_hover_state_and_pointer_shape() {
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
-    let mut app = AppState::new(term, pty).expect("AppState new");
+    let mut app = new_test_app(term, pty).expect("AppState new");
 
     // Intern a real URL so hyperlink_id 1 is resolvable
     let id = app
@@ -657,7 +663,7 @@ fn test_pre_event_loop_window_creation_and_surface_setup() {
     let registry = conn.display().get_registry(&qh, ());
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
-    let mut app = AppState::new(term, pty).expect("app");
+    let mut app = new_test_app(term, pty).expect("app");
 
     // Before binding globals, window remains unmapped
     assert_eq!(
@@ -697,7 +703,7 @@ fn test_pre_event_loop_window_creation_and_surface_setup() {
 fn test_pty_registration_guarded_by_wayland_configured() {
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
-    let mut app = AppState::new(term, pty).expect("app");
+    let mut app = new_test_app(term, pty).expect("app");
 
     // 1. Unmapped state: must reject registration
     assert!(!app.wayland.configured);
@@ -731,7 +737,7 @@ fn test_configure_renderer_requires_window_surface() {
     let conn = wayland_client::Connection::from_socket(client).expect("conn");
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
-    let mut app = AppState::new(term, pty).expect("app");
+    let mut app = new_test_app(term, pty).expect("app");
 
     // Without a window surface, configure_renderer must fail with WindowNotCreated
     assert!(app.wayland.surface.is_none());
@@ -748,7 +754,7 @@ fn test_configure_renderer_requires_window_surface() {
 fn test_plaintext_url_hover_with_ctrl() {
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
-    let mut app = AppState::new(term, pty).expect("AppState new");
+    let mut app = new_test_app(term, pty).expect("AppState new");
 
     let url = "https://github.com/xifan2333/ftty";
     for (i, c) in format!("Open {url} now!").chars().enumerate() {

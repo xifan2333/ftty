@@ -102,11 +102,7 @@ impl AppState {
         pty: Pty,
         config_path: Option<PathBuf>,
     ) -> Result<Self, FttyError> {
-        let is_test = cfg!(test)
-            || std::env::current_exe()
-                .ok()
-                .is_some_and(|p| p.components().any(|c| c.as_os_str() == "deps"));
-        let config = if is_test && config_path.is_none() {
+        let config = if cfg!(test) && config_path.is_none() {
             Config::default()
         } else {
             Config::load_from_path_or_default(config_path.as_deref())?

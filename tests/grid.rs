@@ -1448,3 +1448,16 @@ fn test_image_accessors_expose_read_only_view_with_consistent_accounting() {
     let recomputed: usize = grid.images().values().map(ImageData::byte_size).sum();
     assert_eq!(grid.total_image_bytes(), recomputed);
 }
+
+#[test]
+fn test_grid_row_compatibility_submodule() {
+    use ftty::grid::row::{Cell, CellFlags, ClearMode, Cursor, CursorShape, PlaceholderMap, Row};
+    let _map: PlaceholderMap = std::collections::HashMap::new();
+    let row = Row::new(80);
+    assert_eq!(row.cells.len(), 80);
+    let _cell = Cell::default();
+    let _flags = CellFlags::empty();
+    let _mode = ClearMode::All;
+    let _cur = Cursor::default();
+    let _shape = CursorShape::Block;
+}

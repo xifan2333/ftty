@@ -818,3 +818,34 @@ fn test_image_vertex_buffer_is_released_when_it_exceeds_retention_cap() {
     let released = bounded_image_vertex_buffer(huge);
     assert!(released.capacity() <= 64);
 }
+
+#[test]
+fn test_render_compatibility_submodules() {
+    use ftty::color::Color;
+    use ftty::render::box_drawing::{
+        Stroke, is_procedural_glyph, render_block_element, render_box_drawing,
+        render_procedural_glyph,
+    };
+    use ftty::render::image::{
+        bounded_image_vertex_buffer, build_low24_index, placeholder_image_id,
+    };
+    use ftty::render::shader::{FRAGMENT_SHADER, VERTEX_SHADER};
+
+    assert!(VERTEX_SHADER.contains("v_tex_coords"));
+    assert!(FRAGMENT_SHADER.contains("u_image_mode"));
+    assert!(is_procedural_glyph('─'));
+    assert_eq!(placeholder_image_id(Color::DefaultForeground), 0);
+    assert_eq!(placeholder_image_id(Color::Rgb(1, 2, 3)), 0x010203);
+    let mut verts = Vec::new();
+    let handled = render_procedural_glyph(&mut verts, '█', 0.0, 0.0, 10.0, 20.0, [1.0; 4]);
+    assert!(handled);
+    let mut block_verts = Vec::new();
+    render_block_element(&mut block_verts, '▌', 0.0, 0.0, 10.0, 20.0, [1.0; 4]);
+    assert!(!block_verts.is_empty());
+    let mut box_verts = Vec::new();
+    render_box_drawing(&mut box_verts, '│', 0.0, 0.0, 10.0, 20.0, [1.0; 4]);
+    assert!(!box_verts.is_empty());
+    let _ = Stroke::Light;
+    let _ = bounded_image_vertex_buffer(Vec::new());
+    let _ = build_low24_index(std::iter::empty());
+}
