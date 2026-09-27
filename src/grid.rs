@@ -65,8 +65,26 @@ impl Default for Cell {
 }
 
 impl Cell {
+    #[inline]
+    #[must_use]
+    pub fn blank(bg: Color) -> Self {
+        Self {
+            c: ' ',
+            fg: Color::DefaultForeground,
+            bg,
+            underline_color: Color::DefaultForeground,
+            flags: CellFlags::empty(),
+            hyperlink_id: None,
+        }
+    }
+
     pub fn reset(&mut self) {
         *self = Self::default();
+    }
+
+    #[inline]
+    pub fn reset_with_bg(&mut self, bg: Color) {
+        *self = Self::blank(bg);
     }
 
     #[inline]
@@ -167,8 +185,22 @@ impl Row {
         }
     }
 
+    #[must_use]
+    pub fn blank(cols: usize, bg: Color) -> Self {
+        Self {
+            cells: vec![Cell::blank(bg); cols],
+            placeholders: None,
+            wrapped: false,
+            dirty: DirtyCell::new(true),
+        }
+    }
+
     pub fn reset(&mut self) {
-        self.cells.fill(Cell::default());
+        self.reset_with_bg(Color::DefaultBackground);
+    }
+
+    pub fn reset_with_bg(&mut self, bg: Color) {
+        self.cells.fill(Cell::blank(bg));
         self.placeholders = None;
         self.wrapped = false;
         self.dirty.set(true);
@@ -608,14 +640,19 @@ impl Grid {
     #[must_use]
     #[doc(hidden)]
     pub fn alloc_row(&mut self, cols: usize) -> Row {
+        self.alloc_row_with_bg(cols, Color::DefaultBackground)
+    }
+
+    #[must_use]
+    pub fn alloc_row_with_bg(&mut self, cols: usize, bg: Color) -> Row {
         if let Some(mut row) = self.row_pool.pop() {
             if row.cells.len() != cols {
                 row.resize(cols);
             }
-            row.reset();
+            row.reset_with_bg(bg);
             row
         } else {
-            Row::new(cols)
+            Row::blank(cols, bg)
         }
     }
 
