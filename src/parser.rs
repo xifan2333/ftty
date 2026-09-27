@@ -552,7 +552,7 @@ impl Perform for Terminal {
     fn execute(&mut self, byte: u8) {
         match byte {
             b'\n' | 0x0B | 0x0C => {
-                self.grid.newline();
+                self.grid.newline_with_bg(self.active_bg);
                 self.grid.carriage_return();
             }
             b'\r' => self.grid.carriage_return(),
@@ -903,17 +903,21 @@ impl Terminal {
                 self.grid.clear_line_with_bg(mode, self.active_bg);
             }
             // IL - Insert Lines
-            'L' => self.grid.insert_lines(param_or(1)),
+            'L' => self.grid.insert_lines_with_bg(param_or(1), self.active_bg),
             // DL - Delete Lines
-            'M' => self.grid.delete_lines(param_or(1)),
+            'M' => self.grid.delete_lines_with_bg(param_or(1), self.active_bg),
             // DCH - Delete Characters
-            'P' => self.grid.delete_chars(param_or(1)),
+            'P' => self.grid.delete_chars_with_bg(param_or(1), self.active_bg),
             // ICH - Insert Blank Characters
-            '@' => self.grid.insert_blank_chars(param_or(1)),
+            '@' => self
+                .grid
+                .insert_blank_chars_with_bg(param_or(1), self.active_bg),
+            // ECH - Erase Characters
+            'X' => self.grid.erase_chars_with_bg(param_or(1), self.active_bg),
             // SU - Scroll Up
-            'S' => self.grid.scroll_up(param_or(1)),
+            'S' => self.grid.scroll_up_with_bg(param_or(1), self.active_bg),
             // SD - Scroll Down
-            'T' => self.grid.scroll_down(param_or(1)),
+            'T' => self.grid.scroll_down_with_bg(param_or(1), self.active_bg),
             // VPA - Line Position Absolute
             'd' => {
                 let row = param_or(1).saturating_sub(1);
