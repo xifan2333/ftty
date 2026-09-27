@@ -65,8 +65,26 @@ impl Default for Cell {
 }
 
 impl Cell {
+    #[inline]
+    #[must_use]
+    pub fn blank(bg: Color) -> Self {
+        Self {
+            c: ' ',
+            fg: Color::DefaultForeground,
+            bg,
+            underline_color: Color::DefaultForeground,
+            flags: CellFlags::empty(),
+            hyperlink_id: None,
+        }
+    }
+
     pub fn reset(&mut self) {
         *self = Self::default();
+    }
+
+    #[inline]
+    pub fn reset_with_bg(&mut self, bg: Color) {
+        *self = Self::blank(bg);
     }
 
     #[inline]
@@ -167,8 +185,22 @@ impl Row {
         }
     }
 
+    #[must_use]
+    pub fn blank(cols: usize, bg: Color) -> Self {
+        Self {
+            cells: vec![Cell::blank(bg); cols],
+            placeholders: None,
+            wrapped: false,
+            dirty: DirtyCell::new(true),
+        }
+    }
+
     pub fn reset(&mut self) {
-        self.cells.fill(Cell::default());
+        self.reset_with_bg(Color::DefaultBackground);
+    }
+
+    pub fn reset_with_bg(&mut self, bg: Color) {
+        self.cells.fill(Cell::blank(bg));
         self.placeholders = None;
         self.wrapped = false;
         self.dirty.set(true);
@@ -608,14 +640,19 @@ impl Grid {
     #[must_use]
     #[doc(hidden)]
     pub fn alloc_row(&mut self, cols: usize) -> Row {
+        self.alloc_row_with_bg(cols, Color::DefaultBackground)
+    }
+
+    #[must_use]
+    pub fn alloc_row_with_bg(&mut self, cols: usize, bg: Color) -> Row {
         if let Some(mut row) = self.row_pool.pop() {
             if row.cells.len() != cols {
                 row.resize(cols);
             }
-            row.reset();
+            row.reset_with_bg(bg);
             row
         } else {
-            Row::new(cols)
+            Row::blank(cols, bg)
         }
     }
 
@@ -1113,8 +1150,13 @@ impl Grid {
         self.scroll_region_bottom = self.rows.saturating_sub(1);
     }
 
-    /// Scrolls lines inside the active scroll region upward.
+    /// Scrolls lines inside the active scroll region upward with default background.
     pub fn scroll_up(&mut self, count: usize) {
+        self.scroll_up_with_bg(count, Color::DefaultBackground);
+    }
+
+    /// Scrolls lines inside the active scroll region upward with the specified background color (BCE).
+    pub fn scroll_up_with_bg(&mut self, count: usize, bg: Color) {
         let region_len = self
             .scroll_region_bottom
             .saturating_sub(self.scroll_region_top)
@@ -1135,6 +1177,7 @@ impl Grid {
                         if recycled.cells.len() != self.cols {
                             recycled.resize(self.cols);
                         }
+                        recycled.reset_with_bg(bg);
                         let old = std::mem::replace(&mut self.lines[i], recycled);
                         self.scrollback.push_back(old);
                         if self.viewport_offset > 0 {
@@ -1144,7 +1187,7 @@ impl Grid {
                         }
                     }
                 } else {
-                    let fresh = self.alloc_row(self.cols);
+                    let fresh = self.alloc_row_with_bg(self.cols, bg);
                     let old = std::mem::replace(&mut self.lines[i], fresh);
                     self.push_scrollback(old);
                 }
@@ -1158,15 +1201,20 @@ impl Grid {
         for row in
             &mut self.lines[self.scroll_region_bottom + 1 - count..=self.scroll_region_bottom]
         {
-            row.reset();
+            row.reset_with_bg(bg);
         }
         for row in &self.lines[self.scroll_region_top..=self.scroll_region_bottom] {
             row.dirty.set(true);
         }
     }
 
-    /// Scrolls lines inside the active scroll region downward.
+    /// Scrolls lines inside the active scroll region downward with default background.
     pub fn scroll_down(&mut self, count: usize) {
+        self.scroll_down_with_bg(count, Color::DefaultBackground);
+    }
+
+    /// Scrolls lines inside the active scroll region downward with the specified background color (BCE).
+    pub fn scroll_down_with_bg(&mut self, count: usize, bg: Color) {
         let region_len = self
             .scroll_region_bottom
             .saturating_sub(self.scroll_region_top)
@@ -1179,22 +1227,28 @@ impl Grid {
         self.shift_region_marks_down(self.scroll_region_top, self.scroll_region_bottom, count);
         self.lines[self.scroll_region_top..=self.scroll_region_bottom].rotate_right(count);
         for row in &mut self.lines[self.scroll_region_top..self.scroll_region_top + count] {
-            row.reset();
+            row.reset_with_bg(bg);
         }
         for row in &self.lines[self.scroll_region_top..=self.scroll_region_bottom] {
             row.dirty.set(true);
         }
     }
 
-    /// Clears part or all of the active display screen.
+    /// Clears part or all of the active display screen with default background.
     pub fn clear_screen(&mut self, mode: ClearMode) {
+        self.clear_screen_with_bg(mode, Color::DefaultBackground);
+    }
+
+    /// Clears part or all of the active display screen with the specified background color (BCE).
+    pub fn clear_screen_with_bg(&mut self, mode: ClearMode, bg: Color) {
+        let blank_cell = Cell::blank(bg);
         match mode {
             ClearMode::Below => {
                 if self.cursor.row < self.rows {
                     let col = self.cursor.col;
-                    self.lines[self.cursor.row].cells[col..].fill(Cell::default());
+                    self.lines[self.cursor.row].cells[col..].fill(blank_cell);
                     for row in &mut self.lines[self.cursor.row + 1..] {
-                        row.reset();
+                        row.reset_with_bg(bg);
                     }
                     self.lines[self.cursor.row].dirty.set(true);
                 }
@@ -1202,10 +1256,10 @@ impl Grid {
             ClearMode::Above => {
                 if self.cursor.row < self.rows {
                     for row in &mut self.lines[..self.cursor.row] {
-                        row.reset();
+                        row.reset_with_bg(bg);
                     }
                     let col = (self.cursor.col + 1).min(self.cols);
-                    self.lines[self.cursor.row].cells[..col].fill(Cell::default());
+                    self.lines[self.cursor.row].cells[..col].fill(blank_cell);
                     self.lines[self.cursor.row].dirty.set(true);
                 }
             }
@@ -1213,7 +1267,7 @@ impl Grid {
                 let abs_screen_start = self.total_evicted_rows + self.scrollback.len();
                 self.prompt_marks.retain(|&m| m < abs_screen_start);
                 for row in &mut self.lines {
-                    row.reset();
+                    row.reset_with_bg(bg);
                 }
                 self.mark_all_dirty();
             }
@@ -1263,23 +1317,35 @@ impl Grid {
         }
     }
 
-    /// Clears part or all of the current cursor line.
+    /// Clears part or all of the current cursor line with default background.
     pub fn clear_line(&mut self, mode: ClearMode) {
+        self.clear_line_with_bg(mode, Color::DefaultBackground);
+    }
+
+    /// Clears part or all of the current cursor line with the specified background color (BCE).
+    pub fn clear_line_with_bg(&mut self, mode: ClearMode, bg: Color) {
         if self.cursor.row >= self.rows {
             return;
         }
+        let blank_cell = Cell::blank(bg);
         let row = &mut self.lines[self.cursor.row];
         match mode {
             ClearMode::Below => {
-                let start = self.cursor.col.min(self.cols);
-                row.cells[start..].fill(Cell::default());
+                let mut start = self.cursor.col.min(self.cols);
+                if start > 0 && row.cells[start].flags.contains(CellFlags::WIDE_CHAR_SPACER) {
+                    start -= 1;
+                }
+                row.cells[start..].fill(blank_cell);
             }
             ClearMode::Above => {
-                let end = (self.cursor.col + 1).min(self.cols);
-                row.cells[..end].fill(Cell::default());
+                let mut end = (self.cursor.col + 1).min(self.cols);
+                if end < self.cols && row.cells[end - 1].flags.contains(CellFlags::WIDE_CHAR) {
+                    end += 1;
+                }
+                row.cells[..end].fill(blank_cell);
             }
             ClearMode::All | ClearMode::Saved => {
-                row.reset();
+                row.reset_with_bg(bg);
             }
         }
         row.dirty.set(true);
@@ -1305,7 +1371,7 @@ impl Grid {
         while !rest.is_empty() {
             if self.cursor.col >= self.cols {
                 self.lines[self.cursor.row].wrapped = true;
-                self.newline();
+                self.newline_with_bg(bg);
                 self.cursor.col = 0;
             }
 
@@ -1416,7 +1482,7 @@ impl Grid {
         // Line wrap if wide char doesn't fit or col reached end
         if self.cursor.col + width > self.cols {
             self.lines[self.cursor.row].wrapped = true;
-            self.newline();
+            self.newline_with_bg(bg);
             self.cursor.col = 0;
         }
 
@@ -1482,8 +1548,13 @@ impl Grid {
 
     /// Performs a newline (LF): moves cursor down, scrolling if necessary.
     pub fn newline(&mut self) {
+        self.newline_with_bg(Color::DefaultBackground);
+    }
+
+    /// Performs a newline (LF) using the specified background color for scrolled lines (BCE).
+    pub fn newline_with_bg(&mut self, bg: Color) {
         if self.cursor.row == self.scroll_region_bottom {
-            self.scroll_up(1);
+            self.scroll_up_with_bg(1, bg);
         } else if self.cursor.row < self.rows.saturating_sub(1) {
             self.cursor.row += 1;
         }
@@ -1505,8 +1576,13 @@ impl Grid {
         self.cursor.col = next_tab.min(self.cols.saturating_sub(1));
     }
 
-    /// Inserts blank characters at cursor, shifting remaining characters right.
+    /// Inserts blank characters at cursor, shifting remaining characters right with default background.
     pub fn insert_blank_chars(&mut self, count: usize) {
+        self.insert_blank_chars_with_bg(count, Color::DefaultBackground);
+    }
+
+    /// Inserts blank characters at cursor with the specified background color (BCE).
+    pub fn insert_blank_chars_with_bg(&mut self, count: usize, bg: Color) {
         if self.cursor.row >= self.rows || self.cursor.col >= self.cols {
             return;
         }
@@ -1517,14 +1593,20 @@ impl Grid {
         for i in (col + count..self.cols).rev() {
             row.cells[i] = row.cells[i - count];
         }
+        let blank_cell = Cell::blank(bg);
         for cell in &mut row.cells[col..col + count] {
-            cell.reset();
+            *cell = blank_cell;
         }
         row.dirty.set(true);
     }
 
-    /// Deletes characters at cursor, shifting remaining characters left.
+    /// Deletes characters at cursor, shifting remaining characters left with default background.
     pub fn delete_chars(&mut self, count: usize) {
+        self.delete_chars_with_bg(count, Color::DefaultBackground);
+    }
+
+    /// Deletes characters at cursor, shifting remaining characters left with the specified background color (BCE).
+    pub fn delete_chars_with_bg(&mut self, count: usize, bg: Color) {
         if self.cursor.row >= self.rows || self.cursor.col >= self.cols {
             return;
         }
@@ -1535,14 +1617,62 @@ impl Grid {
         for i in col..self.cols - count {
             row.cells[i] = row.cells[i + count];
         }
+        let blank_cell = Cell::blank(bg);
         for cell in &mut row.cells[self.cols - count..] {
-            cell.reset();
+            *cell = blank_cell;
         }
         row.dirty.set(true);
     }
 
-    /// Inserts lines at cursor row, shifting lines down.
+    /// Erases `count` characters starting at cursor position with default background without moving the cursor.
+    pub fn erase_chars(&mut self, count: usize) {
+        self.erase_chars_with_bg(count, Color::DefaultBackground);
+    }
+
+    /// Erases `count` characters starting at cursor position with specified background color (BCE).
+    pub fn erase_chars_with_bg(&mut self, count: usize, bg: Color) {
+        if self.cursor.row >= self.rows || self.cursor.col >= self.cols {
+            return;
+        }
+        let row = &mut self.lines[self.cursor.row];
+        let col = self.cursor.col;
+        let count = count.min(self.cols - col);
+        if count == 0 {
+            return;
+        }
+
+        let mut start = col;
+        let mut end = col + count;
+
+        if start > 0 && row.cells[start].flags.contains(CellFlags::WIDE_CHAR_SPACER) {
+            start -= 1;
+        }
+        if end < self.cols && row.cells[end - 1].flags.contains(CellFlags::WIDE_CHAR) {
+            end += 1;
+        }
+
+        let blank_cell = Cell::blank(bg);
+        for i in start..end {
+            row.cells[i] = blank_cell;
+            if let Some(coords) = &mut row.placeholders {
+                coords.remove(&i);
+            }
+        }
+        if let Some(coords) = &mut row.placeholders
+            && coords.is_empty()
+        {
+            row.placeholders = None;
+        }
+        row.dirty.set(true);
+    }
+
+    /// Inserts lines at cursor row, shifting lines down with default background.
     pub fn insert_lines(&mut self, count: usize) {
+        self.insert_lines_with_bg(count, Color::DefaultBackground);
+    }
+
+    /// Inserts lines at cursor row, shifting lines down with specified background color (BCE).
+    pub fn insert_lines_with_bg(&mut self, count: usize, bg: Color) {
         if self.cursor.row < self.scroll_region_top || self.cursor.row > self.scroll_region_bottom {
             return;
         }
@@ -1551,14 +1681,19 @@ impl Grid {
         for _ in 0..count {
             let removed = self.lines.remove(self.scroll_region_bottom);
             self.recycle_row(removed);
-            let new_row = self.alloc_row(self.cols);
+            let new_row = self.alloc_row_with_bg(self.cols, bg);
             self.lines.insert(self.cursor.row, new_row);
         }
         self.mark_all_dirty();
     }
 
-    /// Deletes lines at cursor row, shifting lines up.
+    /// Deletes lines at cursor row, shifting lines up with default background.
     pub fn delete_lines(&mut self, count: usize) {
+        self.delete_lines_with_bg(count, Color::DefaultBackground);
+    }
+
+    /// Deletes lines at cursor row, shifting lines up with specified background color (BCE).
+    pub fn delete_lines_with_bg(&mut self, count: usize, bg: Color) {
         if self.cursor.row < self.scroll_region_top || self.cursor.row > self.scroll_region_bottom {
             return;
         }
@@ -1567,7 +1702,7 @@ impl Grid {
         for _ in 0..count {
             let removed = self.lines.remove(self.cursor.row);
             self.recycle_row(removed);
-            let new_row = self.alloc_row(self.cols);
+            let new_row = self.alloc_row_with_bg(self.cols, bg);
             self.lines.insert(self.scroll_region_bottom, new_row);
         }
         self.mark_all_dirty();

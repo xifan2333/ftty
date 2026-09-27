@@ -801,3 +801,123 @@ fn test_partial_csi_with_parser_reset_cleans_escape_state() {
     assert_eq!(term.grid.lines[0].cells[1].c, 'B');
     assert_eq!(term.grid.lines[0].cells[2].c, 'C');
 }
+
+#[test]
+fn test_bce_background_color_erase_ed_and_el() {
+    let mut term = Terminal::new(80, 24, 100);
+    let mut parser = VtParser::new();
+
+    // SGR 44 sets active background to Blue (Color::Indexed(4))
+    // \x1b[2J clears the screen using BCE
+    term.advance_bytes(&mut parser, b"\x1b[44m\x1b[2J");
+
+    for row in 0..24 {
+        for col in 0..80 {
+            assert_eq!(
+                term.grid.lines[row].cells[col].bg,
+                Color::Indexed(4),
+                "cell at ({row}, {col}) must have blue background via BCE"
+            );
+            assert_eq!(term.grid.lines[row].cells[col].c, ' ');
+        }
+    }
+
+    // Reset background to black and clear line 0 below column 10
+    term.advance_bytes(&mut parser, b"\x1b[1;11H\x1b[42m\x1b[K");
+    // Column 0..10 remains Blue
+    for col in 0..10 {
+        assert_eq!(term.grid.lines[0].cells[col].bg, Color::Indexed(4));
+    }
+    // Column 10..80 is Green (Color::Indexed(2))
+    for col in 10..80 {
+        assert_eq!(term.grid.lines[0].cells[col].bg, Color::Indexed(2));
+    }
+}
+
+#[test]
+fn test_bce_erase_characters_ech() {
+    let mut term = Terminal::new(80, 24, 100);
+    let mut parser = VtParser::new();
+
+    // Write "HELLO WORLD" then move cursor to col 1 and erase 4 chars with red background
+    term.advance_bytes(&mut parser, b"HELLO WORLD\x1b[1;1H\x1b[41m\x1b[4X");
+
+    // First 4 cells should be blank with Red bg
+    for col in 0..4 {
+        assert_eq!(term.grid.lines[0].cells[col].c, ' ');
+        assert_eq!(term.grid.lines[0].cells[col].bg, Color::Indexed(1));
+    }
+    // Fifth char remains 'O'
+    assert_eq!(term.grid.lines[0].cells[4].c, 'O');
+    // Cursor position remains at col 0 (1;1)
+    assert_eq!(term.grid.cursor.col, 0);
+}
+
+#[test]
+fn test_bce_insert_and_delete_lines_and_scroll() {
+    let mut term = Terminal::new(80, 24, 100);
+    let mut parser = VtParser::new();
+
+    // Set background to Magenta (Indexed(5)) and insert 2 lines
+    term.advance_bytes(&mut parser, b"\x1b[45m\x1b[2L");
+    for col in 0..80 {
+        assert_eq!(term.grid.lines[0].cells[col].bg, Color::Indexed(5));
+        assert_eq!(term.grid.lines[1].cells[col].bg, Color::Indexed(5));
+    }
+
+    // Delete 1 line
+    term.advance_bytes(&mut parser, b"\x1b[1M");
+    // Bottom row should be filled with Magenta
+    for col in 0..80 {
+        assert_eq!(term.grid.lines[23].cells[col].bg, Color::Indexed(5));
+    }
+
+    // Scroll up by 1 with Cyan background
+    term.advance_bytes(&mut parser, b"\x1b[46m\x1b[1S");
+    for col in 0..80 {
+        assert_eq!(term.grid.lines[23].cells[col].bg, Color::Indexed(6));
+    }
+}
+
+#[test]
+fn test_bce_raw_lf_and_reverse_index_scroll() {
+    let mut term = Terminal::new(80, 24, 100);
+    let mut parser = VtParser::new();
+
+    // Move to bottom line (row 24) and set background to Yellow (Indexed(3))
+    term.advance_bytes(&mut parser, b"\x1b[24;1H\x1b[43m\n");
+    // Row 23 should be scrolled in with Yellow background
+    for col in 0..80 {
+        assert_eq!(
+            term.grid.lines[23].cells[col].bg,
+            Color::Indexed(3),
+            "scrolled row on raw LF must have active background"
+        );
+    }
+
+    // Move to top line (row 1) and Reverse Index (ESC M) with Blue background
+    term.advance_bytes(&mut parser, b"\x1b[1;1H\x1b[44m\x1bM");
+    // Row 0 should be scrolled in with Blue background
+    for col in 0..80 {
+        assert_eq!(
+            term.grid.lines[0].cells[col].bg,
+            Color::Indexed(4),
+            "scrolled row on reverse index must have active background"
+        );
+    }
+}
+
+#[test]
+fn test_bce_wrapping_at_bottom_scroll_margin() {
+    let mut term = Terminal::new(10, 3, 100);
+    let mut parser = VtParser::new();
+
+    // Fill row 3 up to col 10 with Red background and wrap
+    term.advance_bytes(&mut parser, b"\x1b[3;1H\x1b[41m0123456789X");
+    // Bottom line scrolled in must have Red background
+    assert_eq!(term.grid.lines[2].cells[0].c, 'X');
+    assert_eq!(term.grid.lines[2].cells[0].bg, Color::Indexed(1));
+    for col in 1..10 {
+        assert_eq!(term.grid.lines[2].cells[col].bg, Color::Indexed(1));
+    }
+}
