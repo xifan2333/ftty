@@ -1461,3 +1461,33 @@ fn test_grid_row_compatibility_submodule() {
     let _cur = Cursor::default();
     let _shape = CursorShape::Block;
 }
+
+#[test]
+fn test_grid_bce_methods() {
+    let mut grid = Grid::new(40, 10, 20);
+    let bg = Color::Indexed(3);
+
+    // clear_screen_with_bg
+    grid.clear_screen_with_bg(ClearMode::All, bg);
+    assert_eq!(grid.lines[0].cells[0].bg, bg);
+    assert_eq!(grid.lines[9].cells[39].bg, bg);
+
+    // clear_line_with_bg
+    let red_bg = Color::Indexed(1);
+    grid.cursor.row = 2;
+    grid.cursor.col = 10;
+    grid.clear_line_with_bg(ClearMode::Below, red_bg);
+    assert_eq!(grid.lines[2].cells[0].bg, bg);
+    assert_eq!(grid.lines[2].cells[10].bg, red_bg);
+    assert_eq!(grid.lines[2].cells[39].bg, red_bg);
+
+    // erase_chars_with_bg
+    let green_bg = Color::Indexed(2);
+    grid.cursor.row = 4;
+    grid.cursor.col = 5;
+    grid.erase_chars_with_bg(10, green_bg);
+    assert_eq!(grid.lines[4].cells[4].bg, bg);
+    assert_eq!(grid.lines[4].cells[5].bg, green_bg);
+    assert_eq!(grid.lines[4].cells[14].bg, green_bg);
+    assert_eq!(grid.lines[4].cells[15].bg, bg);
+}
