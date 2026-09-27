@@ -1223,15 +1223,21 @@ impl Grid {
         }
     }
 
-    /// Clears part or all of the active display screen.
+    /// Clears part or all of the active display screen with default background.
     pub fn clear_screen(&mut self, mode: ClearMode) {
+        self.clear_screen_with_bg(mode, Color::DefaultBackground);
+    }
+
+    /// Clears part or all of the active display screen with the specified background color (BCE).
+    pub fn clear_screen_with_bg(&mut self, mode: ClearMode, bg: Color) {
+        let blank_cell = Cell::blank(bg);
         match mode {
             ClearMode::Below => {
                 if self.cursor.row < self.rows {
                     let col = self.cursor.col;
-                    self.lines[self.cursor.row].cells[col..].fill(Cell::default());
+                    self.lines[self.cursor.row].cells[col..].fill(blank_cell);
                     for row in &mut self.lines[self.cursor.row + 1..] {
-                        row.reset();
+                        row.reset_with_bg(bg);
                     }
                     self.lines[self.cursor.row].dirty.set(true);
                 }
@@ -1239,10 +1245,10 @@ impl Grid {
             ClearMode::Above => {
                 if self.cursor.row < self.rows {
                     for row in &mut self.lines[..self.cursor.row] {
-                        row.reset();
+                        row.reset_with_bg(bg);
                     }
                     let col = (self.cursor.col + 1).min(self.cols);
-                    self.lines[self.cursor.row].cells[..col].fill(Cell::default());
+                    self.lines[self.cursor.row].cells[..col].fill(blank_cell);
                     self.lines[self.cursor.row].dirty.set(true);
                 }
             }
@@ -1250,7 +1256,7 @@ impl Grid {
                 let abs_screen_start = self.total_evicted_rows + self.scrollback.len();
                 self.prompt_marks.retain(|&m| m < abs_screen_start);
                 for row in &mut self.lines {
-                    row.reset();
+                    row.reset_with_bg(bg);
                 }
                 self.mark_all_dirty();
             }
@@ -1300,23 +1306,29 @@ impl Grid {
         }
     }
 
-    /// Clears part or all of the current cursor line.
+    /// Clears part or all of the current cursor line with default background.
     pub fn clear_line(&mut self, mode: ClearMode) {
+        self.clear_line_with_bg(mode, Color::DefaultBackground);
+    }
+
+    /// Clears part or all of the current cursor line with the specified background color (BCE).
+    pub fn clear_line_with_bg(&mut self, mode: ClearMode, bg: Color) {
         if self.cursor.row >= self.rows {
             return;
         }
+        let blank_cell = Cell::blank(bg);
         let row = &mut self.lines[self.cursor.row];
         match mode {
             ClearMode::Below => {
                 let start = self.cursor.col.min(self.cols);
-                row.cells[start..].fill(Cell::default());
+                row.cells[start..].fill(blank_cell);
             }
             ClearMode::Above => {
                 let end = (self.cursor.col + 1).min(self.cols);
-                row.cells[..end].fill(Cell::default());
+                row.cells[..end].fill(blank_cell);
             }
             ClearMode::All | ClearMode::Saved => {
-                row.reset();
+                row.reset_with_bg(bg);
             }
         }
         row.dirty.set(true);

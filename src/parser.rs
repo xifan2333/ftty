@@ -891,7 +891,7 @@ impl Terminal {
                     3 => ClearMode::Saved,
                     _ => ClearMode::Below,
                 };
-                self.grid.clear_screen(mode);
+                self.grid.clear_screen_with_bg(mode, self.active_bg);
             }
             // EL - Erase in Line
             'K' => {
@@ -900,7 +900,7 @@ impl Terminal {
                     2 => ClearMode::All,
                     _ => ClearMode::Below,
                 };
-                self.grid.clear_line(mode);
+                self.grid.clear_line_with_bg(mode, self.active_bg);
             }
             // IL - Insert Lines
             'L' => self.grid.insert_lines(param_or(1)),
