@@ -1331,11 +1331,17 @@ impl Grid {
         let row = &mut self.lines[self.cursor.row];
         match mode {
             ClearMode::Below => {
-                let start = self.cursor.col.min(self.cols);
+                let mut start = self.cursor.col.min(self.cols);
+                if start > 0 && row.cells[start].flags.contains(CellFlags::WIDE_CHAR_SPACER) {
+                    start -= 1;
+                }
                 row.cells[start..].fill(blank_cell);
             }
             ClearMode::Above => {
-                let end = (self.cursor.col + 1).min(self.cols);
+                let mut end = (self.cursor.col + 1).min(self.cols);
+                if end < self.cols && row.cells[end - 1].flags.contains(CellFlags::WIDE_CHAR) {
+                    end += 1;
+                }
                 row.cells[..end].fill(blank_cell);
             }
             ClearMode::All | ClearMode::Saved => {
@@ -1365,7 +1371,7 @@ impl Grid {
         while !rest.is_empty() {
             if self.cursor.col >= self.cols {
                 self.lines[self.cursor.row].wrapped = true;
-                self.newline();
+                self.newline_with_bg(bg);
                 self.cursor.col = 0;
             }
 
@@ -1476,7 +1482,7 @@ impl Grid {
         // Line wrap if wide char doesn't fit or col reached end
         if self.cursor.col + width > self.cols {
             self.lines[self.cursor.row].wrapped = true;
-            self.newline();
+            self.newline_with_bg(bg);
             self.cursor.col = 0;
         }
 
@@ -1631,9 +1637,31 @@ impl Grid {
         let row = &mut self.lines[self.cursor.row];
         let col = self.cursor.col;
         let count = count.min(self.cols - col);
+        if count == 0 {
+            return;
+        }
+
+        let mut start = col;
+        let mut end = col + count;
+
+        if start > 0 && row.cells[start].flags.contains(CellFlags::WIDE_CHAR_SPACER) {
+            start -= 1;
+        }
+        if end < self.cols && row.cells[end - 1].flags.contains(CellFlags::WIDE_CHAR) {
+            end += 1;
+        }
+
         let blank_cell = Cell::blank(bg);
-        for cell in &mut row.cells[col..col + count] {
-            *cell = blank_cell;
+        for i in start..end {
+            row.cells[i] = blank_cell;
+            if let Some(coords) = &mut row.placeholders {
+                coords.remove(&i);
+            }
+        }
+        if let Some(coords) = &mut row.placeholders
+            && coords.is_empty()
+        {
+            row.placeholders = None;
         }
         row.dirty.set(true);
     }

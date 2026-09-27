@@ -420,7 +420,7 @@ impl VtParser {
 
             match remaining[0] {
                 b'\n' | 0x0B | 0x0C => {
-                    terminal.grid.newline();
+                    terminal.grid.newline_with_bg(terminal.active_bg);
                     terminal.grid.carriage_return();
                     idx += 1;
                 }
@@ -584,7 +584,7 @@ impl Perform for Terminal {
             b'M' => {
                 // Reverse Index
                 if self.grid.cursor.row == self.grid.scroll_region_top {
-                    self.grid.scroll_down(1);
+                    self.grid.scroll_down_with_bg(1, self.active_bg);
                 } else {
                     self.grid.cursor.row = self.grid.cursor.row.saturating_sub(1);
                 }

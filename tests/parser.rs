@@ -878,3 +878,46 @@ fn test_bce_insert_and_delete_lines_and_scroll() {
         assert_eq!(term.grid.lines[23].cells[col].bg, Color::Indexed(6));
     }
 }
+
+#[test]
+fn test_bce_raw_lf_and_reverse_index_scroll() {
+    let mut term = Terminal::new(80, 24, 100);
+    let mut parser = VtParser::new();
+
+    // Move to bottom line (row 24) and set background to Yellow (Indexed(3))
+    term.advance_bytes(&mut parser, b"\x1b[24;1H\x1b[43m\n");
+    // Row 23 should be scrolled in with Yellow background
+    for col in 0..80 {
+        assert_eq!(
+            term.grid.lines[23].cells[col].bg,
+            Color::Indexed(3),
+            "scrolled row on raw LF must have active background"
+        );
+    }
+
+    // Move to top line (row 1) and Reverse Index (ESC M) with Blue background
+    term.advance_bytes(&mut parser, b"\x1b[1;1H\x1b[44m\x1bM");
+    // Row 0 should be scrolled in with Blue background
+    for col in 0..80 {
+        assert_eq!(
+            term.grid.lines[0].cells[col].bg,
+            Color::Indexed(4),
+            "scrolled row on reverse index must have active background"
+        );
+    }
+}
+
+#[test]
+fn test_bce_wrapping_at_bottom_scroll_margin() {
+    let mut term = Terminal::new(10, 3, 100);
+    let mut parser = VtParser::new();
+
+    // Fill row 3 up to col 10 with Red background and wrap
+    term.advance_bytes(&mut parser, b"\x1b[3;1H\x1b[41m0123456789X");
+    // Bottom line scrolled in must have Red background
+    assert_eq!(term.grid.lines[2].cells[0].c, 'X');
+    assert_eq!(term.grid.lines[2].cells[0].bg, Color::Indexed(1));
+    for col in 1..10 {
+        assert_eq!(term.grid.lines[2].cells[col].bg, Color::Indexed(1));
+    }
+}

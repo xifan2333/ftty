@@ -1491,3 +1491,71 @@ fn test_grid_bce_methods() {
     assert_eq!(grid.lines[4].cells[14].bg, green_bg);
     assert_eq!(grid.lines[4].cells[15].bg, bg);
 }
+
+#[test]
+fn test_bce_erase_wide_character_boundaries() {
+    let mut grid = Grid::new(20, 5, 10);
+    // Write wide char '中' at col 4 (takes col 4 and 5)
+    grid.cursor.row = 1;
+    grid.cursor.col = 4;
+    grid.write_char(
+        '中',
+        Color::DefaultForeground,
+        Color::DefaultBackground,
+        CellFlags::empty(),
+    );
+    assert!(grid.lines[1].cells[4].flags.contains(CellFlags::WIDE_CHAR));
+    assert!(
+        grid.lines[1].cells[5]
+            .flags
+            .contains(CellFlags::WIDE_CHAR_SPACER)
+    );
+
+    // Erasing only col 5 (the spacer) must reconcile and clear leading cell at col 4 as well
+    let bg = Color::Indexed(4);
+    grid.cursor.row = 1;
+    grid.cursor.col = 5;
+    grid.erase_chars_with_bg(1, bg);
+    assert_eq!(grid.lines[1].cells[4].c, ' ');
+    assert!(!grid.lines[1].cells[4].flags.contains(CellFlags::WIDE_CHAR));
+    assert_eq!(grid.lines[1].cells[4].bg, bg);
+    assert_eq!(grid.lines[1].cells[5].c, ' ');
+    assert!(
+        !grid.lines[1].cells[5]
+            .flags
+            .contains(CellFlags::WIDE_CHAR_SPACER)
+    );
+    assert_eq!(grid.lines[1].cells[5].bg, bg);
+
+    // Write wide char '文' at col 8 (takes col 8 and 9)
+    grid.cursor.row = 1;
+    grid.cursor.col = 8;
+    grid.write_char(
+        '文',
+        Color::DefaultForeground,
+        Color::DefaultBackground,
+        CellFlags::empty(),
+    );
+    assert!(grid.lines[1].cells[8].flags.contains(CellFlags::WIDE_CHAR));
+    assert!(
+        grid.lines[1].cells[9]
+            .flags
+            .contains(CellFlags::WIDE_CHAR_SPACER)
+    );
+
+    // Erasing up to col 8 (touching only the WIDE_CHAR leading cell) must also clear col 9 (the spacer)
+    let red_bg = Color::Indexed(1);
+    grid.cursor.row = 1;
+    grid.cursor.col = 7;
+    grid.erase_chars_with_bg(2, red_bg); // touches 7 and 8
+    assert_eq!(grid.lines[1].cells[8].c, ' ');
+    assert!(!grid.lines[1].cells[8].flags.contains(CellFlags::WIDE_CHAR));
+    assert_eq!(grid.lines[1].cells[8].bg, red_bg);
+    assert_eq!(grid.lines[1].cells[9].c, ' ');
+    assert!(
+        !grid.lines[1].cells[9]
+            .flags
+            .contains(CellFlags::WIDE_CHAR_SPACER)
+    );
+    assert_eq!(grid.lines[1].cells[9].bg, red_bg);
+}
