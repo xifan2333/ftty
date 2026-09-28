@@ -277,8 +277,10 @@ fn pointer_events_from_the_wire_drive_mouse_reports() {
     let pointer_id = pointer.id().protocol_id();
     let cw = app.font_mgr.metrics.cell_width as f64;
     let ch = app.font_mgr.metrics.cell_height as f64;
-    let x = ((cw * 2.5) * 256.0) as i32 as u32;
-    let y = ((ch * 1.5) * 256.0) as i32 as u32;
+    let pad_x = app.config.padding_x() as f64;
+    let pad_y = app.config.padding_y() as f64;
+    let x = (((cw * 2.5) + pad_x) * 256.0) as i32 as u32;
+    let y = (((ch * 1.5) + pad_y) * 256.0) as i32 as u32;
 
     // wl_pointer.motion(time, x, y) followed by wl_pointer.button(serial, time, BTN_LEFT, pressed).
     let mut events = Vec::new();
@@ -303,8 +305,9 @@ fn pointer_events_from_the_wire_drive_mouse_reports() {
     // Turning tracking off hands the very same press back to local selection.
     app.terminal.mouse.tracking = MouseTracking::Disabled;
     app.mouse_reported = false;
+    app.mouse_pos = [(cw * 2.5) + pad_x, (ch * 1.5) + pad_y];
     let mut events = Vec::new();
-    for word in [pointer_id, (24 << 16) | 3, 10, 10, 0x110, 1] {
+    for word in [pointer_id, (24 << 16) | 3, 10, 400, 0x110, 1] {
         events.extend_from_slice(&word.to_ne_bytes());
     }
     server.write_all(&events).unwrap();

@@ -293,7 +293,7 @@ fn test_osc_52_clipboard_read_and_write() {
     term.advance_bytes(b"\x1b]52;c;?\x1b\\");
     assert_eq!(
         term.take_responses(),
-        vec![b"\x1b]52;c;aGVsbG8gd29ybGQ=\x1b\\".to_vec()]
+        vec![b"\x1b]52;c;aGVsbG8gd29ybGQ=\x07".to_vec()]
     );
 
     // When OSC 52 write is disabled, writes are ignored
