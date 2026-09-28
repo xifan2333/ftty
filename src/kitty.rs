@@ -66,6 +66,12 @@ pub struct KittyCommand {
     pub height: Option<u32>,
     pub cols: Option<u32>,
     pub rows: Option<u32>,
+    /// Source crop rectangle (x, y, w, h) within the image.
+    pub src_x: Option<u32>,
+    pub src_y: Option<u32>,
+    pub src_w: Option<u32>,
+    pub src_h: Option<u32>,
+    /// Cell-relative pixel offset (X, Y).
     pub offset_x: u32,
     pub offset_y: u32,
     pub z_index: i32,
@@ -112,9 +118,33 @@ pub struct ImagePlacement {
     pub col: usize,
     pub cols: usize,
     pub rows: usize,
+    pub src_x: u32,
+    pub src_y: u32,
+    pub src_w: Option<u32>,
+    pub src_h: Option<u32>,
     pub offset_x: u32,
     pub offset_y: u32,
     pub z_index: i32,
+}
+
+impl Default for ImagePlacement {
+    fn default() -> Self {
+        Self {
+            image_id: 0,
+            placement_id: 0,
+            line: 0,
+            col: 0,
+            cols: 1,
+            rows: 1,
+            src_x: 0,
+            src_y: 0,
+            src_w: None,
+            src_h: None,
+            offset_x: 0,
+            offset_y: 0,
+            z_index: 0,
+        }
+    }
 }
 
 /// Event emitted by the Kitty APC parser.
@@ -190,8 +220,12 @@ pub fn parse_control_keys(s: &str) -> KittyCommand {
             "p" => cmd.placement_id = val.parse().ok(),
             "c" => cmd.cols = val.parse().ok(),
             "r" => cmd.rows = val.parse().ok(),
-            "x" | "X" => cmd.offset_x = val.parse().unwrap_or(0),
-            "y" | "Y" => cmd.offset_y = val.parse().unwrap_or(0),
+            "x" => cmd.src_x = val.parse().ok(),
+            "y" => cmd.src_y = val.parse().ok(),
+            "w" => cmd.src_w = val.parse().ok(),
+            "h" => cmd.src_h = val.parse().ok(),
+            "X" => cmd.offset_x = val.parse().unwrap_or(0),
+            "Y" => cmd.offset_y = val.parse().unwrap_or(0),
             "z" => cmd.z_index = val.parse().unwrap_or(0),
             "m" => cmd.more_chunks = val == "1",
             "C" => cmd.do_not_move_cursor = val == "1",
