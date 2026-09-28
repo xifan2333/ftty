@@ -2071,19 +2071,36 @@ impl Renderer {
             };
 
             let screen_row = placement.line - viewport_start;
+            let max_visible_rows = grid.rows.saturating_sub(screen_row);
+            if max_visible_rows == 0 {
+                continue;
+            }
+            let visible_rows = placement.rows.min(max_visible_rows);
+
+            let max_visible_cols = grid.cols.saturating_sub(placement.col);
+            if max_visible_cols == 0 {
+                continue;
+            }
+            let visible_cols = placement.cols.min(max_visible_cols);
+
             let x0 = pad_x + placement.col as f32 * cw + placement.offset_x as f32;
             let y0 = pad_y + screen_row as f32 * ch + placement.offset_y as f32;
-            let x1 = x0 + placement.cols as f32 * cw;
-            let y1 = y0 + placement.rows as f32 * ch;
+            let x1 = x0 + visible_cols as f32 * cw;
+            let y1 = y0 + visible_rows as f32 * ch;
 
             let sx0 = placement.src_x as f32;
             let sy0 = placement.src_y as f32;
-            let sx1 = placement
+            let full_src_w = placement
                 .src_w
-                .map_or(img_w as f32, |w| (sx0 + w as f32).min(img_w as f32));
-            let sy1 = placement
+                .map_or(img_w as f32, |w| (sx0 + w as f32).min(img_w as f32) - sx0);
+            let full_src_h = placement
                 .src_h
-                .map_or(img_h as f32, |h| (sy0 + h as f32).min(img_h as f32));
+                .map_or(img_h as f32, |h| (sy0 + h as f32).min(img_h as f32) - sy0);
+
+            let col_ratio = visible_cols as f32 / placement.cols.max(1) as f32;
+            let row_ratio = visible_rows as f32 / placement.rows.max(1) as f32;
+            let sx1 = sx0 + full_src_w * col_ratio;
+            let sy1 = sy0 + full_src_h * row_ratio;
 
             self.render_single_cropped_image(
                 tex,
