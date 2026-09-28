@@ -102,9 +102,10 @@ This reference documents the terminal escape sequences and protocols supported b
 - **Reset Cleanup (RIS)**:
   - On full terminal reset (`\x1bc`), the URL pool must be cleared AND all cells across visible lines, scrollback, and alternate screen (`alt_lines`) must have `hyperlink_id` reset to `None` to prevent dangling references.
 
-### 7. Response Terminators & Placement Silence (XTerm & Foot Parity)
-- **Universal BEL Terminator for All PTY Responses**:
-  - All OSC queries (10, 11, 4, 52) and Kitty graphics acknowledgements (`kitty_response`) unconditionally terminate with `\x07` (BEL) per XTerm recommendations and official Kitty protocol spec.
-  - This eliminates trailing-backslash keystroke leakage in TUI and multiplexer parsers (`herdr`, `crossterm`, `ratatui`), which complete control sequences on `\x1b` and leave the trailing `\` in the PTY input queue when processing split packets.
+### 7. Response Terminators & Placement Silence (Kitty & XTerm Parity)
+- **Kitty Graphics APC Responses**:
+  - All Kitty graphics responses (`kitty_response`) strictly terminate with `\x1b\` (ST) per official `kovidgoyal/kitty` `kitty/screen.c` specification, allowing tools like `ratatui-image`, `yazi`, and `image.nvim` to properly recognize Kitty capability.
+- **OSC Color & Clipboard Query Responses**:
+  - OSC queries (10, 11, 4, 52) terminate with `\x07` (BEL) per XTerm recommendations to eliminate parser ambiguities in multiplexers and TUIs.
 - **Silent Placement (Kitty a=p)**:
   - Placement of images (`a=p`) is silent by default per Kitty protocol; success acknowledgements (`OK`) are suppressed unless an explicit confirmation was requested via `id_explicit` and `quiet == 0`.

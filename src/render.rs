@@ -2737,20 +2737,7 @@ impl Renderer {
                 self.vertices.as_ptr().cast::<u8>(),
                 std::mem::size_of_val(self.vertices.as_slice()),
             );
-            if self.vbo_full_upload || bytes.len() > self.vbo_capacity {
-                Self::upload_vbo(gl, self.vbo, &mut self.vbo_capacity, bytes);
-            } else {
-                let static_offset = self.static_vertices_len * std::mem::size_of::<f32>();
-                if static_offset < bytes.len() {
-                    let overlay_bytes = &bytes[static_offset..];
-                    gl.bind_buffer(glow::ARRAY_BUFFER, self.vbo);
-                    gl.buffer_sub_data_u8_slice(
-                        glow::ARRAY_BUFFER,
-                        static_offset as i32,
-                        overlay_bytes,
-                    );
-                }
-            }
+            Self::upload_vbo(gl, self.vbo, &mut self.vbo_capacity, bytes);
             let stride = 8 * std::mem::size_of::<f32>() as i32;
             for (index, count, offset) in [(0, 2, 0), (1, 2, 8), (2, 4, 16)] {
                 gl.enable_vertex_attrib_array(index);

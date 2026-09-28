@@ -1079,6 +1079,20 @@ impl AppState {
                     if !command.do_not_move_cursor {
                         self.terminal.grid.cursor.col = (self.terminal.grid.cursor.col + cols)
                             .min(self.terminal.grid.cols.saturating_sub(1));
+                        if rows > 1 {
+                            let target_row = self.terminal.grid.cursor.row + rows - 1;
+                            let scroll_bottom = self.terminal.grid.scroll_region_bottom;
+                            if target_row > scroll_bottom {
+                                let scroll_amount = target_row - scroll_bottom;
+                                self.terminal
+                                    .grid
+                                    .scroll_up_with_bg(scroll_amount, self.terminal.active_bg);
+                                self.terminal.grid.cursor.row = scroll_bottom;
+                            } else {
+                                self.terminal.grid.cursor.row =
+                                    target_row.min(self.terminal.grid.rows.saturating_sub(1));
+                            }
+                        }
                     }
                 }
 
@@ -1127,6 +1141,25 @@ impl AppState {
                         offset_y: command.offset_y,
                         z_index: command.z_index,
                     });
+
+                    if !command.do_not_move_cursor {
+                        self.terminal.grid.cursor.col = (self.terminal.grid.cursor.col + cols)
+                            .min(self.terminal.grid.cols.saturating_sub(1));
+                        if rows > 1 {
+                            let target_row = self.terminal.grid.cursor.row + rows - 1;
+                            let scroll_bottom = self.terminal.grid.scroll_region_bottom;
+                            if target_row > scroll_bottom {
+                                let scroll_amount = target_row - scroll_bottom;
+                                self.terminal
+                                    .grid
+                                    .scroll_up_with_bg(scroll_amount, self.terminal.active_bg);
+                                self.terminal.grid.cursor.row = scroll_bottom;
+                            } else {
+                                self.terminal.grid.cursor.row =
+                                    target_row.min(self.terminal.grid.rows.saturating_sub(1));
+                            }
+                        }
+                    }
                 }
                 let wants_ack = command.action == KittyAction::TransmitAndDisplayWithResponse
                     || (command.id_explicit && command.quiet == 0);
