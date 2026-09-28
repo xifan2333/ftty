@@ -387,20 +387,20 @@ pub fn run_event_loop_with_connection(
                                 if state.kitty_parser.is_fast_path(incoming) {
                                     state.process_terminal_output(incoming, &pty_qh);
                                 } else {
-                                    let (clean_text, events) =
-                                        state.kitty_parser.filter_bytes_slow(incoming);
-                                    for event in &events {
-                                        if let KittyEvent::Response(resp) = event {
-                                            state.write_pty_blocking(resp);
+                                    let mut parser = std::mem::take(&mut state.kitty_parser);
+                                    parser.process_stream(incoming, |chunk| match chunk {
+                                        crate::kitty::KittyStreamChunk::Text(text) => {
+                                            state.process_terminal_output(text, &pty_qh);
                                         }
-                                    }
-                                    state.process_terminal_output(&clean_text, &pty_qh);
-                                    state.kitty_parser.recycle_clean_buffer(clean_text);
-                                    for event in events {
-                                        if !matches!(event, KittyEvent::Response(_)) {
-                                            state.handle_kitty_event(event);
+                                        crate::kitty::KittyStreamChunk::Event(event) => {
+                                            if let KittyEvent::Response(resp) = &event {
+                                                state.write_pty_blocking(resp);
+                                            } else {
+                                                state.handle_kitty_event(event);
+                                            }
                                         }
-                                    }
+                                    });
+                                    state.kitty_parser = parser;
                                 }
 
                                 state.keyboard.kitty_flags = state.terminal.kitty_keyboard_flags;
