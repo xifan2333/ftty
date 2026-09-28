@@ -88,7 +88,7 @@ fn test_parse_kitty_query() {
     assert_eq!(events.len(), 1);
     match &events[0] {
         KittyEvent::Response(resp) => {
-            assert_eq!(resp, b"\x1b_Gi=42;OK\x1b\\");
+            assert_eq!(resp, b"\x1b_Gi=42;OK\x07");
         }
         other => panic!("Expected query response, got {:?}", other),
     }
@@ -225,7 +225,7 @@ fn test_split_apc_framing() {
     let (t3, e3) = parser.filter_bytes(b"\\world");
     assert_eq!(t3, b"world");
     assert_eq!(e3.len(), 1);
-    assert_eq!(e3[0], KittyEvent::Response(b"\x1b_Gi=1;OK\x1b\\".to_vec()));
+    assert_eq!(e3[0], KittyEvent::Response(b"\x1b_Gi=1;OK\x07".to_vec()));
 }
 
 #[test]
@@ -245,17 +245,14 @@ fn explicit_image_id_tracking() {
 
 #[test]
 fn response_encoding_includes_only_real_placement_ids() {
-    assert_eq!(
-        kitty_response(3, None, "OK"),
-        b"\x1b_Gi=3;OK\x1b\\".to_vec()
-    );
+    assert_eq!(kitty_response(3, None, "OK"), b"\x1b_Gi=3;OK\x07".to_vec());
     assert_eq!(
         kitty_response(3, Some(0), "OK"),
-        b"\x1b_Gi=3;OK\x1b\\".to_vec()
+        b"\x1b_Gi=3;OK\x07".to_vec()
     );
     assert_eq!(
         kitty_response(3, Some(5), "ENOENT:image not found"),
-        b"\x1b_Gi=3,p=5;ENOENT:image not found\x1b\\".to_vec()
+        b"\x1b_Gi=3,p=5;ENOENT:image not found\x07".to_vec()
     );
 }
 
@@ -312,7 +309,7 @@ fn test_filter_fast_path_direct_borrow() {
     assert_eq!(events.len(), 1);
     assert_eq!(
         events[0],
-        KittyEvent::Response(b"\x1b_Gi=42;OK\x1b\\".to_vec())
+        KittyEvent::Response(b"\x1b_Gi=42;OK\x07".to_vec())
     );
     // Events must be transferred out; parser must not retain image/event data
     assert!(parser.events_scratch.is_empty());
@@ -391,7 +388,7 @@ fn test_split_escape_crosses_chunk_into_processed() {
     assert_eq!(events.len(), 1);
     assert_eq!(
         events[0],
-        KittyEvent::Response(b"\x1b_Gi=99;OK\x1b\\".to_vec())
+        KittyEvent::Response(b"\x1b_Gi=99;OK\x07".to_vec())
     );
     assert!(parser.events_scratch.is_empty());
 }
