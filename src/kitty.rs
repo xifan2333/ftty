@@ -473,12 +473,124 @@ pub struct KittyParser {
     pub events_scratch: Vec<KittyEvent>,
 }
 
+/// A parsed chunk from the Kitty stream: either a slice of clean terminal text or a graphics event.
+#[derive(Debug, PartialEq)]
+pub enum KittyStreamChunk<'a> {
+    Text(&'a [u8]),
+    Event(KittyEvent),
+}
+
 impl KittyParser {
     #[must_use]
     pub fn new() -> Self {
         Self {
             next_image_id: 1,
             ..Default::default()
+        }
+    }
+
+    /// Processes an incoming byte stream and yields chunks (Text or Event) in strict chronological order.
+    pub fn process_stream<F>(&mut self, incoming: &[u8], mut callback: F)
+    where
+        F: FnMut(KittyStreamChunk<'_>),
+    {
+        if self.is_fast_path(incoming) {
+            callback(KittyStreamChunk::Text(incoming));
+            return;
+        }
+
+        let mut bytes_buf;
+        let bytes: &[u8] = if self.pending_stream.is_empty() {
+            incoming
+        } else {
+            bytes_buf = std::mem::take(&mut self.pending_stream);
+            bytes_buf.extend_from_slice(incoming);
+            &bytes_buf
+        };
+
+        let mut i = 0;
+        let mut text_start = 0;
+
+        while i < bytes.len() {
+            if self.in_apc {
+                if self.apc_buffer.len() > MAX_APC_PAYLOAD {
+                    self.in_apc = false;
+                    self.apc_buffer.clear();
+                    self.chunked_payload.clear();
+                    self.chunked_command = None;
+                    i += 1;
+                    text_start = i;
+                    continue;
+                }
+
+                // Look for APC terminator: \x1b\ (ST) or \x07 (BEL)
+                let byte = bytes[i];
+                if byte == 0x07 {
+                    self.in_apc = false;
+                    if let Some(event) = self.finish_apc() {
+                        callback(KittyStreamChunk::Event(event));
+                    }
+                    self.apc_buffer.clear();
+                    i += 1;
+                    text_start = i;
+                } else if byte == 0x1b {
+                    if i + 1 < bytes.len() {
+                        if bytes[i + 1] == b'\\' {
+                            self.in_apc = false;
+                            if let Some(event) = self.finish_apc() {
+                                callback(KittyStreamChunk::Event(event));
+                            }
+                            self.apc_buffer.clear();
+                            i += 2;
+                            text_start = i;
+                        } else {
+                            self.apc_buffer.push(byte);
+                            i += 1;
+                        }
+                    } else {
+                        self.pending_stream.push(byte);
+                        return;
+                    }
+                } else {
+                    self.apc_buffer.push(byte);
+                    i += 1;
+                }
+            } else if bytes[i] == 0x1b {
+                if i + 2 < bytes.len() {
+                    if bytes[i + 1] == b'_' && bytes[i + 2] == b'G' {
+                        if i > text_start {
+                            callback(KittyStreamChunk::Text(&bytes[text_start..i]));
+                        }
+                        self.in_apc = true;
+                        self.apc_buffer.clear();
+                        i += 3;
+                    } else {
+                        i += 1;
+                    }
+                } else if i + 1 < bytes.len() {
+                    if bytes[i + 1] == b'_' {
+                        if i > text_start {
+                            callback(KittyStreamChunk::Text(&bytes[text_start..i]));
+                        }
+                        self.pending_stream.extend_from_slice(&bytes[i..]);
+                        return;
+                    } else {
+                        i += 1;
+                    }
+                } else {
+                    if i > text_start {
+                        callback(KittyStreamChunk::Text(&bytes[text_start..i]));
+                    }
+                    self.pending_stream.push(bytes[i]);
+                    return;
+                }
+            } else {
+                i += 1;
+            }
+        }
+
+        if !self.in_apc && i > text_start {
+            callback(KittyStreamChunk::Text(&bytes[text_start..i]));
         }
     }
 
@@ -543,88 +655,22 @@ impl KittyParser {
     }
 
     fn filter_internal(&mut self, incoming: &[u8]) {
-        self.clean_scratch.clear();
-        self.events_scratch.clear();
+        let mut clean = std::mem::take(&mut self.clean_scratch);
+        let mut events = std::mem::take(&mut self.events_scratch);
+        clean.clear();
+        events.clear();
 
-        let mut bytes_buf;
-        let bytes: &[u8] = if self.pending_stream.is_empty() {
-            incoming
-        } else {
-            bytes_buf = std::mem::take(&mut self.pending_stream);
-            bytes_buf.extend_from_slice(incoming);
-            &bytes_buf
-        };
-
-        let mut i = 0;
-
-        while i < bytes.len() {
-            if self.in_apc {
-                if self.apc_buffer.len() > MAX_APC_PAYLOAD {
-                    self.in_apc = false;
-                    self.apc_buffer.clear();
-                    self.chunked_payload.clear();
-                    self.chunked_command = None;
-                    i += 1;
-                    continue;
-                }
-
-                // Look for APC terminator: \x1b\ (ST) or \x07 (BEL)
-                let byte = bytes[i];
-                if byte == 0x07 {
-                    self.in_apc = false;
-                    if let Some(event) = self.finish_apc() {
-                        self.events_scratch.push(event);
-                    }
-                    self.apc_buffer.clear();
-                    i += 1;
-                } else if byte == 0x1b {
-                    if i + 1 < bytes.len() {
-                        if bytes[i + 1] == b'\\' {
-                            self.in_apc = false;
-                            if let Some(event) = self.finish_apc() {
-                                self.events_scratch.push(event);
-                            }
-                            self.apc_buffer.clear();
-                            i += 2;
-                        } else {
-                            self.apc_buffer.push(byte);
-                            i += 1;
-                        }
-                    } else {
-                        self.pending_stream.push(byte);
-                        break;
-                    }
-                } else {
-                    self.apc_buffer.push(byte);
-                    i += 1;
-                }
-            } else if bytes[i] == 0x1b {
-                if i + 2 < bytes.len() {
-                    if bytes[i + 1] == b'_' && bytes[i + 2] == b'G' {
-                        self.in_apc = true;
-                        self.apc_buffer.clear();
-                        i += 3;
-                    } else {
-                        self.clean_scratch.push(bytes[i]);
-                        i += 1;
-                    }
-                } else if i + 1 < bytes.len() {
-                    if bytes[i + 1] == b'_' {
-                        self.pending_stream.extend_from_slice(&bytes[i..]);
-                        break;
-                    } else {
-                        self.clean_scratch.push(bytes[i]);
-                        i += 1;
-                    }
-                } else {
-                    self.pending_stream.push(bytes[i]);
-                    break;
-                }
-            } else {
-                self.clean_scratch.push(bytes[i]);
-                i += 1;
+        self.process_stream(incoming, |chunk| match chunk {
+            KittyStreamChunk::Text(text) => {
+                clean.extend_from_slice(text);
             }
-        }
+            KittyStreamChunk::Event(event) => {
+                events.push(event);
+            }
+        });
+
+        self.clean_scratch = clean;
+        self.events_scratch = events;
     }
 
     fn finish_apc(&mut self) -> Option<KittyEvent> {
