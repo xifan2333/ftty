@@ -2071,11 +2071,28 @@ impl Renderer {
             };
 
             let screen_row = placement.line - viewport_start;
-            let max_visible_rows = grid.rows.saturating_sub(screen_row);
-            if max_visible_rows == 0 {
+
+            // Align with Kitty/WezTerm: if the placement belongs to a scrolling region,
+            // clip its rendered bounds strictly against the active scroll margins (DECSTBM).
+            let (clip_top, clip_bottom) = if grid.scroll_region_top > 0
+                || grid.scroll_region_bottom < grid.rows.saturating_sub(1)
+            {
+                (grid.scroll_region_top, grid.scroll_region_bottom)
+            } else {
+                (0, grid.rows.saturating_sub(1))
+            };
+
+            let row_start = screen_row;
+            let row_end = screen_row + placement.rows.saturating_sub(1);
+
+            // Completely outside the clipping range
+            if row_end < clip_top || row_start > clip_bottom {
                 continue;
             }
-            let visible_rows = placement.rows.min(max_visible_rows);
+
+            let visible_top = row_start.max(clip_top);
+            let visible_bottom = row_end.min(clip_bottom);
+            let visible_rows = visible_bottom - visible_top + 1;
 
             let max_visible_cols = grid.cols.saturating_sub(placement.col);
             if max_visible_cols == 0 {
@@ -2084,7 +2101,7 @@ impl Renderer {
             let visible_cols = placement.cols.min(max_visible_cols);
 
             let x0 = pad_x + placement.col as f32 * cw + placement.offset_x as f32;
-            let y0 = pad_y + screen_row as f32 * ch + placement.offset_y as f32;
+            let y0 = pad_y + visible_top as f32 * ch + placement.offset_y as f32;
             let x1 = x0 + visible_cols as f32 * cw;
             let y1 = y0 + visible_rows as f32 * ch;
 
@@ -2098,16 +2115,20 @@ impl Renderer {
                 .map_or(img_h as f32 - sy0, |h| (h as f32).min(img_h as f32 - sy0));
 
             let col_ratio = visible_cols as f32 / placement.cols.max(1) as f32;
-            let row_ratio = visible_rows as f32 / placement.rows.max(1) as f32;
+            let top_offset_rows = visible_top.saturating_sub(row_start);
+            let top_crop_ratio = top_offset_rows as f32 / placement.rows.max(1) as f32;
+            let height_crop_ratio = visible_rows as f32 / placement.rows.max(1) as f32;
+
+            let crop_sy0 = sy0 + full_src_h * top_crop_ratio;
+            let crop_sy1 = crop_sy0 + full_src_h * height_crop_ratio;
             let sx1 = sx0 + full_src_w * col_ratio;
-            let sy1 = sy0 + full_src_h * row_ratio;
 
             self.render_single_cropped_image(
                 tex,
                 img_w as f32,
                 img_h as f32,
                 [x0, y0, x1, y1],
-                [[sx0, sy0], [sx1, sy1]],
+                [[sx0, crop_sy0], [sx1, crop_sy1]],
             );
         }
     }
