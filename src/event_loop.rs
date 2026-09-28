@@ -1080,17 +1080,23 @@ impl AppState {
                         self.terminal.grid.cursor.col = (self.terminal.grid.cursor.col + cols)
                             .min(self.terminal.grid.cols.saturating_sub(1));
                         if rows > 1 {
-                            let target_row = self.terminal.grid.cursor.row + rows - 1;
+                            let scroll_top = self.terminal.grid.scroll_region_top;
                             let scroll_bottom = self.terminal.grid.scroll_region_bottom;
-                            if target_row > scroll_bottom {
-                                let scroll_amount = target_row - scroll_bottom;
-                                self.terminal
-                                    .grid
-                                    .scroll_up_with_bg(scroll_amount, self.terminal.active_bg);
-                                self.terminal.grid.cursor.row = scroll_bottom;
+                            let cur_row = self.terminal.grid.cursor.row;
+                            if cur_row >= scroll_top && cur_row <= scroll_bottom {
+                                let target_row = cur_row + rows - 1;
+                                if target_row > scroll_bottom {
+                                    let scroll_amount = target_row - scroll_bottom;
+                                    self.terminal
+                                        .grid
+                                        .scroll_up_with_bg(scroll_amount, self.terminal.active_bg);
+                                    self.terminal.grid.cursor.row = scroll_bottom;
+                                } else {
+                                    self.terminal.grid.cursor.row = target_row;
+                                }
                             } else {
-                                self.terminal.grid.cursor.row =
-                                    target_row.min(self.terminal.grid.rows.saturating_sub(1));
+                                self.terminal.grid.cursor.row = (cur_row + rows - 1)
+                                    .min(self.terminal.grid.rows.saturating_sub(1));
                             }
                         }
                     }
@@ -1146,17 +1152,23 @@ impl AppState {
                         self.terminal.grid.cursor.col = (self.terminal.grid.cursor.col + cols)
                             .min(self.terminal.grid.cols.saturating_sub(1));
                         if rows > 1 {
-                            let target_row = self.terminal.grid.cursor.row + rows - 1;
+                            let scroll_top = self.terminal.grid.scroll_region_top;
                             let scroll_bottom = self.terminal.grid.scroll_region_bottom;
-                            if target_row > scroll_bottom {
-                                let scroll_amount = target_row - scroll_bottom;
-                                self.terminal
-                                    .grid
-                                    .scroll_up_with_bg(scroll_amount, self.terminal.active_bg);
-                                self.terminal.grid.cursor.row = scroll_bottom;
+                            let cur_row = self.terminal.grid.cursor.row;
+                            if cur_row >= scroll_top && cur_row <= scroll_bottom {
+                                let target_row = cur_row + rows - 1;
+                                if target_row > scroll_bottom {
+                                    let scroll_amount = target_row - scroll_bottom;
+                                    self.terminal
+                                        .grid
+                                        .scroll_up_with_bg(scroll_amount, self.terminal.active_bg);
+                                    self.terminal.grid.cursor.row = scroll_bottom;
+                                } else {
+                                    self.terminal.grid.cursor.row = target_row;
+                                }
                             } else {
-                                self.terminal.grid.cursor.row =
-                                    target_row.min(self.terminal.grid.rows.saturating_sub(1));
+                                self.terminal.grid.cursor.row = (cur_row + rows - 1)
+                                    .min(self.terminal.grid.rows.saturating_sub(1));
                             }
                         }
                     }
