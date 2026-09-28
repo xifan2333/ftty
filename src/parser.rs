@@ -518,7 +518,14 @@ impl Perform for Performer<'_> {
 
     #[inline]
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
-        *self.in_escape = false;
+        if bell_terminated {
+            *self.in_escape = false;
+        } else {
+            // When terminated by ST (\x1b\), \x1b triggers osc_dispatch but the parser
+            // is still in Escape state waiting for the trailing '\' (which will trigger esc_dispatch).
+            // Keep in_escape true so the trailing '\' is consumed by the parser instead of leaking.
+            *self.in_escape = true;
+        }
         self.terminal.osc_dispatch(params, bell_terminated);
     }
 
