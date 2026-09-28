@@ -628,7 +628,11 @@ impl Perform for Terminal {
 // --- CSI Handler ---
 
 pub(crate) const MAX_KEYBOARD_STACK_DEPTH: usize = 64;
-pub(crate) const SUPPORTED_KITTY_FLAGS: u16 = (1 | 2) as u16;
+/// All five Kitty keyboard protocol enhancement flags are supported.
+/// Bit layout (mirrors crossterm `KeyboardEnhancementFlags`):
+/// 1 DISAMBIGUATE  2 REPORT_EVENT_TYPES  4 REPORT_ALTERNATE_KEYS
+/// 8 REPORT_ALL_KEYS_AS_ESC  16 REPORT_ASSOCIATED_TEXT
+pub(crate) const SUPPORTED_KITTY_FLAGS: u16 = 0x1F;
 
 impl Terminal {
     pub(crate) fn handle_csi(

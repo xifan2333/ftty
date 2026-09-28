@@ -145,6 +145,12 @@ impl KittyKeyboardFlags {
     pub const REPORT_ALTERNATE_KEYS: u8 = 4;
     pub const REPORT_ALL_KEYS_AS_ESC: u8 = 8;
     pub const REPORT_ASSOCIATED_TEXT: u8 = 16;
+    /// All supported Kitty keyboard protocol enhancement flags.
+    pub const ALL: u8 = KittyKeyboardFlags::DISAMBIGUATE
+        | KittyKeyboardFlags::REPORT_EVENT_TYPES
+        | KittyKeyboardFlags::REPORT_ALTERNATE_KEYS
+        | KittyKeyboardFlags::REPORT_ALL_KEYS_AS_ESC
+        | KittyKeyboardFlags::REPORT_ASSOCIATED_TEXT;
 }
 
 /// Handles key events and produces VT escape sequences or UTF-8 byte streams.
@@ -157,6 +163,7 @@ pub struct KeyboardHandler {
     pub state: Option<State>,
     pub kitty_flags: u8,
     pub kitty_stack: Vec<u8>,
+    pub current_group: u32,
     pub(crate) resolved_bindings: HashMap<(Modifiers, xkb::Keysym), KeyAction>,
 }
 
@@ -191,6 +198,7 @@ impl KeyboardHandler {
             state,
             kitty_flags: 0,
             kitty_stack: Vec::new(),
+            current_group: 0,
             resolved_bindings: HashMap::new(),
         }
     }
@@ -234,6 +242,7 @@ impl KeyboardHandler {
 
     /// Updates modifier state from Wayland `wl_keyboard.modifiers`.
     pub fn update_modifiers(&mut self, depressed: u32, latched: u32, locked: u32, group: u32) {
+        self.current_group = group;
         if let Some(state) = &mut self.state {
             state.update_mask(depressed, latched, locked, 0, 0, group);
         }
@@ -241,8 +250,7 @@ impl KeyboardHandler {
 
     /// Sets Kitty keyboard mode flags according to mode: 1 (replace), 2 (union), 3 (difference).
     pub fn set_kitty_mode(&mut self, flags: u8, mode: u8) {
-        let masked =
-            flags & (KittyKeyboardFlags::DISAMBIGUATE | KittyKeyboardFlags::REPORT_EVENT_TYPES);
+        let masked = flags & KittyKeyboardFlags::ALL;
         match mode {
             1 => self.kitty_flags = masked,
             2 => self.kitty_flags |= masked,
@@ -257,8 +265,7 @@ impl KeyboardHandler {
             self.kitty_stack.remove(0);
         }
         self.kitty_stack.push(self.kitty_flags);
-        self.kitty_flags =
-            flags & (KittyKeyboardFlags::DISAMBIGUATE | KittyKeyboardFlags::REPORT_EVENT_TYPES);
+        self.kitty_flags = flags & KittyKeyboardFlags::ALL;
     }
 
     /// Pops `count` frames from the kitty keyboard stack.
@@ -369,37 +376,70 @@ impl KeyboardHandler {
             keysyms::KEY_Print => KittyKey::Unicode(57361),
             keysyms::KEY_Pause => KittyKey::Unicode(57362),
             keysyms::KEY_Menu => KittyKey::Unicode(57363),
+            keysyms::KEY_Shift_L => KittyKey::Unicode(57441),
+            keysyms::KEY_Control_L => KittyKey::Unicode(57442),
+            keysyms::KEY_Alt_L => KittyKey::Unicode(57443),
+            keysyms::KEY_Super_L => KittyKey::Unicode(57444),
+            keysyms::KEY_Hyper_L => KittyKey::Unicode(57445),
+            keysyms::KEY_Meta_L => KittyKey::Unicode(57446),
+            keysyms::KEY_Shift_R => KittyKey::Unicode(57447),
+            keysyms::KEY_Control_R => KittyKey::Unicode(57448),
+            keysyms::KEY_Alt_R => KittyKey::Unicode(57449),
+            keysyms::KEY_Super_R => KittyKey::Unicode(57450),
+            keysyms::KEY_Hyper_R => KittyKey::Unicode(57451),
+            keysyms::KEY_Meta_R => KittyKey::Unicode(57452),
+            keysyms::KEY_ISO_Level3_Shift => KittyKey::Unicode(57453),
+            keysyms::KEY_ISO_Level5_Shift => KittyKey::Unicode(57454),
             _ => {
-                let state = self.state.as_ref()?;
-                let utf8 = state.key_get_utf8(keycode);
-                if let Some(ch) = utf8.chars().next() {
-                    KittyKey::Unicode(ch as u32)
-                } else if sym < 0x10000 {
-                    KittyKey::Unicode(sym)
-                } else {
+                // Use the keysym's Unicode value so the codepoint reflects the key
+                // identity (shift-aware, but unaffected by Ctrl/Alt/Logo, which only
+                // transform the produced byte — e.g. Ctrl+a must report codepoint
+                // 97 ('a'), not the control char 0x01).
+                let cp = xkb::keysym_to_utf32(xkb::Keysym::new(sym));
+                if cp == 0 {
                     return None;
                 }
+                KittyKey::Unicode(cp)
             }
         };
 
-        let has_modifiers = mods.ctrl || mods.alt || mods.shift || mods.logo;
+        let _has_modifiers = mods.ctrl || mods.alt || mods.shift || mods.logo;
         let is_functional = matches!(key_format, KittyKey::Letter(_) | KittyKey::Tilde(_));
         let is_special_disambiguated = matches!(
             key_format,
-            KittyKey::Unicode(13 | 9 | 127 | 27 | 57358..=57398)
+            KittyKey::Unicode(13 | 9 | 127 | 27 | 57358..=57454)
         );
 
         let report_types = self.kitty_flags & KittyKeyboardFlags::REPORT_EVENT_TYPES != 0;
         let disambiguate = self.kitty_flags & KittyKeyboardFlags::DISAMBIGUATE != 0;
         let all_keys = self.kitty_flags & KittyKeyboardFlags::REPORT_ALL_KEYS_AS_ESC != 0;
+        let alternate = self.kitty_flags & KittyKeyboardFlags::REPORT_ALTERNATE_KEYS != 0;
+        let report_text = self.kitty_flags & KittyKeyboardFlags::REPORT_ASSOCIATED_TEXT != 0;
 
-        let should_encode = (report_types && event_type != 1)
-            || all_keys
+        // When REPORT_EVENT_TYPES is off:
+        // - Release events (3) are not reported.
+        // - Repeat events (2) are treated as regular press events (1).
+        let effective_event_type = if !report_types {
+            if event_type == 3 {
+                return None;
+            }
+            1
+        } else {
+            event_type
+        };
+
+        // Decide whether this key event is reported as a CSI u sequence.
+        // Per the Kitty keyboard protocol progressive-enhancement spec:
+        // - REPORT_ALL_KEYS_AS_ESC (8): every key is CSI-encoded.
+        // - Functional/special keys are always CSI-encoded once the protocol is active
+        //   (any flag set), because their release/repeat/alternate forms can only be
+        //   carried by CSI u.
+        // - DISAMBIGUATE (1): special keys + plain keys with a non-shift modifier.
+        let is_csi_key = all_keys
             || is_functional
-            || (disambiguate && (has_modifiers || is_special_disambiguated))
-            || (has_modifiers && (mods.ctrl || mods.alt || mods.logo));
+            || (disambiguate && (is_special_disambiguated || mods.ctrl || mods.alt || mods.logo));
 
-        if !should_encode {
+        if !is_csi_key {
             return None;
         }
 
@@ -417,10 +457,29 @@ impl KeyboardHandler {
             mod_val += 8;
         }
 
+        // REPORT_ASSOCIATED_TEXT (16): append text-as-codepoints field for presses.
+        let text_codepoints: Option<String> = if report_text && effective_event_type == 1 {
+            self.state.as_ref().and_then(|s| {
+                let utf8 = s.key_get_utf8(keycode);
+                let cps: Vec<String> = utf8
+                    .chars()
+                    .filter(|&c| c >= ' ' && c != '\x7f')
+                    .map(|c| (c as u32).to_string())
+                    .collect();
+                if cps.is_empty() {
+                    None
+                } else {
+                    Some(cps.join(":"))
+                }
+            })
+        } else {
+            None
+        };
+
         let seq = match key_format {
             KittyKey::Letter(ch) => {
-                if report_types && event_type != 1 {
-                    format!("\x1b[1;{mod_val}:{event_type}{ch}")
+                if report_types && effective_event_type != 1 {
+                    format!("\x1b[1;{mod_val}:{effective_event_type}{ch}")
                 } else if mod_val > 1 {
                     format!("\x1b[1;{mod_val}{ch}")
                 } else {
@@ -428,8 +487,8 @@ impl KeyboardHandler {
                 }
             }
             KittyKey::Tilde(num) => {
-                if report_types && event_type != 1 {
-                    format!("\x1b[{num};{mod_val}:{event_type}~")
+                if report_types && effective_event_type != 1 {
+                    format!("\x1b[{num};{mod_val}:{effective_event_type}~")
                 } else if mod_val > 1 {
                     format!("\x1b[{num};{mod_val}~")
                 } else {
@@ -437,23 +496,59 @@ impl KeyboardHandler {
                 }
             }
             KittyKey::Unicode(codepoint) => {
-                if report_types {
-                    if mod_val == 1 && event_type == 1 {
-                        format!("\x1b[{codepoint}u")
-                    } else if event_type == 1 {
-                        format!("\x1b[{codepoint};{mod_val}u")
+                // REPORT_ALTERNATE_KEYS (4): for shifted Unicode keys, the first field becomes
+                // `base:shifted` so the receiver can recover the shifted glyph. Aligns with
+                // crossterm `parse_csi_u_with_shifted_keycode`.
+                let first = if alternate && mods.shift {
+                    if let Some(base) = self.unshifted_codepoint(keycode) {
+                        if base != codepoint {
+                            format!("{base}:{codepoint}")
+                        } else {
+                            format!("{codepoint}")
+                        }
                     } else {
-                        format!("\x1b[{codepoint};{mod_val}:{event_type}u")
+                        format!("{codepoint}")
+                    }
+                } else {
+                    format!("{codepoint}")
+                };
+
+                if let Some(text) = text_codepoints {
+                    if report_types {
+                        format!("\x1b[{first};{mod_val}:{effective_event_type};{text}u")
+                    } else {
+                        format!("\x1b[{first};{mod_val};{text}u")
+                    }
+                } else if report_types {
+                    if mod_val == 1 && effective_event_type == 1 {
+                        format!("\x1b[{first}u")
+                    } else if effective_event_type == 1 {
+                        format!("\x1b[{first};{mod_val}u")
+                    } else {
+                        format!("\x1b[{first};{mod_val}:{effective_event_type}u")
                     }
                 } else if mod_val == 1 {
-                    format!("\x1b[{codepoint}u")
+                    format!("\x1b[{first}u")
                 } else {
-                    format!("\x1b[{codepoint};{mod_val}u")
+                    format!("\x1b[{first};{mod_val}u")
                 }
             }
         };
 
         Some(seq.into_bytes())
+    }
+
+    /// Returns the Unicode codepoint a key produces with no modifiers active,
+    /// used to populate the `REPORT_ALTERNATE_KEYS` base field for shifted keys.
+    ///
+    /// Builds a throwaway `State` from the active keymap with an empty modifier
+    /// mask, so the returned value reflects the key's base (unshifted) level.
+    fn unshifted_codepoint(&self, keycode: Keycode) -> Option<u32> {
+        let keymap = self.keymap.as_ref()?;
+        let mut state = State::new(keymap);
+        // Empty modifiers mask while preserving the active layout group.
+        state.update_mask(0, 0, 0, 0, 0, self.current_group);
+        state.key_get_utf8(keycode).chars().next().map(u32::from)
     }
 
     /// Returns the currently effective modifier state.
