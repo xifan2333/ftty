@@ -2092,10 +2092,10 @@ impl Renderer {
             let sy0 = placement.src_y as f32;
             let full_src_w = placement
                 .src_w
-                .map_or(img_w as f32, |w| (sx0 + w as f32).min(img_w as f32) - sx0);
+                .map_or(img_w as f32 - sx0, |w| (w as f32).min(img_w as f32 - sx0));
             let full_src_h = placement
                 .src_h
-                .map_or(img_h as f32, |h| (sy0 + h as f32).min(img_h as f32) - sy0);
+                .map_or(img_h as f32 - sy0, |h| (h as f32).min(img_h as f32 - sy0));
 
             let col_ratio = visible_cols as f32 / placement.cols.max(1) as f32;
             let row_ratio = visible_rows as f32 / placement.rows.max(1) as f32;
