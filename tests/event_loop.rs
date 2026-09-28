@@ -399,9 +399,9 @@ fn test_pipe_visible_action_execution() {
 fn x11_buttons_map_to_protocol_indexes() {
     use ftty::wayland::seat::x11_button_index;
 
-    assert_eq!(x11_button_index(0x110), Some(0));
-    assert_eq!(x11_button_index(0x111), Some(1));
-    assert_eq!(x11_button_index(0x112), Some(2));
+    assert_eq!(x11_button_index(0x110), Some(0)); // BTN_LEFT -> Left 0
+    assert_eq!(x11_button_index(0x111), Some(2)); // BTN_RIGHT -> Right 2
+    assert_eq!(x11_button_index(0x112), Some(1)); // BTN_MIDDLE -> Middle 1
     assert_eq!(x11_button_index(0x113), None);
 }
 

@@ -447,6 +447,7 @@ fn shrink_evicts_placements_below_the_new_bottom() {
         offset_x: 0,
         offset_y: 0,
         z_index: 0,
+        ..Default::default()
     });
 
     grid.resize(10, 2);
@@ -475,6 +476,7 @@ fn shrink_on_alternate_screen_evicts_truncated_placements() {
         offset_x: 0,
         offset_y: 0,
         z_index: 0,
+        ..Default::default()
     });
     grid.add_placement(ImagePlacement {
         image_id: 2,
@@ -486,6 +488,7 @@ fn shrink_on_alternate_screen_evicts_truncated_placements() {
         offset_x: 0,
         offset_y: 0,
         z_index: 0,
+        ..Default::default()
     });
 
     grid.resize(10, 2);
@@ -535,6 +538,7 @@ fn primary_placements_are_parked_while_the_alternate_screen_is_active() {
         offset_x: 0,
         offset_y: 0,
         z_index: 0,
+        ..Default::default()
     });
     assert_eq!(grid.placements.len(), 1);
 
@@ -569,6 +573,7 @@ fn hidden_primary_images_survive_cache_eviction() {
         offset_x: 0,
         offset_y: 0,
         z_index: 0,
+        ..Default::default()
     });
 
     // The primary's placement is parked while the alternate screen churns the cache.
@@ -606,6 +611,7 @@ fn clear_saved_history_rebases_hidden_primary_placements() {
         offset_x: 0,
         offset_y: 0,
         z_index: 0,
+        ..Default::default()
     });
 
     grid.enter_alt_screen();
@@ -804,6 +810,7 @@ fn test_image_placements_pool_has_bounded_capacity() {
             offset_x: 0,
             offset_y: 0,
             z_index: 0,
+            ..Default::default()
         });
     }
     assert_eq!(grid.placements.len(), 1024);
@@ -857,6 +864,7 @@ fn test_saturated_row_recycling_rebases_image_placements() {
         offset_x: 0,
         offset_y: 0,
         z_index: 0,
+        ..Default::default()
     });
 
     // Add placement at line 3 (should be decremented to line 2 on next scroll)
@@ -870,6 +878,7 @@ fn test_saturated_row_recycling_rebases_image_placements() {
         offset_x: 0,
         offset_y: 0,
         z_index: 0,
+        ..Default::default()
     });
 
     // Trigger saturated row recycling

@@ -441,6 +441,7 @@ fn test_image_remains_valid_for_placements_after_cpu_buffer_unload() {
         offset_x: 0,
         offset_y: 0,
         z_index: 0,
+        ..Default::default()
     });
     assert_eq!(grid.placements.len(), 1);
     assert_eq!(grid.placements[0].image_id, 42);

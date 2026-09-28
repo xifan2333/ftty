@@ -2076,8 +2076,43 @@ impl Renderer {
             let x1 = x0 + placement.cols as f32 * cw;
             let y1 = y0 + placement.rows as f32 * ch;
 
-            self.render_single_image(tex, img_w as f32, img_h as f32, [x0, y0, x1, y1]);
+            let sx0 = placement.src_x as f32;
+            let sy0 = placement.src_y as f32;
+            let sx1 = placement
+                .src_w
+                .map_or(img_w as f32, |w| (sx0 + w as f32).min(img_w as f32));
+            let sy1 = placement
+                .src_h
+                .map_or(img_h as f32, |h| (sy0 + h as f32).min(img_h as f32));
+
+            self.render_single_cropped_image(
+                tex,
+                img_w as f32,
+                img_h as f32,
+                [x0, y0, x1, y1],
+                [[sx0, sy0], [sx1, sy1]],
+            );
         }
+    }
+
+    pub(crate) fn render_single_cropped_image(
+        &mut self,
+        tex: glow::Texture,
+        img_w: f32,
+        img_h: f32,
+        [x0, y0, x1, y1]: [f32; 4],
+        src_coords: [[f32; 2]; 2],
+    ) {
+        let mut img_vertices = std::mem::take(&mut self.image_vertices);
+        img_vertices.clear();
+        push_quad(
+            &mut img_vertices,
+            [x0, y0, x1, y1],
+            src_coords,
+            [1.0, 1.0, 1.0, 1.0],
+        );
+        self.render_image_quads(tex, img_w, img_h, &img_vertices);
+        self.recycle_image_vertices(img_vertices);
     }
 
     pub(crate) fn render_single_image(
