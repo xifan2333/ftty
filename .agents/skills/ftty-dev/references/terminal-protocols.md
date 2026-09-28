@@ -44,7 +44,13 @@ This reference documents the terminal escape sequences and protocols supported b
   - `2`: `REPORT_EVENT_TYPES` — key release and repeat events reported with `:event-type`.
   - `4`: `REPORT_ALTERNATE_KEYS` — shifted Unicode keys emit `base:shifted` in the first field (e.g. `\x1b[57:40;4u` for `Alt+Shift+9`).
   - `8`: `REPORT_ALL_KEYS_AS_ESC` — **every** key (incl. plain printable chars with no modifiers) emits a `CSI u` sequence. Critical for herdr, which toggles this flag on the client shell.
-  - `16`: `REPORT_ASSOCIATED_TEXT` — accepted into flag state (parity with crossterm, which also does not parse the text field); the terminal deliberately does **not** emit the trailing text field because it cannot synthesize surrounding text.
+  - `16`: `REPORT_ASSOCIATED_TEXT` — appends the text-as-codepoints field (e.g. `\x1b[97;1;97u`) for key press events.
+- **Repeat & Release Handling**:
+  - When `REPORT_EVENT_TYPES` is off, repeat events (2) are treated as regular press events (1) so long-press inputs never drop out of Kitty encoding into raw byte mode; key releases (3) are suppressed.
+- **Standalone Modifier Keys**:
+  - Under `REPORT_ALL_KEYS_AS_ESC` (flag 8), standalone modifier keys (Left/Right Shift, Control, Alt, Super, Hyper, Meta, ISO Level 3/5 Shift) are mapped to Kitty functional keys `57441..=57454` and reported as CSI sequences.
+- **Layout Group Preservation**:
+  - `unshifted_codepoint` calculation explicitly preserves the active Wayland layout group (`current_group`) when resetting modifier masks to determine the base character under multiple active keyboard layouts.
 - **Flag Masking**:
   - `SUPPORTED_KITTY_FLAGS = 0x1F` (all five bits). Always mask incoming raw flags in `u16` space before narrowing to `u8`: `let flags = ((raw & SUPPORTED_KITTY_FLAGS) as u8);`.
   - Unrecognized high bits must not wrap into supported low flags.

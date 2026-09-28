@@ -517,6 +517,51 @@ fn test_kitty_full_flag_progressive_encoding() {
         h.handle_key_event(30, true, false),
         Some(b"\x1b[97u".to_vec())
     );
+    // Shift+A press (evdev 30, shift mask 1): \x1b[97:65;2u
+    h.update_modifiers(1, 0, 0, 0);
+    assert_eq!(
+        h.handle_key_event(30, true, false),
+        Some(b"\x1b[97:65;2u".to_vec())
+    );
+    h.update_modifiers(0, 0, 0, 0);
+
+    // ---- Bug 2 regression: repeat without REPORT_EVENT_TYPES encodes as press ----
+    h.set_kitty_mode(0, 1);
+    h.set_kitty_mode(KittyKeyboardFlags::REPORT_ALL_KEYS_AS_ESC, 1);
+    // Under flag 8 alone, a repeat (is_repeat = true) must emit CSI u (\x1b[97u), NOT raw 'a'
+    assert_eq!(
+        h.handle_key_event(30, true, true),
+        Some(b"\x1b[97u".to_vec())
+    );
+
+    // ---- Bug 3 regression: standalone modifier keys under flag 8 ----
+    // LeftShift is evdev 42 -> mapped to Kitty functional code 57441
+    assert_eq!(
+        h.handle_key_event(42, true, false),
+        Some(b"\x1b[57441u".to_vec())
+    );
+    // LeftControl is evdev 29 -> mapped to 57442
+    assert_eq!(
+        h.handle_key_event(29, true, false),
+        Some(b"\x1b[57442u".to_vec())
+    );
+
+    // ---- Bug 4 regression: layout group preserved in handler ----
+    h.update_modifiers(0, 0, 0, 2);
+    assert_eq!(h.current_group, 2);
+    h.update_modifiers(0, 0, 0, 0);
+
+    // ---- Bug 5 regression: REPORT_ASSOCIATED_TEXT (flag 16) ----
+    h.set_kitty_mode(0, 1);
+    h.set_kitty_mode(
+        KittyKeyboardFlags::REPORT_ALL_KEYS_AS_ESC | KittyKeyboardFlags::REPORT_ASSOCIATED_TEXT,
+        1,
+    );
+    // 'a' press with flag 8|16 includes associated text 'a' (codepoint 97): \x1b[97;1;97u
+    assert_eq!(
+        h.handle_key_event(30, true, false),
+        Some(b"\x1b[97;1;97u".to_vec())
+    );
 
     // ---- flags 4 alone (REPORT_ALTERNATE_KEYS) is accepted in state ----
     h.set_kitty_mode(0, 1);
