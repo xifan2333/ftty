@@ -1031,10 +1031,8 @@ pub fn percent_decode(s: &str) -> Option<String> {
 
 impl Terminal {
     pub(crate) fn handle_osc(&mut self, params: &[&[u8]], bell_terminated: bool) {
-        // OSC color responses (10, 11, 4) use BEL (\x07) per XTerm recommendations to avoid
-        // trailing-backslash leaks in TUI/multiplexer parsers that abort on \x1b.
-        const COLOR_TERMINATOR: &str = "\x07";
-        let clip_terminator = if bell_terminated { "\x07" } else { "\x1b\\" };
+        // Match foot: mirror the terminator (BEL or ST) used by the client's query.
+        let terminator = if bell_terminated { "\x07" } else { "\x1b\\" };
 
         if params.len() >= 2
             && (params[0] == b"0" || params[0] == b"2")
@@ -1047,7 +1045,7 @@ impl Terminal {
                 if params[1] == b"?" {
                     let fg = self.default_fg;
                     let resp = format!(
-                        "\x1b]10;rgb:{:02x}{:02x}/{:02x}{:02x}/{:02x}{:02x}{COLOR_TERMINATOR}",
+                        "\x1b]10;rgb:{:02x}{:02x}/{:02x}{:02x}/{:02x}{:02x}{terminator}",
                         fg.r, fg.r, fg.g, fg.g, fg.b, fg.b
                     );
                     self.responses.push(resp.into_bytes());
@@ -1061,7 +1059,7 @@ impl Terminal {
                 if params[1] == b"?" {
                     let bg = self.default_bg;
                     let resp = format!(
-                        "\x1b]11;rgb:{:02x}{:02x}/{:02x}{:02x}/{:02x}{:02x}{COLOR_TERMINATOR}",
+                        "\x1b]11;rgb:{:02x}{:02x}/{:02x}{:02x}/{:02x}{:02x}{terminator}",
                         bg.r, bg.r, bg.g, bg.g, bg.b, bg.b
                     );
                     self.responses.push(resp.into_bytes());
@@ -1084,7 +1082,7 @@ impl Terminal {
                         if chunk[1] == b"?" {
                             let col = self.palette[idx];
                             let resp = format!(
-                                "\x1b]4;{idx};rgb:{:02x}{:02x}/{:02x}{:02x}/{:02x}{:02x}{COLOR_TERMINATOR}",
+                                "\x1b]4;{idx};rgb:{:02x}{:02x}/{:02x}{:02x}/{:02x}{:02x}{terminator}",
                                 col.r, col.r, col.g, col.g, col.b, col.b
                             );
                             self.responses.push(resp.into_bytes());
@@ -1129,7 +1127,7 @@ impl Terminal {
                             .as_ref()
                             .map(|text| BASE64_STANDARD.encode(text.as_bytes()))
                             .unwrap_or_default();
-                        let resp = format!("\x1b]52;{};{}{clip_terminator}", primary_target, b64);
+                        let resp = format!("\x1b]52;{};{}{terminator}", primary_target, b64);
                         self.responses.push(resp.into_bytes());
                     }
                 } else if payload.is_empty() {

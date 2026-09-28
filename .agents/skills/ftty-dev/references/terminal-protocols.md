@@ -103,9 +103,9 @@ This reference documents the terminal escape sequences and protocols supported b
   - On full terminal reset (`\x1bc`), the URL pool must be cleared AND all cells across visible lines, scrollback, and alternate screen (`alt_lines`) must have `hyperlink_id` reset to `None` to prevent dangling references.
 
 ### 7. Response Terminators & Placement Silence (foot & XTerm Parity)
-- **BEL Termination**:
-  - OSC queries (10, 11, 4) and Kitty graphics acknowledgements use `\x07` (`BEL`) as their response terminator.
-  - Using `\x1b\` (`ST`) causes CLI/TUI parsers (`herdr`, `crossterm`, `readline`) to truncate on `\x1b` and leak the trailing `\` (0x5C) into the PTY stdin buffer, echoing as visible stray backslashes.
-  - OSC 52 clipboard reading respects `bell_terminated`: replies with `\x07` when requested via BEL.
+- **Dynamic Response Terminator (foot Alignment)**:
+  - OSC queries (10, 11, 4, 52) dynamically mirror the terminator (`\x07` BEL or `\x1b\` ST) used by the client's query, exactly matching `foot`'s `osc.c`.
+  - When clients query with BEL (`\x07`), the terminal replies with BEL, eliminating trailing-backslash leaks in TUI/multiplexer parsers that abort on `\x1b`.
+  - When clients query with ST (`\x1b\`), the terminal preserves ST framing.
 - **Silent Placement (Kitty a=p)**:
   - Placement of images (`a=p`) is silent by default per Kitty protocol; success acknowledgements (`OK`) are suppressed unless an explicit confirmation was requested via `id_explicit` and `quiet == 0`.
