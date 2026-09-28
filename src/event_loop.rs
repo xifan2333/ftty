@@ -1120,7 +1120,9 @@ impl AppState {
                         z_index: command.z_index,
                     });
                 }
-                if command.quiet == 0 {
+                let wants_ack = command.action == KittyAction::TransmitAndDisplayWithResponse
+                    || (command.id_explicit && command.quiet == 0);
+                if wants_ack {
                     let resp = kitty_response(image_id, ack_id, "OK");
                     self.write_pty_blocking(&resp);
                 }

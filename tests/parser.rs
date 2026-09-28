@@ -176,10 +176,23 @@ fn test_osc_color_queries_use_configured_defaults() {
     term.advance_bytes(b"\x1b]10;?\x07");
     assert_eq!(
         term.take_responses(),
-        vec![b"\x1b]10;rgb:ffff/8080/0000\x1b\\".to_vec()]
+        vec![b"\x1b]10;rgb:ffff/8080/0000\x07".to_vec()]
     );
 
     term.advance_bytes(b"\x1b]11;?\x07");
+    assert_eq!(
+        term.take_responses(),
+        vec![b"\x1b]11;rgb:0a0a/1414/1e1e\x07".to_vec()]
+    );
+
+    // ST-terminated queries mirror ST terminator per foot behavior
+    term.advance_bytes(b"\x1b]10;?\x1b\\");
+    assert_eq!(
+        term.take_responses(),
+        vec![b"\x1b]10;rgb:ffff/8080/0000\x1b\\".to_vec()]
+    );
+
+    term.advance_bytes(b"\x1b]11;?\x1b\\");
     assert_eq!(
         term.take_responses(),
         vec![b"\x1b]11;rgb:0a0a/1414/1e1e\x1b\\".to_vec()]
@@ -266,7 +279,7 @@ fn test_osc_52_clipboard_read_and_write() {
     // Enable OSC 52 read
     term.allow_osc52_read = true;
     term.advance_bytes(b"\x1b]52;c;?\x07");
-    assert_eq!(term.take_responses(), vec![b"\x1b]52;c;\x1b\\".to_vec()]);
+    assert_eq!(term.take_responses(), vec![b"\x1b]52;c;\x07".to_vec()]);
 
     // Write "hello world" (aGVsbG8gd29ybGQ=)
     term.advance_bytes(b"\x1b]52;c;aGVsbG8gd29ybGQ=\x07");
@@ -722,8 +735,13 @@ fn test_dynamic_palette_and_colors_osc() {
     assert!(term.palette_dirty);
     term.palette_dirty = false;
 
-    // 6. Query palette color 1 via OSC 4;1;?
+    // 6. Query palette color 1 via OSC 4;1;? (BEL and ST)
     term.advance_bytes(b"\x1b]4;1;?\x07");
+    assert_eq!(
+        term.take_responses(),
+        vec![b"\x1b]4;1;rgb:abab/cdcd/efef\x07".to_vec()]
+    );
+    term.advance_bytes(b"\x1b]4;1;?\x1b\\");
     assert_eq!(
         term.take_responses(),
         vec![b"\x1b]4;1;rgb:abab/cdcd/efef\x1b\\".to_vec()]
