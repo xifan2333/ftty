@@ -669,14 +669,14 @@ impl KittyParser {
 
 /// Encodes a Kitty graphics acknowledgement for an image and optional placement id.
 ///
-/// The wire format is `<ESC>_Gi=<id>[,p=<placement id>];<message><ESC>\\`.
+/// The wire format is `<ESC>_Gi=<id>[,p=<placement id>];<message><BEL>` per Kitty Graphics specification.
 #[must_use]
 pub fn kitty_response(image_id: u32, placement_id: Option<u32>, message: &str) -> Vec<u8> {
     match placement_id.filter(|id| *id != 0) {
         Some(placement_id) => {
-            format!("\x1b_Gi={image_id},p={placement_id};{message}\x1b\\").into_bytes()
+            format!("\x1b_Gi={image_id},p={placement_id};{message}\x07").into_bytes()
         }
-        None => format!("\x1b_Gi={image_id};{message}\x1b\\").into_bytes(),
+        None => format!("\x1b_Gi={image_id};{message}\x07").into_bytes(),
     }
 }
 
