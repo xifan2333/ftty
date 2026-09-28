@@ -185,17 +185,17 @@ fn test_osc_color_queries_use_configured_defaults() {
         vec![b"\x1b]11;rgb:0a0a/1414/1e1e\x07".to_vec()]
     );
 
-    // ST-terminated queries mirror ST terminator per foot behavior
+    // ST-terminated queries also receive BEL per XTerm recommendation to prevent stray backslashes
     term.advance_bytes(b"\x1b]10;?\x1b\\");
     assert_eq!(
         term.take_responses(),
-        vec![b"\x1b]10;rgb:ffff/8080/0000\x1b\\".to_vec()]
+        vec![b"\x1b]10;rgb:ffff/8080/0000\x07".to_vec()]
     );
 
     term.advance_bytes(b"\x1b]11;?\x1b\\");
     assert_eq!(
         term.take_responses(),
-        vec![b"\x1b]11;rgb:0a0a/1414/1e1e\x1b\\".to_vec()]
+        vec![b"\x1b]11;rgb:0a0a/1414/1e1e\x07".to_vec()]
     );
 }
 
@@ -744,7 +744,7 @@ fn test_dynamic_palette_and_colors_osc() {
     term.advance_bytes(b"\x1b]4;1;?\x1b\\");
     assert_eq!(
         term.take_responses(),
-        vec![b"\x1b]4;1;rgb:abab/cdcd/efef\x1b\\".to_vec()]
+        vec![b"\x1b]4;1;rgb:abab/cdcd/efef\x07".to_vec()]
     );
 
     // 7. Reset palette color 1 via OSC 104;1
