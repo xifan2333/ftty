@@ -39,13 +39,21 @@ This reference documents the terminal escape sequences and protocols supported b
   - Image placements must be tracked across vertical screen shrinkage and alternate screen transitions without corruption.
 
 ### 2. Kitty Keyboard Protocol (CSI u)
-- **Supported Flags**:
-  - `1`: `DISAMBIGUATE_ESCAPE_CODES` (Escape, Tab, Enter, Backspace reported via `CSI <key>;<mod>u`)
-  - `2`: `REPORT_EVENT_TYPES` (Key release and repeat events reported)
+- **Supported Flags** (all five, aligned with crossterm `KeyboardEnhancementFlags`):
+  - `1`: `DISAMBIGUATE_ESCAPE_CODES` — functional/special keys + plain keys with a non-shift modifier are reported as `CSI u`.
+  - `2`: `REPORT_EVENT_TYPES` — key release and repeat events reported with `:event-type`.
+  - `4`: `REPORT_ALTERNATE_KEYS` — shifted Unicode keys emit `base:shifted` in the first field (e.g. `\x1b[57:40;4u` for `Alt+Shift+9`).
+  - `8`: `REPORT_ALL_KEYS_AS_ESC` — **every** key (incl. plain printable chars with no modifiers) emits a `CSI u` sequence. Critical for herdr, which toggles this flag on the client shell.
+  - `16`: `REPORT_ASSOCIATED_TEXT` — accepted into flag state (parity with crossterm, which also does not parse the text field); the terminal deliberately does **not** emit the trailing text field because it cannot synthesize surrounding text.
 - **Flag Masking**:
-  - Always mask incoming raw flags in `u16` space before narrowing to `u8`:
-    `let flags = ((raw & SUPPORTED_KITTY_FLAGS) as u8);`
+  - `SUPPORTED_KITTY_FLAGS = 0x1F` (all five bits). Always mask incoming raw flags in `u16` space before narrowing to `u8`: `let flags = ((raw & SUPPORTED_KITTY_FLAGS) as u8);`.
   - Unrecognized high bits must not wrap into supported low flags.
+- **Codepoint Source (Critical)**:
+  - The Unicode codepoint in `CSI u` MUST come from `xkb::keysym_to_utf32(sym)`, NOT `state.key_get_utf8(keycode)`. The keysym is shift-aware but unaffected by Ctrl/Alt/Logo, so `Ctrl+a` reports codepoint 97 (`'a'`), not the control byte 0x01. Using `key_get_utf8` breaks crossterm's `parse_csi_u` round-trip and silently kills consumers like herdr that match on `Char('a') + CONTROL`.
+- **Progressive Enhancement Decision** (`should_encode`):
+  - `flags == 0` MUST fall back to legacy `handle_key` (guarded by `kitty_flags > 0` in `handle_key_event`).
+  - A key is CSI-encoded iff: `REPORT_ALL_KEYS_AS_ESC` is set; OR the key is functional (arrows/F-keys/Home/etc.) with any flag active; OR `DISAMBIGUATE` is set and the key is special or carries a non-shift modifier.
+  - When `REPORT_EVENT_TYPES` is off, only presses are reported (release/repeat return `None`).
 - **Stack Behavior**:
   - Bounded at 64 entries.
   - An emptying pop request (when stack is exhausted) **must reset all flags to 0**.
