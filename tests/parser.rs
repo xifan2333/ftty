@@ -200,6 +200,22 @@ fn test_osc_color_queries_use_configured_defaults() {
 }
 
 #[test]
+fn test_herdr_osc8_and_sync_output_frame() {
+    let mut term = TestTerm::new(180, 45, 100);
+    let bytes =
+        b"\x1b[?2026h\x1b[?25l\x1b]8;;\x1b\\\x1b[25;127H\x1b[?25l\x1b[?2026l\x1b[25;127H\x1b[?25l";
+    term.advance_bytes(bytes);
+    for row in 0..term.grid.rows {
+        for col in 0..term.grid.cols {
+            assert_ne!(
+                term.grid.lines[row].cells[col].c, '\\',
+                "Found '\\' at ({row}, {col})!"
+            );
+        }
+    }
+}
+
+#[test]
 fn test_bracketed_paste_mode_toggle() {
     let mut term = TestTerm::new(80, 24, 100);
     assert!(!term.bracketed_paste);
