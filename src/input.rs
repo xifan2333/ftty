@@ -374,15 +374,15 @@ impl KeyboardHandler {
             keysyms::KEY_Pause => KittyKey::Unicode(57362),
             keysyms::KEY_Menu => KittyKey::Unicode(57363),
             _ => {
-                let state = self.state.as_ref()?;
-                let utf8 = state.key_get_utf8(keycode);
-                if let Some(ch) = utf8.chars().next() {
-                    KittyKey::Unicode(ch as u32)
-                } else if sym < 0x10000 {
-                    KittyKey::Unicode(sym)
-                } else {
+                // Use the keysym's Unicode value so the codepoint reflects the key
+                // identity (shift-aware, but unaffected by Ctrl/Alt/Logo, which only
+                // transform the produced byte — e.g. Ctrl+a must report codepoint
+                // 97 ('a'), not the control char 0x01).
+                let cp = xkb::keysym_to_utf32(xkb::Keysym::new(sym));
+                if cp == 0 {
                     return None;
                 }
+                KittyKey::Unicode(cp)
             }
         };
 

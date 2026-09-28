@@ -432,6 +432,128 @@ fn test_kitty_arrow_and_functional_keys_encoding() {
     assert_eq!(f35_bytes, Some(b"\x1b[57398u".to_vec()));
 }
 
+#[test]
+fn test_kitty_full_flag_progressive_encoding() {
+    let mut h = KeyboardHandler::new();
+
+    // ---- flags == 0: fully legacy, never CSI-encoded ----
+    // Plain 'a' (evdev 30) press -> raw byte 0x61
+    assert_eq!(h.handle_key_event(30, true, false), Some(b"a".to_vec()));
+    // Ctrl+a press -> legacy 0x01
+    assert_eq!(h.handle_key_event(30, true, false), Some(b"a".to_vec()));
+    // Up (103) press -> legacy \x1b[A
+    assert_eq!(
+        h.handle_key_event(103, true, false),
+        Some(b"\x1b[A".to_vec())
+    );
+    // Release ignored when no flag set
+    assert_eq!(h.handle_key_event(30, false, false), None);
+
+    // ---- REPORT_ALL_KEYS_AS_ESC (8) alone: every key CSI-encoded ----
+    h.set_kitty_mode(KittyKeyboardFlags::REPORT_ALL_KEYS_AS_ESC, 1);
+    // Plain 'a' -> \x1b[97u (crossterm parse_csi_u -> Char('a'))
+    assert_eq!(
+        h.handle_key_event(30, true, false),
+        Some(b"\x1b[97u".to_vec())
+    );
+    // Up still CSI form
+    assert_eq!(
+        h.handle_key_event(103, true, false),
+        Some(b"\x1b[A".to_vec())
+    );
+    // No REPORT_EVENT_TYPES -> release ignored
+    assert_eq!(h.handle_key_event(30, false, false), None);
+
+    // ---- flags 11 (1|2|8): all keys + event types ----
+    h.set_kitty_mode(
+        KittyKeyboardFlags::DISAMBIGUATE | KittyKeyboardFlags::REPORT_EVENT_TYPES,
+        2,
+    );
+    assert_eq!(
+        h.kitty_flags & KittyKeyboardFlags::REPORT_ALL_KEYS_AS_ESC,
+        8
+    );
+    // Ctrl+a (evdev 30, mod 4): \x1b[97;5u  (crossterm -> Char('a'), CONTROL)
+    h.update_modifiers(4, 0, 0, 0);
+    assert_eq!(
+        h.handle_key_event(30, true, false),
+        Some(b"\x1b[97;5u".to_vec())
+    );
+    // Release of Ctrl+a: \x1b[97;5:3u
+    assert_eq!(
+        h.handle_key_event(30, false, false),
+        Some(b"\x1b[97;5:3u".to_vec())
+    );
+    h.update_modifiers(0, 0, 0, 0);
+
+    // Explicit regression for the herdr prefix root cause: Ctrl+a under the
+    // classic flags herdr pushes (DISAMBIGUATE | REPORT_EVENT_TYPES = 3) must
+    // round-trip to crossterm's parse_csi_u as Char('a') + CONTROL. The codepoint
+    // is 97 ('a'), NOT the control byte 0x01.
+    h.set_kitty_mode(0, 1);
+    h.set_kitty_mode(
+        KittyKeyboardFlags::DISAMBIGUATE | KittyKeyboardFlags::REPORT_EVENT_TYPES,
+        1,
+    );
+    h.update_modifiers(4, 0, 0, 0); // Ctrl
+    assert_eq!(
+        h.handle_key_event(30, true, false),
+        Some(b"\x1b[97;5u".to_vec())
+    );
+    h.update_modifiers(0, 0, 0, 0);
+
+    // Reset and test flags 15 (1|2|4|8): adds REPORT_ALTERNATE_KEYS ----
+    h.set_kitty_mode(0, 1);
+    h.set_kitty_mode(
+        KittyKeyboardFlags::DISAMBIGUATE
+            | KittyKeyboardFlags::REPORT_EVENT_TYPES
+            | KittyKeyboardFlags::REPORT_ALTERNATE_KEYS
+            | KittyKeyboardFlags::REPORT_ALL_KEYS_AS_ESC,
+        1,
+    );
+    assert_eq!(h.kitty_flags, 15);
+    // Plain 'a' press (no shift): \x1b[97u
+    assert_eq!(
+        h.handle_key_event(30, true, false),
+        Some(b"\x1b[97u".to_vec())
+    );
+
+    // ---- flags 4 alone (REPORT_ALTERNATE_KEYS) is accepted in state ----
+    h.set_kitty_mode(0, 1);
+    h.set_kitty_mode(KittyKeyboardFlags::REPORT_ALTERNATE_KEYS, 1);
+    assert_eq!(h.kitty_flags, 4);
+    // With only flag 4 (no disambiguate/all_keys), plain 'a' falls back to legacy
+    assert_eq!(h.handle_key_event(30, true, false), Some(b"a".to_vec()));
+
+    // ---- flags 16 alone (REPORT_ASSOCIATED_TEXT) accepted, no crash ----
+    h.set_kitty_mode(0, 1);
+    h.set_kitty_mode(KittyKeyboardFlags::REPORT_ASSOCIATED_TEXT, 1);
+    assert_eq!(h.kitty_flags, 16);
+    // Plain 'a' -> legacy (flag 16 doesn't force encoding)
+    assert_eq!(h.handle_key_event(30, true, false), Some(b"a".to_vec()));
+}
+
+#[test]
+fn test_kitty_report_all_keys_escape_does_not_leak_raw_bytes() {
+    // Regression: when herdr pushes flag 8 (REPORT_ALL_KEYS_AS_ESC), ftty must NOT
+    // emit raw UTF-8 for plain keys (the cause of uncleanable screen marks).
+    let mut h = KeyboardHandler::new();
+    h.set_kitty_mode(KittyKeyboardFlags::REPORT_ALL_KEYS_AS_ESC, 1);
+    // Evdev codes for 'a'..'e' (30..34): every one must be a CSI u sequence,
+    // never a bare ASCII byte.
+    for code in 30..=34 {
+        let bytes = h
+            .handle_key_event(code, true, false)
+            .expect("press encoded");
+        assert_eq!(
+            &bytes[..2],
+            b"\x1b[",
+            "plain key must be CSI-encoded under flag 8"
+        );
+        assert!(bytes.last() == Some(&b'u'), "must end with 'u'");
+    }
+}
+
 mod ime_tests {
     use ftty::font::CellMetrics;
     use ftty::grid::{CellFlags, Grid};
