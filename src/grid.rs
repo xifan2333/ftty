@@ -772,7 +772,17 @@ impl Grid {
     }
 
     /// Adds an image placement instance anchored to grid cells with FIFO eviction.
+    /// If an existing placement with the same nonzero placement_id and image_id exists,
+    /// it is replaced per the Kitty graphics protocol specification.
     pub fn add_placement(&mut self, placement: ImagePlacement) {
+        if placement.placement_id != 0
+            && let Some(existing) = self.placements.iter_mut().find(|p| {
+                p.image_id == placement.image_id && p.placement_id == placement.placement_id
+            })
+        {
+            *existing = placement;
+            return;
+        }
         if self.placements.len() >= MAX_PLACEMENTS {
             self.placements.remove(0);
         }
@@ -1196,6 +1206,20 @@ impl Grid {
 
         if !is_full_screen {
             self.shift_region_marks_up(self.scroll_region_top, self.scroll_region_bottom, count);
+            let top_line = self.scrollback.len() + self.scroll_region_top;
+            let bottom_line = self.scrollback.len() + self.scroll_region_bottom;
+            self.placements.retain_mut(|p| {
+                if p.line >= top_line && p.line <= bottom_line {
+                    if p.line < top_line + count {
+                        false // Scrolled out of the region
+                    } else {
+                        p.line -= count;
+                        true
+                    }
+                } else {
+                    true
+                }
+            });
         }
         self.lines[self.scroll_region_top..=self.scroll_region_bottom].rotate_left(count);
         for row in
@@ -1225,6 +1249,20 @@ impl Grid {
         }
 
         self.shift_region_marks_down(self.scroll_region_top, self.scroll_region_bottom, count);
+        let top_line = self.scrollback.len() + self.scroll_region_top;
+        let bottom_line = self.scrollback.len() + self.scroll_region_bottom;
+        self.placements.retain_mut(|p| {
+            if p.line >= top_line && p.line <= bottom_line {
+                if p.line + count > bottom_line {
+                    false // Scrolled out of the region
+                } else {
+                    p.line += count;
+                    true
+                }
+            } else {
+                true
+            }
+        });
         self.lines[self.scroll_region_top..=self.scroll_region_bottom].rotate_right(count);
         for row in &mut self.lines[self.scroll_region_top..self.scroll_region_top + count] {
             row.reset_with_bg(bg);
