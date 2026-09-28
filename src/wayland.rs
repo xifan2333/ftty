@@ -622,12 +622,14 @@ impl Dispatch<XdgToplevel, ()> for AppState {
 // --- Seat & Input ---
 
 /// Maps a Linux input button code to the X11 mouse button index used on the wire.
+/// Linux evdev constants: BTN_LEFT = 0x110, BTN_RIGHT = 0x111, BTN_MIDDLE = 0x112.
+/// X11 protocol wire indices: Left = 0, Middle = 1, Right = 2.
 #[must_use]
 pub fn x11_button_index(button: u32) -> Option<u8> {
     match button {
-        0x110 => Some(0), // BTN_LEFT
-        0x111 => Some(1), // BTN_MIDDLE
-        0x112 => Some(2), // BTN_RIGHT
+        0x110 => Some(0), // BTN_LEFT -> 0
+        0x111 => Some(2), // BTN_RIGHT -> 2
+        0x112 => Some(1), // BTN_MIDDLE -> 1
         _ => None,
     }
 }
