@@ -2072,38 +2072,41 @@ impl Renderer {
 
             let screen_row = placement.line - viewport_start;
 
-            // Align with Kitty/WezTerm: if the placement belongs to a scrolling region,
-            // clip its rendered bounds strictly against the active scroll margins (DECSTBM).
-            let (clip_top, clip_bottom) = if grid.scroll_region_top > 0
-                || grid.scroll_region_bottom < grid.rows.saturating_sub(1)
+            // Pixel-based clipping: compute the placement's destination rectangle on screen.
+            let orig_x0 = pad_x + placement.col as f32 * cw + placement.offset_x as f32;
+            let orig_y0 = pad_y + screen_row as f32 * ch + placement.offset_y as f32;
+            let orig_w = (placement.cols as f32 * cw).max(1.0);
+            let orig_h = (placement.rows as f32 * ch).max(1.0);
+            let orig_x1 = orig_x0 + orig_w;
+            let orig_y1 = orig_y0 + orig_h;
+
+            // Determine vertical clipping range:
+            // When at the bottom of scrollback (live screen), clip against active scroll margins (DECSTBM)
+            // so images never overflow into fixed status footers. When viewing historical scrollback,
+            // clip against the visible viewport.
+            let (clip_min_y, clip_max_y) = if grid.viewport_offset == 0
+                && (grid.scroll_region_top > 0
+                    || grid.scroll_region_bottom < grid.rows.saturating_sub(1))
             {
-                (grid.scroll_region_top, grid.scroll_region_bottom)
+                (
+                    pad_y + grid.scroll_region_top as f32 * ch,
+                    pad_y + (grid.scroll_region_bottom + 1) as f32 * ch,
+                )
             } else {
-                (0, grid.rows.saturating_sub(1))
+                (pad_y, pad_y + grid.rows as f32 * ch)
             };
+            let clip_min_x = pad_x;
+            let clip_max_x = pad_x + grid.cols as f32 * cw;
 
-            let row_start = screen_row;
-            let row_end = screen_row + placement.rows.saturating_sub(1);
+            // Intersect destination rectangle with clipping bounds
+            let x0 = orig_x0.clamp(clip_min_x, clip_max_x);
+            let x1 = orig_x1.clamp(clip_min_x, clip_max_x);
+            let y0 = orig_y0.clamp(clip_min_y, clip_max_y);
+            let y1 = orig_y1.clamp(clip_min_y, clip_max_y);
 
-            // Completely outside the clipping range
-            if row_end < clip_top || row_start > clip_bottom {
+            if x1 <= x0 || y1 <= y0 {
                 continue;
             }
-
-            let visible_top = row_start.max(clip_top);
-            let visible_bottom = row_end.min(clip_bottom);
-            let visible_rows = visible_bottom - visible_top + 1;
-
-            let max_visible_cols = grid.cols.saturating_sub(placement.col);
-            if max_visible_cols == 0 {
-                continue;
-            }
-            let visible_cols = placement.cols.min(max_visible_cols);
-
-            let x0 = pad_x + placement.col as f32 * cw + placement.offset_x as f32;
-            let y0 = pad_y + visible_top as f32 * ch + placement.offset_y as f32;
-            let x1 = x0 + visible_cols as f32 * cw;
-            let y1 = y0 + visible_rows as f32 * ch;
 
             let sx0 = placement.src_x as f32;
             let sy0 = placement.src_y as f32;
@@ -2114,21 +2117,23 @@ impl Renderer {
                 .src_h
                 .map_or(img_h as f32 - sy0, |h| (h as f32).min(img_h as f32 - sy0));
 
-            let col_ratio = visible_cols as f32 / placement.cols.max(1) as f32;
-            let top_offset_rows = visible_top.saturating_sub(row_start);
-            let top_crop_ratio = top_offset_rows as f32 / placement.rows.max(1) as f32;
-            let height_crop_ratio = visible_rows as f32 / placement.rows.max(1) as f32;
+            // Derive UV crop coordinates precisely from the clipped pixel fractions
+            let left_ratio = (x0 - orig_x0) / orig_w;
+            let right_ratio = (x1 - orig_x0) / orig_w;
+            let top_ratio = (y0 - orig_y0) / orig_h;
+            let bottom_ratio = (y1 - orig_y0) / orig_h;
 
-            let crop_sy0 = sy0 + full_src_h * top_crop_ratio;
-            let crop_sy1 = crop_sy0 + full_src_h * height_crop_ratio;
-            let sx1 = sx0 + full_src_w * col_ratio;
+            let crop_sx0 = sx0 + full_src_w * left_ratio;
+            let crop_sx1 = sx0 + full_src_w * right_ratio;
+            let crop_sy0 = sy0 + full_src_h * top_ratio;
+            let crop_sy1 = sy0 + full_src_h * bottom_ratio;
 
             self.render_single_cropped_image(
                 tex,
                 img_w as f32,
                 img_h as f32,
                 [x0, y0, x1, y1],
-                [[sx0, crop_sy0], [sx1, crop_sy1]],
+                [[crop_sx0, crop_sy0], [crop_sx1, crop_sy1]],
             );
         }
     }
