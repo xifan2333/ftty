@@ -453,6 +453,7 @@ pub fn run_event_loop_with_connection(
 
         if app_state.needs_redraw && !sync_active && app_state.frame_callback.is_none() {
             app_state.update_hover_state();
+            app_state.update_cursor_shape();
         }
 
         if app_state.needs_redraw
