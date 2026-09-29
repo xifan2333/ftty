@@ -14,6 +14,7 @@ use std::io::{self, Cursor, Read};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum KittyAction {
     #[default]
+    Transmit,
     TransmitAndDisplay,
     TransmitAndDisplayWithResponse,
     Query,
@@ -183,8 +184,8 @@ pub fn parse_control_keys(s: &str) -> KittyCommand {
         match key {
             "a" => {
                 cmd.action = match val {
-                    "t" => KittyAction::TransmitAndDisplay,
-                    "T" => KittyAction::TransmitAndDisplayWithResponse,
+                    "t" => KittyAction::Transmit,
+                    "T" => KittyAction::TransmitAndDisplay,
                     "q" => KittyAction::Query,
                     "p" => KittyAction::Place,
                     "d" => KittyAction::Delete,

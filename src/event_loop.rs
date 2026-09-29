@@ -1052,12 +1052,15 @@ impl AppState {
                     }
                 };
 
+                let should_place = command.action == KittyAction::TransmitAndDisplay
+                    || command.action == KittyAction::TransmitAndDisplayWithResponse;
+
                 if command.is_virtual {
                     self.terminal
                         .grid
                         .virtual_placements
                         .insert(image_id, (cols, rows));
-                } else {
+                } else if should_place {
                     let abs_line =
                         self.terminal.grid.scrollback.len() + self.terminal.grid.cursor.row;
                     self.terminal.grid.add_placement(ImagePlacement {
