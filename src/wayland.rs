@@ -717,6 +717,7 @@ impl Dispatch<WlKeyboard, ()> for AppState {
                         let _ = state.pty.write_all(b"\x1b[O");
                     }
                     state.ime.clear();
+                    state.last_ime_cursor_rect.set(None);
                     if let Some(text_input) = &state.wayland.text_input {
                         text_input.disable();
                         text_input.commit();
@@ -743,9 +744,6 @@ impl Dispatch<WlKeyboard, ()> for AppState {
                         state.terminal.grid.scroll_viewport_bottom();
                     }
                     let _ = state.pty.write_all(&bytes);
-                    if pressed {
-                        state.update_ime_cursor_area();
-                    }
                 }
             }
             wl_keyboard::Event::Modifiers {
@@ -1355,7 +1353,6 @@ impl Dispatch<ZwpTextInputV3, ()> for AppState {
                 if let Some(text) = commit {
                     let _ = state.pty.write_all(text.as_bytes());
                 }
-                state.update_ime_cursor_area();
                 state.needs_redraw = true;
             }
             _ => {}
@@ -1365,6 +1362,7 @@ impl Dispatch<ZwpTextInputV3, ()> for AppState {
 
 impl AppState {
     /// Updates the Wayland `text-input-v3` cursor bounding box so the IME popup window tracks the cursor.
+    /// Aligns with Kitty (`glfw/wl_text_input.c`): deduplicates cursor rectangle bounds and only commits when coordinates change.
     pub fn update_ime_cursor_area(&self) {
         let Some(text_input) = &self.wayland.text_input else {
             return;
@@ -1383,8 +1381,13 @@ impl AppState {
         let logical_y = (f64::from(y) / scale).round() as i32;
         let logical_w = (f64::from(w) / scale).round().max(1.0) as i32;
         let logical_h = (f64::from(h) / scale).round().max(1.0) as i32;
-        text_input.set_cursor_rectangle(logical_x, logical_y, logical_w, logical_h);
-        text_input.commit();
+        let new_rect = (logical_x, logical_y, logical_w, logical_h);
+
+        if self.last_ime_cursor_rect.get() != Some(new_rect) {
+            self.last_ime_cursor_rect.set(Some(new_rect));
+            text_input.set_cursor_rectangle(logical_x, logical_y, logical_w, logical_h);
+            text_input.commit();
+        }
     }
 }
 

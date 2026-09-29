@@ -82,6 +82,7 @@ pub struct AppState {
     pub(crate) last_trim: std::time::Instant,
     pub(crate) pending_trim: bool,
     pub logical_font_size: f32,
+    pub(crate) last_ime_cursor_rect: std::cell::Cell<Option<(i32, i32, i32, i32)>>,
 }
 
 impl AppState {
@@ -257,6 +258,7 @@ impl AppState {
             last_trim: std::time::Instant::now(),
             pending_trim: false,
             logical_font_size: initial_font_size,
+            last_ime_cursor_rect: std::cell::Cell::new(None),
         })
     }
 
