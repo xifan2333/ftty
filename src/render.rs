@@ -1797,11 +1797,21 @@ pub fn build_dynamic_overlays(vertices: &mut Vec<f32>, ctx: &RenderContext<'_>) 
         }
     }
 
-    // If an IME pre-edit string is active, render it inline starting at cursor position
+    // If an IME pre-edit string is active, render it inline starting at cursor position.
+    // Aligns with Kitty (`kitty/screen.c`): preedit is rendered as an overlay at the active
+    // grid cursor row and column even if the hardware cursor is hidden by the terminal application.
     if let Some(preedit) = options.preedit
         && !preedit.text.is_empty()
-        && let Some((crow, ccol, _)) = cursor
+        && grid.cursor.row < grid.rows
     {
+        let crow = if grid.viewport_offset == 0 {
+            grid.cursor.row
+        } else if grid.cursor.row + grid.viewport_offset < grid.rows {
+            grid.cursor.row + grid.viewport_offset
+        } else {
+            grid.cursor.row
+        };
+        let ccol = grid.cursor.col.min(grid.cols.saturating_sub(1));
         let mut cur_col = ccol;
         for c in preedit.text.chars() {
             let remaining_cols = grid.cols.saturating_sub(cur_col);
