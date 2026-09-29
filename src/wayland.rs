@@ -1008,13 +1008,16 @@ impl AppState {
         }
     }
 
-    /// Updates the Wayland cursor shape based on whether a hyperlink is currently hovered.
+    /// Updates the Wayland cursor shape based on whether a hyperlink is hovered or mouse tracking is active.
+    /// Aligns with Kitty: Shape::Pointer on hyperlinks, Shape::Default when an app tracks the pointer, Shape::Text for text selection.
     pub fn update_cursor_shape(&mut self) {
         if !self.pointer_in_surface || self.pointer_serial == 0 {
             return;
         }
         let shape = if self.hovered_span.is_some() {
             Shape::Pointer
+        } else if self.terminal.mouse.is_reporting() {
+            Shape::Default
         } else {
             Shape::Text
         };
