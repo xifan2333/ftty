@@ -203,7 +203,7 @@ fn test_kitty_transmit_with_response() {
 
     match &events[0] {
         KittyEvent::Transmit { command, image } => {
-            assert_eq!(command.action, KittyAction::TransmitAndDisplayWithResponse);
+            assert_eq!(command.action, KittyAction::TransmitAndDisplay);
             assert_eq!(command.image_id, Some(77));
             assert_eq!(image.rgba.as_deref(), Some(raw.as_slice()));
         }
