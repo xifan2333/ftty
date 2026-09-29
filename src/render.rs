@@ -1797,76 +1797,96 @@ pub fn build_dynamic_overlays(vertices: &mut Vec<f32>, ctx: &RenderContext<'_>) 
         }
     }
 
-    // If an IME pre-edit string is active, render it inline starting at cursor position
+    // If an IME pre-edit string is active, render it inline starting at cursor position.
+    // Aligns with Kitty (`kitty/screen.c`): preedit is rendered as an overlay at the active
+    // grid cursor row and column even if the hardware cursor is hidden by the terminal application.
     if let Some(preedit) = options.preedit
         && !preedit.text.is_empty()
-        && let Some((crow, ccol, _)) = cursor
+        && grid.cursor.row < grid.rows
     {
-        let mut cur_col = ccol;
-        for c in preedit.text.chars() {
-            let remaining_cols = grid.cols.saturating_sub(cur_col);
-            if remaining_cols == 0 {
-                break;
-            }
-            let char_width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(1);
-            let visible_cols = char_width.min(remaining_cols);
-            let px = pad_x + cur_col as f32 * cw;
-            let py = pad_y + crow as f32 * ch;
-            let span_w = visible_cols as f32 * cw;
-
-            // Draw preedit cell background
-            push_quad(
-                vertices,
-                [px, py, px + span_w, py + ch],
-                SOLID_UV,
-                [0.2, 0.25, 0.35, 0.95],
-            );
-
-            // Draw preedit glyph
-            let span_right = px + span_w;
-            if crate::render::box_drawing::render_procedural_glyph(
-                vertices,
-                c,
-                px,
-                py,
-                span_w,
-                ch,
-                rgba(colors.foreground),
-            ) {
-                // Procedural box drawing / block elements glyph
-            } else if let Some(glyph) = atlas.get(c, CellFlags::UNDERLINE, fonts)
-                && glyph.width > 0
-                && glyph.height > 0
+        let crow_opt = if grid.viewport_offset == 0 {
+            Some(grid.cursor.row)
+        } else if grid.cursor.row + grid.viewport_offset < grid.rows {
+            Some(grid.cursor.row + grid.viewport_offset)
+        } else {
+            None
+        };
+        if let Some(crow) = crow_opt {
+            let mut ccol = grid.cursor.col.min(grid.cols.saturating_sub(1));
+            let line = grid.visible_line(crow);
+            if ccol > 0
+                && ccol < line.cells.len()
+                && line.cells[ccol].flags.contains(CellFlags::WIDE_CHAR_SPACER)
             {
-                let gx = px + glyph.offset_x as f32;
-                let gy = py + metrics.ascent as f32 - glyph.offset_y as f32 - glyph.height as f32;
-                let [u, v] = glyph.position.map(|value| value as f32);
-                let w = glyph.width as f32;
-                let h = glyph.height as f32;
-                let left = gx.max(px);
-                let right = (gx + w).min(span_right);
-                if right > left {
-                    let u_left = u + (left - gx);
-                    let u_right = u + (right - gx);
-                    push_quad(
-                        vertices,
-                        [left, gy, right, gy + h],
-                        [[u_left, v], [u_right, v + h]],
-                        rgba(colors.foreground),
-                    );
-                }
+                ccol -= 1;
             }
+            let mut cur_col = ccol;
+            for c in preedit.text.chars() {
+                let remaining_cols = grid.cols.saturating_sub(cur_col);
+                if remaining_cols == 0 {
+                    break;
+                }
+                let char_width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(1);
+                let visible_cols = char_width.min(remaining_cols);
+                let px = pad_x + cur_col as f32 * cw;
+                let py = pad_y + crow as f32 * ch;
+                let span_w = visible_cols as f32 * cw;
 
-            // Draw preedit underline
-            let top = py + (metrics.ascent as f32 + 1.0).min(ch - 1.0);
-            push_quad(
-                vertices,
-                [px, top, px + span_w, top + 1.0],
-                SOLID_UV,
-                rgba(colors.foreground),
-            );
+                // Draw preedit cell background
+                push_quad(
+                    vertices,
+                    [px, py, px + span_w, py + ch],
+                    SOLID_UV,
+                    [0.2, 0.25, 0.35, 0.95],
+                );
 
-            cur_col += char_width;
+                // Draw preedit glyph
+                let span_right = px + span_w;
+                if crate::render::box_drawing::render_procedural_glyph(
+                    vertices,
+                    c,
+                    px,
+                    py,
+                    span_w,
+                    ch,
+                    rgba(colors.foreground),
+                ) {
+                    // Procedural box drawing / block elements glyph
+                } else if let Some(glyph) = atlas.get(c, CellFlags::UNDERLINE, fonts)
+                    && glyph.width > 0
+                    && glyph.height > 0
+                {
+                    let gx = px + glyph.offset_x as f32;
+                    let gy =
+                        py + metrics.ascent as f32 - glyph.offset_y as f32 - glyph.height as f32;
+                    let [u, v] = glyph.position.map(|value| value as f32);
+                    let w = glyph.width as f32;
+                    let h = glyph.height as f32;
+                    let left = gx.max(px);
+                    let right = (gx + w).min(span_right);
+                    if right > left {
+                        let u_left = u + (left - gx);
+                        let u_right = u + (right - gx);
+                        push_quad(
+                            vertices,
+                            [left, gy, right, gy + h],
+                            [[u_left, v], [u_right, v + h]],
+                            rgba(colors.foreground),
+                        );
+                    }
+                }
+
+                // Draw preedit underline
+                let top = py + (metrics.ascent as f32 + 1.0).min(ch - 1.0);
+                push_quad(
+                    vertices,
+                    [px, top, px + span_w, top + 1.0],
+                    SOLID_UV,
+                    rgba(colors.foreground),
+                );
+
+                cur_col += char_width;
+            }
         }
     }
 }

@@ -263,6 +263,23 @@ fn test_preedit_renders_inline_at_cursor() {
 
     // Vertices must contain the block cursor and the preedit quads
     assert!(vertices.len() >= 4 * 48);
+
+    // Also test preedit renders when cursor is hidden (!grid.cursor.visible) per Kitty
+    grid.cursor.visible = false;
+    let mut hidden_cursor_vertices = Vec::new();
+    build_vertices(
+        &mut hidden_cursor_vertices,
+        &grid,
+        ColorScheme::new(&default_256_palette(), DEFAULT_FG, DEFAULT_BG),
+        fonts.metrics,
+        &fonts,
+        &atlas,
+        RenderOptions::new([0, 0], Some(&preedit), None),
+    );
+    assert!(
+        !hidden_cursor_vertices.is_empty(),
+        "preedit must render even when cursor is hidden"
+    );
 }
 
 #[test]
