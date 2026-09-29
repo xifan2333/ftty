@@ -701,6 +701,7 @@ impl Dispatch<WlKeyboard, ()> for AppState {
                         let _ = state.pty.write_all(b"\x1b[I");
                     }
                     state.ime.active = true;
+                    state.last_ime_cursor_rect.set(None);
                     if let Some(text_input) = &state.wayland.text_input {
                         text_input.enable();
                         text_input.set_content_type(
@@ -1364,6 +1365,9 @@ impl AppState {
     /// Updates the Wayland `text-input-v3` cursor bounding box so the IME popup window tracks the cursor.
     /// Aligns with Kitty (`glfw/wl_text_input.c`): deduplicates cursor rectangle bounds and only commits when coordinates change.
     pub fn update_ime_cursor_area(&self) {
+        if !self.ime.active {
+            return;
+        }
         let Some(text_input) = &self.wayland.text_input else {
             return;
         };
