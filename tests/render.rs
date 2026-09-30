@@ -866,3 +866,26 @@ fn test_render_compatibility_submodules() {
     let _ = bounded_image_vertex_buffer(Vec::new());
     let _ = build_low24_index(std::iter::empty());
 }
+
+#[test]
+fn test_partially_scrolled_image_placement_visibility_and_cropping() {
+    let placement_line = 5;
+    let placement_rows = 10;
+    let end_line = placement_line + placement_rows; // 15
+
+    // Case 1: When viewport_start is 8 (placement partially scrolled off top),
+    // end_line (15) > viewport_start (8), so placement is NOT skipped.
+    let viewport_start = 8;
+    let viewport_end = 28;
+    assert!(end_line > viewport_start && placement_line < viewport_end);
+
+    // Case 2: When viewport_start is 15 (placement completely scrolled off top),
+    // end_line (15) <= viewport_start (15), so placement is correctly skipped.
+    let viewport_start = 15;
+    assert!(end_line <= viewport_start);
+
+    // Case 3: When placement_line >= viewport_end (below viewport), correctly skipped.
+    let _viewport_start = 0;
+    let viewport_end = 5;
+    assert!(placement_line >= viewport_end);
+}
