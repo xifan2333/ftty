@@ -2082,7 +2082,8 @@ impl Renderer {
                 continue;
             }
 
-            if placement.line < viewport_start || placement.line >= viewport_end {
+            let end_line = placement.line + placement.rows;
+            if end_line <= viewport_start || placement.line >= viewport_end {
                 continue;
             }
 
@@ -2090,11 +2091,11 @@ impl Renderer {
                 continue;
             };
 
-            let screen_row = placement.line - viewport_start;
+            let screen_row_f = placement.line as f32 - viewport_start as f32;
 
             // Pixel-based clipping: compute the placement's destination rectangle on screen.
             let orig_x0 = pad_x + placement.col as f32 * cw + placement.offset_x as f32;
-            let orig_y0 = pad_y + screen_row as f32 * ch + placement.offset_y as f32;
+            let orig_y0 = pad_y + screen_row_f * ch + placement.offset_y as f32;
             let orig_w = (placement.cols as f32 * cw).max(1.0);
             let orig_h = (placement.rows as f32 * ch).max(1.0);
             let orig_x1 = orig_x0 + orig_w;

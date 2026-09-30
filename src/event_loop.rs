@@ -1021,14 +1021,20 @@ impl AppState {
         }
     }
 
-    pub(crate) fn handle_kitty_event(&mut self, event: KittyEvent) {
+    pub fn handle_kitty_event(&mut self, event: KittyEvent) {
         match event {
             KittyEvent::Transmit { command, image } => {
                 let image_id = image.id;
                 let placement_id = command.placement_id.unwrap_or(0);
                 let ack_id = command.placement_id.filter(|id| *id != 0);
-                let img_w = (image.width as f32).max(1.0);
-                let img_h = (image.height as f32).max(1.0);
+                let src_w = command
+                    .src_w
+                    .unwrap_or(image.width.saturating_sub(command.src_x.unwrap_or(0)));
+                let src_h = command
+                    .src_h
+                    .unwrap_or(image.height.saturating_sub(command.src_y.unwrap_or(0)));
+                let img_w = (src_w as f32).max(1.0);
+                let img_h = (src_h as f32).max(1.0);
                 self.terminal.grid.add_image(image);
 
                 let cw = self.font_mgr.metrics.cell_width as f32;
@@ -1082,30 +1088,11 @@ impl AppState {
                         z_index: command.z_index,
                     });
 
-                    if !command.do_not_move_cursor {
-                        self.terminal.grid.cursor.col = (self.terminal.grid.cursor.col + cols)
-                            .min(self.terminal.grid.cols.saturating_sub(1));
-                        if rows > 1 {
-                            let scroll_top = self.terminal.grid.scroll_region_top;
-                            let scroll_bottom = self.terminal.grid.scroll_region_bottom;
-                            let cur_row = self.terminal.grid.cursor.row;
-                            if cur_row >= scroll_top && cur_row <= scroll_bottom {
-                                let target_row = cur_row + rows - 1;
-                                if target_row > scroll_bottom {
-                                    let scroll_amount = target_row - scroll_bottom;
-                                    self.terminal
-                                        .grid
-                                        .scroll_up_with_bg(scroll_amount, self.terminal.active_bg);
-                                    self.terminal.grid.cursor.row = scroll_bottom;
-                                } else {
-                                    self.terminal.grid.cursor.row = target_row;
-                                }
-                            } else {
-                                self.terminal.grid.cursor.row = (cur_row + rows - 1)
-                                    .min(self.terminal.grid.rows.saturating_sub(1));
-                            }
-                        }
-                    }
+                    self.advance_cursor_for_image(
+                        cols,
+                        rows,
+                        command.do_not_move_cursor || command.is_virtual,
+                    );
                 }
 
                 let wants_ack = command.action == KittyAction::TransmitAndDisplayWithResponse
@@ -1121,15 +1108,46 @@ impl AppState {
                 };
                 let placement_id = command.placement_id.unwrap_or(0);
                 let ack_id = command.placement_id.filter(|id| *id != 0);
-                if !self.terminal.grid.images.contains_key(&image_id) {
+                let Some(image) = self.terminal.grid.images.get(&image_id) else {
                     if command.quiet < 2 {
                         let resp = kitty_response(image_id, ack_id, "ENOENT:image not found");
                         self.write_pty_blocking(&resp);
                     }
                     return;
-                }
-                let cols = command.cols.unwrap_or(1) as usize;
-                let rows = command.rows.unwrap_or(1) as usize;
+                };
+
+                let src_w = command
+                    .src_w
+                    .unwrap_or(image.width.saturating_sub(command.src_x.unwrap_or(0)));
+                let src_h = command
+                    .src_h
+                    .unwrap_or(image.height.saturating_sub(command.src_y.unwrap_or(0)));
+                let img_w = (src_w as f32).max(1.0);
+                let img_h = (src_h as f32).max(1.0);
+                let cw = self.font_mgr.metrics.cell_width as f32;
+                let ch = self.font_mgr.metrics.cell_height as f32;
+
+                let (cols, rows) = match (command.cols, command.rows) {
+                    (Some(c), Some(r)) => (c as usize, r as usize),
+                    (Some(c), None) => {
+                        let pixel_w = c as f32 * cw;
+                        let pixel_h = pixel_w * (img_h / img_w);
+                        let r = (pixel_h / ch).ceil().max(1.0) as usize;
+                        (c as usize, r)
+                    }
+                    (None, Some(r)) => {
+                        let pixel_h = r as f32 * ch;
+                        let pixel_w = pixel_h * (img_w / img_h);
+                        let c = (pixel_w / cw).ceil().max(1.0) as usize;
+                        (c, r as usize)
+                    }
+                    (None, None) => {
+                        let c = (img_w / cw).ceil().max(1.0) as usize;
+                        let r = (img_h / ch).ceil().max(1.0) as usize;
+                        (c, r)
+                    }
+                };
+
                 if command.is_virtual {
                     self.terminal
                         .grid
@@ -1154,30 +1172,11 @@ impl AppState {
                         z_index: command.z_index,
                     });
 
-                    if !command.do_not_move_cursor {
-                        self.terminal.grid.cursor.col = (self.terminal.grid.cursor.col + cols)
-                            .min(self.terminal.grid.cols.saturating_sub(1));
-                        if rows > 1 {
-                            let scroll_top = self.terminal.grid.scroll_region_top;
-                            let scroll_bottom = self.terminal.grid.scroll_region_bottom;
-                            let cur_row = self.terminal.grid.cursor.row;
-                            if cur_row >= scroll_top && cur_row <= scroll_bottom {
-                                let target_row = cur_row + rows - 1;
-                                if target_row > scroll_bottom {
-                                    let scroll_amount = target_row - scroll_bottom;
-                                    self.terminal
-                                        .grid
-                                        .scroll_up_with_bg(scroll_amount, self.terminal.active_bg);
-                                    self.terminal.grid.cursor.row = scroll_bottom;
-                                } else {
-                                    self.terminal.grid.cursor.row = target_row;
-                                }
-                            } else {
-                                self.terminal.grid.cursor.row = (cur_row + rows - 1)
-                                    .min(self.terminal.grid.rows.saturating_sub(1));
-                            }
-                        }
-                    }
+                    self.advance_cursor_for_image(
+                        cols,
+                        rows,
+                        command.do_not_move_cursor || command.is_virtual,
+                    );
                 }
                 let wants_ack = command.action == KittyAction::TransmitAndDisplayWithResponse
                     || (command.id_explicit && command.quiet == 0);
@@ -1193,6 +1192,45 @@ impl AppState {
                 self.write_pty_blocking(&resp);
             }
         }
+    }
+
+    fn advance_cursor_for_image(&mut self, cols: usize, rows: usize, do_not_move: bool) {
+        if do_not_move {
+            return;
+        }
+        let grid_cols = self.terminal.grid.cols;
+        let grid_rows = self.terminal.grid.rows;
+        let scroll_top = self.terminal.grid.scroll_region_top;
+        let scroll_bottom = self.terminal.grid.scroll_region_bottom;
+        let cur_row = self.terminal.grid.cursor.row;
+        let in_margins = cur_row >= scroll_top && cur_row <= scroll_bottom;
+
+        let mut c_col = self.terminal.grid.cursor.col + cols;
+        let mut c_row = if rows > 0 {
+            cur_row + rows - 1
+        } else {
+            cur_row
+        };
+
+        if c_col >= grid_cols {
+            c_col = 0;
+            c_row += 1;
+        }
+
+        if in_margins {
+            if c_row > scroll_bottom {
+                let scroll_amount = c_row - scroll_bottom;
+                self.terminal
+                    .grid
+                    .scroll_up_with_bg(scroll_amount, self.terminal.active_bg);
+                c_row = scroll_bottom;
+            }
+        } else {
+            c_row = c_row.min(grid_rows.saturating_sub(1));
+        }
+
+        self.terminal.grid.cursor.col = c_col.min(grid_cols.saturating_sub(1));
+        self.terminal.grid.cursor.row = c_row;
     }
 }
 

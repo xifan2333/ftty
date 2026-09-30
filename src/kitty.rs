@@ -46,7 +46,9 @@ pub enum KittyMedium {
 pub enum DeleteTarget {
     #[default]
     All,
+    AllAndFree,
     ById(u32),
+    ByIdAndFree(u32),
     ByPlacement(u32),
     AtCursor,
 }
@@ -238,14 +240,20 @@ pub fn parse_control_keys(s: &str) -> KittyCommand {
 
     if let Some(val) = delete_selector {
         cmd.delete_target = match val {
-            "a" | "A" => DeleteTarget::All,
+            "a" => DeleteTarget::All,
+            "A" => DeleteTarget::AllAndFree,
             "c" | "C" => DeleteTarget::AtCursor,
-            "i" | "I" => cmd.image_id.map_or(DeleteTarget::All, DeleteTarget::ById),
+            "i" => cmd.image_id.map_or(DeleteTarget::All, DeleteTarget::ById),
+            "I" => cmd
+                .image_id
+                .map_or(DeleteTarget::AllAndFree, DeleteTarget::ByIdAndFree),
             "p" | "P" => cmd
                 .placement_id
                 .map_or(DeleteTarget::All, DeleteTarget::ByPlacement),
             _ => DeleteTarget::All,
         };
+    } else {
+        cmd.delete_target = DeleteTarget::All;
     }
 
     cmd
@@ -676,9 +684,10 @@ impl KittyParser {
 
     fn finish_apc(&mut self) -> Option<KittyEvent> {
         let buffer = &self.apc_buffer;
-        let semicolon_pos = buffer.iter().position(|&b| b == b';')?;
-        let (keys_bytes, payload_bytes) = buffer.split_at(semicolon_pos);
-        let payload_bytes = &payload_bytes[1..]; // skip semicolon
+        let (keys_bytes, payload_bytes) = match buffer.iter().position(|&b| b == b';') {
+            Some(pos) => (&buffer[..pos], &buffer[pos + 1..]),
+            None => (&buffer[..], &[][..]),
+        };
 
         let keys_str = std::str::from_utf8(keys_bytes).ok()?;
         let command = parse_control_keys(keys_str);

@@ -793,6 +793,11 @@ impl Grid {
     pub fn delete_images(&mut self, target: DeleteTarget) {
         match target {
             DeleteTarget::All => {
+                self.placements.clear();
+                self.alt_placements.clear();
+                self.mark_visible_dirty();
+            }
+            DeleteTarget::AllAndFree => {
                 self.images.clear();
                 self.image_bytes_total = 0;
                 self.image_versions.clear();
@@ -800,13 +805,21 @@ impl Grid {
                 self.alt_placements.clear();
                 self.virtual_placements.clear();
                 self.image_lru.clear();
+                self.mark_visible_dirty();
             }
             DeleteTarget::ById(id) => {
+                self.placements.retain(|p| p.image_id != id);
+                self.alt_placements.retain(|p| p.image_id != id);
+                self.mark_visible_dirty();
+            }
+            DeleteTarget::ByIdAndFree(id) => {
                 self.remove_image_internal(id);
+                self.mark_visible_dirty();
             }
             DeleteTarget::ByPlacement(p_id) => {
                 self.placements.retain(|p| p.placement_id != p_id);
                 self.alt_placements.retain(|p| p.placement_id != p_id);
+                self.mark_visible_dirty();
             }
             DeleteTarget::AtCursor => {
                 let cursor_row = self.cursor.row;
@@ -815,6 +828,7 @@ impl Grid {
                 self.placements.retain(|p| {
                     !(p.line == abs_line && cursor_col >= p.col && cursor_col < p.col + p.cols)
                 });
+                self.mark_visible_dirty();
             }
         }
     }
@@ -1179,8 +1193,9 @@ impl Grid {
         let is_full_screen = self.scroll_region_top == 0
             && self.scroll_region_bottom == self.rows.saturating_sub(1)
             && self.alt_lines.is_none();
+        let can_push_scrollback = is_full_screen && self.max_scrollback > 0;
 
-        if is_full_screen && self.max_scrollback > 0 {
+        if can_push_scrollback {
             for i in 0..count {
                 if self.scrollback.len() >= self.max_scrollback {
                     if let Some(mut recycled) = self.evict_oldest_scrollback_row() {
@@ -1202,23 +1217,15 @@ impl Grid {
                     self.push_scrollback(old);
                 }
             }
-        }
-
-        if !is_full_screen {
+        } else {
             self.shift_region_marks_up(self.scroll_region_top, self.scroll_region_bottom, count);
             let top_line = self.scrollback.len() + self.scroll_region_top;
             let bottom_line = self.scrollback.len() + self.scroll_region_bottom;
             self.placements.retain_mut(|p| {
                 if p.line >= top_line && p.line <= bottom_line {
-                    let end_line = p.line + p.rows.saturating_sub(1);
-                    if end_line < top_line + count {
+                    let end_line = p.line + p.rows;
+                    if end_line <= top_line + count {
                         false // All rows of the image scrolled out
-                    } else if p.line < top_line + count {
-                        // Top part of the image scrolled out; clip rows and adjust source crop
-                        let clipped_rows = (top_line + count) - p.line;
-                        p.line = top_line;
-                        p.rows = p.rows.saturating_sub(clipped_rows);
-                        true
                     } else {
                         p.line -= count;
                         true
@@ -1260,15 +1267,8 @@ impl Grid {
         let bottom_line = self.scrollback.len() + self.scroll_region_bottom;
         self.placements.retain_mut(|p| {
             if p.line >= top_line && p.line <= bottom_line {
-                let end_line = p.line + count + p.rows.saturating_sub(1);
                 if p.line + count > bottom_line {
                     false // Entire image anchor shifted past the bottom
-                } else if end_line > bottom_line {
-                    // Bottom rows of the image cross the bottom margin; clip rows
-                    p.line += count;
-                    let overflow = end_line - bottom_line;
-                    p.rows = p.rows.saturating_sub(overflow);
-                    true
                 } else {
                     p.line += count;
                     true

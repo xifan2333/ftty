@@ -1348,10 +1348,10 @@ fn test_image_bytes_counter_tracks_add_replace_and_remove() {
     }
     assert_eq!(grid.total_image_bytes(), size(30, 5) + size(20, 20));
 
-    grid.delete_images(ftty::kitty::DeleteTarget::ById(1));
+    grid.delete_images(ftty::kitty::DeleteTarget::ByIdAndFree(1));
     assert_eq!(grid.total_image_bytes(), size(20, 20));
 
-    grid.delete_images(ftty::kitty::DeleteTarget::All);
+    grid.delete_images(ftty::kitty::DeleteTarget::AllAndFree);
     assert_eq!(grid.total_image_bytes(), 0);
     assert!(grid.images.is_empty());
 }
