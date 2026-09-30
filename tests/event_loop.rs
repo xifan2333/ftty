@@ -791,3 +791,54 @@ fn test_plaintext_url_hover_with_ctrl() {
     app.update_hover_state();
     assert_eq!(app.hovered_span, None);
 }
+
+#[test]
+fn test_kitty_place_event_derives_dimensions_and_advances_cursor() {
+    use ftty::kitty::model::{ImageData, KittyAction, KittyCommand, KittyEvent};
+
+    let term = Terminal::new(80, 24, 100);
+    let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
+    let mut app = new_test_app(term, pty).expect("AppState new");
+
+    // 1. Transmit image (a=t) into terminal memory without placing
+    let cw = app.font_mgr.metrics.cell_width as f32;
+    let ch = app.font_mgr.metrics.cell_height as f32;
+    let img_w = (cw * 10.0).round() as u32;
+    let img_h = (ch * 4.0).round() as u32;
+    let img = ImageData::new(42, img_w, img_h, vec![0; (img_w * img_h * 4) as usize]);
+
+    let transmit_cmd = KittyCommand {
+        action: KittyAction::Transmit,
+        image_id: Some(42),
+        ..Default::default()
+    };
+    app.handle_kitty_event(KittyEvent::Transmit {
+        command: transmit_cmd,
+        image: img,
+    });
+    assert_eq!(app.terminal.grid.placements.len(), 0);
+    assert!(app.terminal.grid.contains_image(42));
+
+    // Initial cursor position
+    app.terminal.grid.cursor.col = 0;
+    app.terminal.grid.cursor.row = 2;
+
+    // 2. Place image (a=p) without specifying cols and rows (omitted c and r)
+    let place_cmd = KittyCommand {
+        action: KittyAction::Place,
+        image_id: Some(42),
+        ..Default::default()
+    };
+    app.handle_kitty_event(KittyEvent::Place { command: place_cmd });
+
+    // Placement must derive cols (10) and rows (4) from the stored image
+    assert_eq!(app.terminal.grid.placements.len(), 1);
+    let p = &app.terminal.grid.placements[0];
+    assert_eq!(p.image_id, 42);
+    assert_eq!(p.cols, 10);
+    assert_eq!(p.rows, 4);
+
+    // Cursor must advance col by 10 and row by (4 - 1) = 3 -> row 5, col 10
+    assert_eq!(app.terminal.grid.cursor.col, 10);
+    assert_eq!(app.terminal.grid.cursor.row, 5);
+}
