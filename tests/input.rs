@@ -535,7 +535,27 @@ fn test_kitty_full_flag_progressive_encoding() {
     );
 
     // ---- Bug 3 regression: standalone modifier keys under flag 8 ----
-    // LeftShift is evdev 42 -> mapped to Kitty functional code 57441
+    // Standalone modifier keys MUST NOT emit escape codes under DISAMBIGUATE (1) or (1|2)
+    // Aligns with Kitty specification: modifier events are only reported when REPORT_ALL_KEYS_AS_ESC (8) is set.
+    h.set_kitty_mode(0, 1);
+    h.set_kitty_mode(KittyKeyboardFlags::DISAMBIGUATE, 1);
+    assert_eq!(h.handle_key_event(42, true, false), None); // LeftShift
+    assert_eq!(h.handle_key_event(29, true, false), None); // LeftControl
+    assert_eq!(h.handle_key_event(56, true, false), None); // LeftAlt
+    assert_eq!(h.handle_key_event(125, true, false), None); // LeftSuper
+
+    h.set_kitty_mode(
+        KittyKeyboardFlags::DISAMBIGUATE | KittyKeyboardFlags::REPORT_EVENT_TYPES,
+        1,
+    );
+    assert_eq!(h.handle_key_event(42, true, false), None);
+    assert_eq!(h.handle_key_event(29, true, false), None);
+    assert_eq!(h.handle_key_event(56, true, false), None);
+    assert_eq!(h.handle_key_event(125, true, false), None);
+
+    // LeftShift is evdev 42 -> mapped to Kitty functional code 57441 under flag 8
+    h.set_kitty_mode(0, 1);
+    h.set_kitty_mode(KittyKeyboardFlags::REPORT_ALL_KEYS_AS_ESC, 1);
     assert_eq!(
         h.handle_key_event(42, true, false),
         Some(b"\x1b[57441u".to_vec())

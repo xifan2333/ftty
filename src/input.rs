@@ -137,6 +137,32 @@ pub fn canonicalize_sym(sym: xkb::Keysym) -> xkb::Keysym {
     sym
 }
 
+/// Checks if a keysym corresponds to a modifier key (Shift, Ctrl, Alt, Super, Hyper, Meta, ISO Level Shift, Locks).
+/// Aligns with Kitty `is_modifier_key` in `kitty/keys.c`.
+#[must_use]
+pub fn is_modifier_key(sym: u32) -> bool {
+    matches!(
+        sym,
+        keysyms::KEY_Shift_L
+            | keysyms::KEY_Shift_R
+            | keysyms::KEY_Control_L
+            | keysyms::KEY_Control_R
+            | keysyms::KEY_Alt_L
+            | keysyms::KEY_Alt_R
+            | keysyms::KEY_Super_L
+            | keysyms::KEY_Super_R
+            | keysyms::KEY_Hyper_L
+            | keysyms::KEY_Hyper_R
+            | keysyms::KEY_Meta_L
+            | keysyms::KEY_Meta_R
+            | keysyms::KEY_ISO_Level3_Shift
+            | keysyms::KEY_ISO_Level5_Shift
+            | keysyms::KEY_Caps_Lock
+            | keysyms::KEY_Scroll_Lock
+            | keysyms::KEY_Num_Lock
+    )
+}
+
 /// Flags controlling the Kitty keyboard protocol progressive enhancement.
 pub struct KittyKeyboardFlags;
 impl KittyKeyboardFlags {
@@ -404,15 +430,23 @@ impl KeyboardHandler {
         };
 
         let _has_modifiers = mods.ctrl || mods.alt || mods.shift || mods.logo;
+        let all_keys = self.kitty_flags & KittyKeyboardFlags::REPORT_ALL_KEYS_AS_ESC != 0;
+
+        // Aligns with Kitty `encode_glfw_key_event`:
+        // "if (!ev.report_text && is_modifier_key(e->key)) return 0;"
+        // Standalone modifier key events must only be reported when REPORT_ALL_KEYS_AS_ESC (flag 8) is active.
+        if !all_keys && is_modifier_key(sym) {
+            return None;
+        }
+
         let is_functional = matches!(key_format, KittyKey::Letter(_) | KittyKey::Tilde(_));
         let is_special_disambiguated = matches!(
             key_format,
-            KittyKey::Unicode(13 | 9 | 127 | 27 | 57358..=57454)
+            KittyKey::Unicode(13 | 9 | 127 | 27 | 57361..=57363 | 57376..=57440)
         );
 
         let report_types = self.kitty_flags & KittyKeyboardFlags::REPORT_EVENT_TYPES != 0;
         let disambiguate = self.kitty_flags & KittyKeyboardFlags::DISAMBIGUATE != 0;
-        let all_keys = self.kitty_flags & KittyKeyboardFlags::REPORT_ALL_KEYS_AS_ESC != 0;
         let alternate = self.kitty_flags & KittyKeyboardFlags::REPORT_ALTERNATE_KEYS != 0;
         let report_text = self.kitty_flags & KittyKeyboardFlags::REPORT_ASSOCIATED_TEXT != 0;
 
