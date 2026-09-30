@@ -9,8 +9,11 @@ use nix::fcntl::OFlag;
 use nix::sys::mman::shm_open;
 use nix::sys::stat::Mode;
 
+use ftty::grid::Grid;
 use ftty::kitty::command::parse_control_keys;
-use ftty::kitty::model::{DeleteTarget, KittyAction, KittyCommand, KittyEvent, KittyMedium};
+use ftty::kitty::model::{
+    DeleteTarget, ImageData, ImagePlacement, KittyAction, KittyCommand, KittyEvent, KittyMedium,
+};
 use ftty::kitty::payload::{MAX_SHM_PAYLOAD, decode_image_data, read_shm_bytes, read_shm_payload};
 use ftty::kitty::{KittyParser, MAX_RECYCLED_CLEAN_BYTES, kitty_response};
 
@@ -470,4 +473,106 @@ fn test_convenience_filter_drops_oversized_scratch_allocation() {
     let (_, _) = parser.filter_bytes(b"hello\x1b");
     let cap = parser.clean_scratch.capacity();
     assert!(cap > 0 && cap <= MAX_RECYCLED_CLEAN_BYTES);
+}
+
+#[test]
+fn test_parse_kitty_commands_without_semicolon() {
+    let mut parser = KittyParser::new();
+
+    // a=d without semicolon
+    let (text, events) = parser.filter_bytes(b"\x1b_Ga=d\x1b\\");
+    assert!(text.is_empty());
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0],
+        KittyEvent::Delete {
+            target: DeleteTarget::All
+        }
+    );
+
+    // a=d,d=i,i=12 without semicolon
+    let (text, events) = parser.filter_bytes(b"\x1b_Ga=d,d=i,i=12\x1b\\");
+    assert!(text.is_empty());
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0],
+        KittyEvent::Delete {
+            target: DeleteTarget::ById(12)
+        }
+    );
+
+    // a=d,d=I,i=12 without semicolon (uppercase frees data)
+    let (text, events) = parser.filter_bytes(b"\x1b_Ga=d,d=I,i=12\x1b\\");
+    assert!(text.is_empty());
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0],
+        KittyEvent::Delete {
+            target: DeleteTarget::ByIdAndFree(12)
+        }
+    );
+
+    // a=d,d=A without semicolon (uppercase frees all data)
+    let (text, events) = parser.filter_bytes(b"\x1b_Ga=d,d=A\x1b\\");
+    assert!(text.is_empty());
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0],
+        KittyEvent::Delete {
+            target: DeleteTarget::AllAndFree
+        }
+    );
+
+    // a=p,i=42 without semicolon
+    let (text, events) = parser.filter_bytes(b"\x1b_Ga=p,i=42\x1b\\");
+    assert!(text.is_empty());
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        KittyEvent::Place { command } => {
+            assert_eq!(command.action, KittyAction::Place);
+            assert_eq!(command.image_id, Some(42));
+        }
+        other => panic!("Expected Place event, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_delete_preserves_image_data_on_lowercase() {
+    let mut grid = Grid::new(80, 24, 1000);
+    let img = ImageData::new(1, 10, 10, vec![0; 400]);
+    grid.add_image(img);
+    grid.add_placement(ImagePlacement {
+        image_id: 1,
+        placement_id: 1,
+        line: 0,
+        col: 0,
+        cols: 5,
+        rows: 5,
+        ..Default::default()
+    });
+    assert_eq!(grid.placements.len(), 1);
+    assert!(grid.contains_image(1));
+
+    // Lowercase d=i deletes placement but retains image data in memory
+    grid.delete_images(DeleteTarget::ById(1));
+    assert_eq!(grid.placements.len(), 0);
+    assert!(grid.contains_image(1));
+
+    // Lowercase d=a (DeleteTarget::All) deletes all placements but retains image data
+    grid.add_placement(ImagePlacement {
+        image_id: 1,
+        placement_id: 2,
+        line: 0,
+        col: 0,
+        cols: 5,
+        rows: 5,
+        ..Default::default()
+    });
+    grid.delete_images(DeleteTarget::All);
+    assert_eq!(grid.placements.len(), 0);
+    assert!(grid.contains_image(1));
+
+    // Uppercase d=I (DeleteTarget::ByIdAndFree) frees image data
+    grid.delete_images(DeleteTarget::ByIdAndFree(1));
+    assert!(!grid.contains_image(1));
 }
