@@ -2,6 +2,7 @@ min_version = "2026.9.4"
 
 [tools]
 hk = "latest"
+pandoc = "latest"
 rust = "latest"
 
 [tasks.hooks]
@@ -43,3 +44,13 @@ run = "cargo build --release"
 [tasks.test]
 description = "Run test suite"
 run = "cargo test"
+
+[tasks.doc]
+description = "Compile manual page from Markdown source via pandoc with dynamic date and version"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+date=$(LC_ALL=C git log -1 --format=%cd --date=format:'%B %Y' doc/ftty.1.md 2>/dev/null || LC_ALL=C date +"%B %Y")
+pandoc -s -t man doc/ftty.1.md -M date="${date}" -M footer="ftty ${version}" -o doc/ftty.1
+'''
