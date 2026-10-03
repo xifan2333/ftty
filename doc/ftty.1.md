@@ -112,31 +112,145 @@ The `[colors.palette]` subtable allows overriding any of the 256 indexed ANSI co
 "240" = "#414868"
 ```
 
-## KEY BINDINGS SECTION
+## SCROLLBACK SECTION
 
-The `[bindings]` table maps keyboard combinations to terminal actions:
+The `[scrollback]` table configures the terminal history buffer and scrolling behavior:
 
+**lines** = *10000*
+: Maximum number of lines retained in the scrollback buffer. Defaults to `10000`.
+
+**multiplier** = *3.0*
+: Scroll distance multiplier for mouse wheel and touchpad events. Defaults to `3.0`.
+
+**auto_scroll** = *true*
+: Automatically scrolls the viewport back to the bottom when new output is received from the running process or a key is pressed. Defaults to `true`.
+
+## CLIPBOARD SECTION
+
+The `[clipboard]` table controls security policies for OSC 52 clipboard access:
+
+**allow_osc52_read** = *false*
+: Governs whether CLI programs are permitted to query and read the Wayland system clipboard via OSC 52 escape sequences. Defaults to `false` as a security defense to prevent untrusted remote processes (e.g. over SSH) from silently exfiltrating clipboard content.
+
+**allow_osc52_write** = *true*
+: Governs whether CLI programs (such as **nvim(1)**, **tmux(1)**, or **yazi(1)**) are permitted to update or clear the system clipboard via OSC 52. Defaults to `true`.
+
+## KEYBINDINGS SECTION
+
+The `[keybindings]` table maps keyboard shortcuts to terminal actions, external pipelines, or unbinds defaults.
+
+### Mapping Syntax
+
+Keybindings support bidirectional mapping and unbinding:
+
+1. **Key combination to action**:
 ```toml
-[bindings]
-"ctrl+shift+c" = "copy"
-"ctrl+shift+v" = "paste"
-"ctrl+plus" = "increase_font_size"
-"ctrl+equal" = "increase_font_size"
-"ctrl+minus" = "decrease_font_size"
-"ctrl+0" = "reset_font_size"
-"ctrl+shift+n" = "spawn_terminal"
-"ctrl+shift+f" = "toggle_fullscreen"
+[keybindings]
+"Ctrl+Shift+C" = "clipboard_copy"
+"Ctrl+Shift+V" = "clipboard_paste"
 ```
 
-Supported actions:
+2. **Action to key or array of keys**:
+```toml
+[keybindings]
+scrollback_up_page = "Shift+Page_Up"
+font_increase = ["Ctrl+plus", "Ctrl+equal"]
+```
 
-- **copy**: Copy active text selection to clipboard.
-- **paste**: Paste clipboard content to the running PTY.
-- **increase_font_size**: Increase current font size dynamically.
-- **decrease_font_size**: Decrease current font size dynamically.
-- **reset_font_size**: Reset font size to configured default.
-- **spawn_terminal**: Launch a new instance of **ftty** in the current working directory.
-- **toggle_fullscreen**: Toggle Wayland surface fullscreen state.
+3. **Unbinding defaults**:
+```toml
+[keybindings]
+"Ctrl+Shift+V" = "none"
+```
+
+### Standard Built-In Actions
+
+**clipboard_copy**
+: Copies the active text selection to the Wayland system clipboard.
+
+**clipboard_paste**
+: Pastes current text from the Wayland system clipboard to the terminal PTY.
+
+**primary_paste**
+: Pastes text from the Wayland primary selection buffer to the terminal PTY.
+
+**font_increase**
+: Increases the current font size dynamically by 1.0pt.
+
+**font_decrease**
+: Decreases the current font size dynamically by 1.0pt (bounded by minimum point size).
+
+**font_reset**
+: Resets the font size to the value configured in the `[font]` section.
+
+**scrollback_up_page**
+: Scrolls the viewport upward by one visible page.
+
+**scrollback_down_page**
+: Scrolls the viewport downward by one visible page.
+
+**scrollback_up_line**
+: Scrolls the viewport upward by a single line.
+
+**scrollback_down_line**
+: Scrolls the viewport downward by a single line.
+
+**scrollback_home**
+: Scrolls directly to the oldest retained line in the scrollback buffer.
+
+**scrollback_end**
+: Scrolls directly to the bottom of the active screen.
+
+**prompt_prev**
+: Jumps viewport upward to the previous shell prompt using semantic prompt markers.
+
+**prompt_next**
+: Jumps viewport downward to the next shell prompt using semantic prompt markers.
+
+### Pipe Actions (Asynchronous External Pipelines)
+
+**ftty** supports streaming terminal buffer text into external commands via standard input without blocking the main event loop:
+
+**pipe_visible**
+: Extracts the text currently displayed in the visible viewport and streams it to the stdin of the specified command:
+```toml
+[keybindings]
+"Ctrl+Shift+U" = { pipe_visible = ["urlscan"] }
+```
+
+**pipe_scrollback**
+: Extracts the entire scrollback history buffer and streams it to the stdin of the command:
+```toml
+[keybindings]
+"Ctrl+Shift+F" = { pipe_scrollback = ["sh", "-c", "fzf | wl-copy"] }
+```
+
+**pipe_selection**
+: Extracts the currently selected text and streams it to the stdin of the command:
+```toml
+[keybindings]
+"Ctrl+Shift+Y" = { pipe_selection = "wl-copy" }
+```
+
+*Note: Commands may be given as a parameter list (executed directly) or as a single command string (executed via `sh -c`).*
+
+### Default Keybindings
+
+Unless overridden in `[keybindings]`, the following bindings are active by default:
+
+- **Ctrl+Shift+C**, **Ctrl+Insert**: `clipboard_copy`
+- **Ctrl+Shift+V**, **Shift+Insert**: `clipboard_paste`
+- **Ctrl+plus**, **Ctrl+equal**: `font_increase`
+- **Ctrl+minus**: `font_decrease`
+- **Ctrl+0**: `font_reset`
+- **Shift+Page_Up**, **Shift+KP_Page_Up**: `scrollback_up_page`
+- **Shift+Page_Down**, **Shift+KP_Page_Down**: `scrollback_down_page`
+- **Ctrl+Shift+Up**: `scrollback_up_line`
+- **Ctrl+Shift+Down**: `scrollback_down_line`
+- **Shift+Home**: `scrollback_home`
+- **Shift+End**: `scrollback_end`
+- **Ctrl+Shift+Z**: `prompt_prev`
+- **Ctrl+Shift+X**: `prompt_next`
 
 # SIGNALS
 
