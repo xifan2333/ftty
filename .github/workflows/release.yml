@@ -58,7 +58,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwayland-dev wayland-protocols libxkbcommon-dev libfontconfig1-dev libfreetype6-dev libegl1-mesa-dev libgles2-mesa-dev fonts-dejavu-core
+          sudo apt-get install -y libwayland-dev wayland-protocols libxkbcommon-dev libfontconfig1-dev libfreetype6-dev libegl1-mesa-dev libgles2-mesa-dev fonts-dejavu-core pandoc
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -68,6 +68,13 @@ jobs:
       - name: Build release binary
         run: cargo build --release
 
+      - name: Build manual page
+        shell: bash
+        run: |
+          version="${{ needs.meta.outputs.version }}"
+          date=$(LC_ALL=C git log -1 --format=%cd --date=format:'%B %Y' doc/ftty.1.md 2>/dev/null || LC_ALL=C date +"%B %Y")
+          pandoc -s -t man doc/ftty.1.md -M date="${date}" -M footer="ftty ${version}" -o doc/ftty.1
+
       - name: Package release archive
         shell: bash
         run: |
@@ -75,9 +82,10 @@ jobs:
           archive_dir="ftty-${version}-x86_64-unknown-linux-gnu"
           archive_name="${archive_dir}.tar.gz"
 
-          mkdir -p "dist/${archive_dir}"
+          mkdir -p "dist/${archive_dir}/doc"
           cp target/release/ftty "dist/${archive_dir}/"
-          cp README.md LICENSE "dist/${archive_dir}/"
+          cp doc/ftty.1 doc/ftty.1.md "dist/${archive_dir}/doc/"
+          cp Makefile README.md LICENSE "dist/${archive_dir}/"
 
           cd dist
           tar -czvf "${archive_name}" "${archive_dir}"
