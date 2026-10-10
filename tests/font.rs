@@ -603,3 +603,19 @@ fn grayscale_mask_preserves_raw_linear_geometric_coverage() {
     }
     assert!(checked > 0, "glyph must contain pixels");
 }
+
+#[test]
+fn emoji_font_strike_selection_and_color_load() {
+    let path = std::path::Path::new("/usr/share/fonts/noto/NotoColorEmoji.ttf");
+    if !path.exists() {
+        return;
+    }
+    let font = load_font_file(path, 0).expect("load noto color emoji font");
+    let glyph_idx = font.lookup_glyph_index('😀');
+    assert_ne!(glyph_idx, 0, "emoji codepoint must map to a glyph");
+    let raster = font.rasterize_indexed(glyph_idx, 14.0, false, false);
+    assert!(
+        raster.width > 0 && raster.height > 0,
+        "color emoji strike must be loaded and non-empty"
+    );
+}

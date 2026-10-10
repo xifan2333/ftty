@@ -391,7 +391,12 @@ impl Font {
     /// typography points (e.g. 9.0 pt = 12.0 px at 96 DPI).
     fn set_font_size(face: &freetype::Face, font_size: f32) {
         let size_in_26_6 = (font_size * 64.0).round().max(64.0) as isize;
-        let _ = face.set_char_size(0, size_in_26_6, 96, 96);
+        if face.set_char_size(0, size_in_26_6, 96, 96).is_err() && face.has_fixed_sizes() {
+            let pixel_sz = points_to_pixels(font_size).round().max(1.0) as u32;
+            if face.set_pixel_sizes(pixel_sz, pixel_sz).is_err() {
+                let _ = face.select_size(0);
+            }
+        }
     }
 
     /// Retrieves line height and baseline ascent metrics.
@@ -422,7 +427,10 @@ impl Font {
         if let Some(face) = &guard.face {
             Self::set_font_size(face, font_size);
             let glyph_idx = face.get_char_index(c as usize).unwrap_or(0);
-            if face.load_glyph(glyph_idx, LoadFlag::NO_HINTING).is_ok() {
+            if face
+                .load_glyph(glyph_idx, LoadFlag::NO_HINTING | LoadFlag::COLOR)
+                .is_ok()
+            {
                 let advance = face.glyph().advance().x;
                 if advance > 0 {
                     return (advance as f32) / 64.0;
@@ -472,7 +480,7 @@ impl Font {
             return RasterizedGlyph::empty();
         };
         Self::set_font_size(face, font_size);
-        let load_flags = LoadFlag::DEFAULT | LoadFlag::TARGET_LIGHT;
+        let load_flags = LoadFlag::DEFAULT | LoadFlag::TARGET_LIGHT | LoadFlag::COLOR;
         let render_mode = if subpixel {
             RenderMode::Lcd
         } else {
