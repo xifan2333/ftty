@@ -603,3 +603,72 @@ fn grayscale_mask_preserves_raw_linear_geometric_coverage() {
     }
     assert!(checked > 0, "glyph must contain pixels");
 }
+
+#[test]
+fn emoji_font_strike_selection_and_color_load() {
+    let path = std::path::Path::new("/usr/share/fonts/noto/NotoColorEmoji.ttf");
+    if !path.exists() {
+        return;
+    }
+    let font = load_font_file(path, 0).expect("load noto color emoji font");
+    let glyph_idx = font.lookup_glyph_index('😀');
+    assert_ne!(glyph_idx, 0, "emoji codepoint must map to a glyph");
+    let raster = font.rasterize_indexed(glyph_idx, 14.0, false, false);
+    assert!(
+        raster.width > 0 && raster.height > 0,
+        "color emoji strike must be loaded and non-empty"
+    );
+    assert!(raster.colored, "rasterized emoji must be marked colored");
+    assert!(
+        raster.width <= 36,
+        "rasterized emoji must be scaled to cell bounds"
+    );
+    assert!(
+        raster.height <= 36,
+        "rasterized emoji must be scaled to cell bounds"
+    );
+    assert!(
+        raster.pixels.iter().any(|&p| p != 0),
+        "pixels must not be empty"
+    );
+}
+
+#[test]
+fn emoji_glyph_atlas_caching_and_colored_flag() {
+    let path = std::path::Path::new("/usr/share/fonts/noto/NotoColorEmoji.ttf");
+    if !path.exists() {
+        return;
+    }
+    let fonts = fonts();
+    let mut atlas = GlyphAtlas::new(256, 256);
+    let glyph = atlas
+        .get_or_insert('😀', CellFlags::empty(), fonts)
+        .expect("atlas must fit emoji glyph");
+    assert!(glyph.colored, "cached glyph must be marked colored");
+    assert!(glyph.width > 0 && glyph.height > 0);
+
+    let fetched = atlas
+        .get('😀', CellFlags::empty(), fonts)
+        .expect("glyph must be retrievable from atlas cache");
+    assert_eq!(fetched, glyph);
+    assert!(fetched.colored);
+}
+
+#[test]
+fn emoji_fallback_chain_resolves_multiple_emojis() {
+    let path = std::path::Path::new("/usr/share/fonts/noto/NotoColorEmoji.ttf");
+    if !path.exists() {
+        return;
+    }
+    let fonts = fonts();
+    let mut atlas = GlyphAtlas::new(256, 256);
+    for emoji in ['🎉', '🚀', '🔥'] {
+        let key = fonts.face_key(emoji, CellFlags::empty());
+        assert_ne!(key.glyph, 0, "emoji {emoji} must resolve to a valid glyph");
+        let cached = atlas
+            .get_or_insert(emoji, CellFlags::empty(), fonts)
+            .unwrap_or_else(|| panic!("atlas must fit emoji {emoji}"));
+        assert!(cached.colored, "emoji {emoji} must be colored");
+        assert!(cached.width > 0 && cached.height > 0);
+    }
+}

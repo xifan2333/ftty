@@ -889,3 +889,47 @@ fn test_partially_scrolled_image_placement_visibility_and_cropping() {
     let viewport_end = 5;
     assert!(placement_line >= viewport_end);
 }
+
+#[test]
+fn color_emoji_vertices_have_negative_alpha_in_render_pipeline() {
+    let path = std::path::Path::new("/usr/share/fonts/noto/NotoColorEmoji.ttf");
+    if !path.exists() {
+        return;
+    }
+    let mut grid = Grid::new(4, 1, 0);
+    grid.cursor.visible = false;
+    grid.lines[0].cells[0].c = '😀';
+    grid.lines[0].cells[0].flags = CellFlags::WIDE_CHAR;
+    grid.lines[0].cells[1].flags = CellFlags::WIDE_CHAR_SPACER;
+    let fonts = FontManager::load(14.0).expect("system monospace font");
+    let mut atlas = GlyphAtlas::new(256, 256);
+    prepare_atlas(&grid, &fonts, &mut atlas, None);
+    let mut vertices = Vec::new();
+    build_vertices(
+        &mut vertices,
+        &grid,
+        ColorScheme::new(&default_256_palette(), DEFAULT_FG, DEFAULT_BG),
+        fonts.metrics,
+        &fonts,
+        &atlas,
+        RenderOptions::default(),
+    );
+    let glyph_quads: Vec<_> = vertices.chunks(8).filter(|v| v[2] >= 0.0).collect();
+    assert!(!glyph_quads.is_empty(), "must render glyph vertices");
+    assert!(
+        glyph_quads[0][7] < 0.0,
+        "colored emoji vertex must have negative alpha"
+    );
+
+    let cw = fonts.metrics.cell_width as f32;
+    let ch = fonts.metrics.cell_height as f32;
+    let gx0 = glyph_quads[0][0];
+    let gy0 = glyph_quads[0][1];
+    assert!(
+        gx0 >= 0.0,
+        "emoji must start inside or at left edge of cell"
+    );
+    assert!(gx0 < 2.0 * cw, "emoji must start within wide cell width");
+    assert!(gy0 >= 0.0, "emoji must start inside or at top of cell");
+    assert!(gy0 < ch, "emoji must start within cell height");
+}

@@ -1135,16 +1135,26 @@ void main() {
 #endif
     } else {
         vec4 mask = v_tex_coords.x < 0.0 ? vec4(1.0) : texture2D(u_texture, v_tex_coords);
+        if (v_color.a < 0.0) {
+            float alpha = -v_color.a;
 #if defined(GL_EXT_blend_func_extended)
-        gl_FragColor = vec4(v_color.rgb, 1.0);
-        if (u_subpixel_mode == 1) {
-            gl_SecondaryFragColorEXT = mask * v_color.a;
-        } else {
-            gl_SecondaryFragColorEXT = vec4(mask.a * v_color.a);
-        }
+            gl_FragColor = vec4(mask.rgb, 1.0);
+            gl_SecondaryFragColorEXT = vec4(mask.a * alpha);
 #else
-        gl_FragColor = vec4(v_color.rgb, v_color.a * mask.a);
+            gl_FragColor = vec4(mask.rgb, mask.a * alpha);
 #endif
+        } else {
+#if defined(GL_EXT_blend_func_extended)
+            gl_FragColor = vec4(v_color.rgb, 1.0);
+            if (u_subpixel_mode == 1) {
+                gl_SecondaryFragColorEXT = mask * v_color.a;
+            } else {
+                gl_SecondaryFragColorEXT = vec4(mask.a * v_color.a);
+            }
+#else
+            gl_FragColor = vec4(v_color.rgb, v_color.a * mask.a);
+#endif
+        }
     }
 }
 "#;
@@ -1631,18 +1641,31 @@ pub fn build_row_foregrounds(vertices: &mut Vec<f32>, row: usize, ctx: &RenderCo
                 // Procedural box drawing and block elements glyph
             } else if let Some(glyph) = atlas.get(cell.c, cell.flags, fonts) {
                 if glyph.width > 0 && glyph.height > 0 {
-                    let gx = (x + glyph.offset_x as f32).round();
-                    let gy =
-                        (y + metrics.ascent as f32 - glyph.offset_y as f32 - glyph.height as f32)
+                    let (gx, gy) = if glyph.colored {
+                        let pad_x = (width - glyph.width as f32).max(0.0) / 2.0;
+                        let pad_y = (ch - glyph.height as f32).max(0.0) / 2.0;
+                        ((x + pad_x).round(), (y + pad_y).round())
+                    } else {
+                        let gx = (x + glyph.offset_x as f32).round();
+                        let gy = (y + metrics.ascent as f32
+                            - glyph.offset_y as f32
+                            - glyph.height as f32)
                             .round();
+                        (gx, gy)
+                    };
                     let [u, v] = glyph.position.map(|value| value as f32);
                     let w = glyph.width as f32;
                     let h = glyph.height as f32;
+                    let glyph_color = if glyph.colored {
+                        [color[0], color[1], color[2], -color[3].abs().max(0.001)]
+                    } else {
+                        color
+                    };
                     push_quad(
                         vertices,
                         [gx, gy, gx + w, gy + h],
                         [[u, v], [u + w, v + h]],
-                        color,
+                        glyph_color,
                     );
                 }
             } else if let Some(fallback) = atlas.get('?', CellFlags::empty(), fonts) {
