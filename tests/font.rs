@@ -653,3 +653,22 @@ fn emoji_glyph_atlas_caching_and_colored_flag() {
     assert_eq!(fetched, glyph);
     assert!(fetched.colored);
 }
+
+#[test]
+fn emoji_fallback_chain_resolves_multiple_emojis() {
+    let path = std::path::Path::new("/usr/share/fonts/noto/NotoColorEmoji.ttf");
+    if !path.exists() {
+        return;
+    }
+    let fonts = fonts();
+    let mut atlas = GlyphAtlas::new(256, 256);
+    for emoji in ['🎉', '🚀', '🔥'] {
+        let key = fonts.face_key(emoji, CellFlags::empty());
+        assert_ne!(key.glyph, 0, "emoji {emoji} must resolve to a valid glyph");
+        let cached = atlas
+            .get_or_insert(emoji, CellFlags::empty(), fonts)
+            .unwrap_or_else(|| panic!("atlas must fit emoji {emoji}"));
+        assert!(cached.colored, "emoji {emoji} must be colored");
+        assert!(cached.width > 0 && cached.height > 0);
+    }
+}
