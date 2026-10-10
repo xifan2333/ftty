@@ -632,3 +632,24 @@ fn emoji_font_strike_selection_and_color_load() {
         "pixels must not be empty"
     );
 }
+
+#[test]
+fn emoji_glyph_atlas_caching_and_colored_flag() {
+    let path = std::path::Path::new("/usr/share/fonts/noto/NotoColorEmoji.ttf");
+    if !path.exists() {
+        return;
+    }
+    let fonts = fonts();
+    let mut atlas = GlyphAtlas::new(256, 256);
+    let glyph = atlas
+        .get_or_insert('😀', CellFlags::empty(), fonts)
+        .expect("atlas must fit emoji glyph");
+    assert!(glyph.colored, "cached glyph must be marked colored");
+    assert!(glyph.width > 0 && glyph.height > 0);
+
+    let fetched = atlas
+        .get('😀', CellFlags::empty(), fonts)
+        .expect("glyph must be retrievable from atlas cache");
+    assert_eq!(fetched, glyph);
+    assert!(fetched.colored);
+}
