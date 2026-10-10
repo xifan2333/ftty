@@ -618,4 +618,17 @@ fn emoji_font_strike_selection_and_color_load() {
         raster.width > 0 && raster.height > 0,
         "color emoji strike must be loaded and non-empty"
     );
+    assert!(raster.colored, "rasterized emoji must be marked colored");
+    assert!(
+        raster.width <= 36,
+        "rasterized emoji must be scaled to cell bounds"
+    );
+    assert!(
+        raster.height <= 36,
+        "rasterized emoji must be scaled to cell bounds"
+    );
+    assert!(
+        raster.pixels.iter().any(|&p| p != 0),
+        "pixels must not be empty"
+    );
 }

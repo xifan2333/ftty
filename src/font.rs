@@ -30,6 +30,7 @@ pub struct CachedGlyph {
     pub height: u32,
     pub offset_x: i32,
     pub offset_y: i32,
+    pub colored: bool,
 }
 
 #[derive(Default)]
@@ -155,6 +156,7 @@ impl GlyphAtlas {
             height,
             offset_x: glyph.offset_x,
             offset_y: glyph.offset_y,
+            colored: glyph.colored,
         };
         if width == 0 || height == 0 {
             return Some(cached);
@@ -288,6 +290,7 @@ pub struct RasterizedGlyph {
     pub offset_y: i32,
     pub pitch: usize,
     pub pixels: Vec<u8>,
+    pub colored: bool,
 }
 
 impl RasterizedGlyph {
@@ -300,6 +303,7 @@ impl RasterizedGlyph {
             offset_y: 0,
             pitch: 0,
             pixels: Vec::new(),
+            colored: false,
         }
     }
 }
@@ -544,6 +548,7 @@ impl Font {
                 offset_y,
                 pitch: (logical_width * 4) as usize,
                 pixels,
+                colored: false,
             }
         } else if bmp.pixel_mode() == Ok(freetype::bitmap::PixelMode::Mono) {
             // FreeType 1-bit monochrome bitmaps pack 8 pixels per byte, MSB-first.
@@ -576,6 +581,50 @@ impl Font {
                 offset_y,
                 pitch: row_pixels * 4,
                 pixels,
+                colored: false,
+            }
+        } else if bmp.pixel_mode() == Ok(freetype::bitmap::PixelMode::Bgra) {
+            let nominal_px = points_to_pixels(font_size);
+            let max_height = (nominal_px * 1.15).round().max(1.0) as u32;
+            let max_width = (nominal_px * 2.0).round().max(1.0) as u32;
+            let cell_ascent = (nominal_px * 0.9).round() as i32;
+
+            let (final_w, final_h, pixels) = if raw_width > max_width || height > max_height {
+                let scale =
+                    (max_width as f32 / raw_width as f32).min(max_height as f32 / height as f32);
+                let target_w = ((raw_width as f32 * scale).round() as u32).clamp(1, max_width);
+                let target_h = ((height as f32 * scale).round() as u32).clamp(1, max_height);
+                let downsampled = downsample_bgra_to_rgba(
+                    buffer,
+                    raw_width,
+                    height,
+                    abs_pitch,
+                    pitch < 0,
+                    target_w,
+                    target_h,
+                );
+                (target_w, target_h, downsampled)
+            } else {
+                (
+                    raw_width,
+                    height,
+                    bgra_to_rgba(buffer, raw_width, height, abs_pitch, pitch < 0),
+                )
+            };
+
+            let pad_x = (max_width.saturating_sub(final_w) / 2) as i32;
+            let pad_y = (max_height.saturating_sub(final_h) / 2) as i32;
+            let off_x = pad_x;
+            let off_y = cell_ascent - final_h as i32 - pad_y;
+
+            RasterizedGlyph {
+                width: final_w,
+                height: final_h,
+                offset_x: off_x,
+                offset_y: off_y,
+                pitch: (final_w * 4) as usize,
+                pixels,
+                colored: true,
             }
         } else {
             let row_pixels = raw_width as usize;
@@ -608,9 +657,126 @@ impl Font {
                 offset_y,
                 pitch: row_pixels * 4,
                 pixels,
+                colored: false,
             }
         }
     }
+}
+
+fn downsample_bgra_to_rgba(
+    src: &[u8],
+    src_width: u32,
+    src_height: u32,
+    abs_pitch: usize,
+    pitch_negative: bool,
+    dst_width: u32,
+    dst_height: u32,
+) -> Vec<u8> {
+    let mut dst = vec![0u8; (dst_width * dst_height * 4) as usize];
+    let x_scale = src_width as f64 / dst_width as f64;
+    let y_scale = src_height as f64 / dst_height as f64;
+
+    for dy in 0..dst_height {
+        let sy_start = ((dy as f64) * y_scale).floor() as u32;
+        let sy_end = (((dy + 1) as f64) * y_scale).ceil().min(src_height as f64) as u32;
+        let dst_row_offset = (dy * dst_width * 4) as usize;
+
+        for dx in 0..dst_width {
+            let sx_start = ((dx as f64) * x_scale).floor() as u32;
+            let sx_end = (((dx + 1) as f64) * x_scale).ceil().min(src_width as f64) as u32;
+
+            let mut sum_b = 0u64;
+            let mut sum_g = 0u64;
+            let mut sum_r = 0u64;
+            let mut sum_a = 0u64;
+            let mut count = 0u64;
+
+            for sy in sy_start..sy_end {
+                let actual_sy = if pitch_negative {
+                    (src_height - 1 - sy) as usize
+                } else {
+                    sy as usize
+                };
+                let row_offset = actual_sy * abs_pitch;
+                for sx in sx_start..sx_end {
+                    let px_offset = row_offset + (sx as usize) * 4;
+                    if px_offset + 3 < src.len() {
+                        let b = src[px_offset] as u64;
+                        let g = src[px_offset + 1] as u64;
+                        let r = src[px_offset + 2] as u64;
+                        let a = src[px_offset + 3] as u64;
+                        sum_b += b;
+                        sum_g += g;
+                        sum_r += r;
+                        sum_a += a;
+                        count += 1;
+                    }
+                }
+            }
+
+            let dst_offset = dst_row_offset + (dx * 4) as usize;
+            if let Some(avg_a_val) = sum_a.checked_div(count) {
+                let avg_a = avg_a_val as u8;
+                if avg_a == 0 {
+                    dst[dst_offset..dst_offset + 4].copy_from_slice(&[0, 0, 0, 0]);
+                } else {
+                    let avg_b = (sum_b.checked_div(count).unwrap_or(0)) as u32;
+                    let avg_g = (sum_g.checked_div(count).unwrap_or(0)) as u32;
+                    let avg_r = (sum_r.checked_div(count).unwrap_or(0)) as u32;
+                    let a_u32 = avg_a as u32;
+                    let r = ((avg_r * 255 + a_u32 / 2) / a_u32).min(255) as u8;
+                    let g = ((avg_g * 255 + a_u32 / 2) / a_u32).min(255) as u8;
+                    let b = ((avg_b * 255 + a_u32 / 2) / a_u32).min(255) as u8;
+                    dst[dst_offset..dst_offset + 4].copy_from_slice(&[r, g, b, avg_a]);
+                }
+            }
+        }
+    }
+    dst
+}
+
+fn bgra_to_rgba(
+    src: &[u8],
+    width: u32,
+    height: u32,
+    abs_pitch: usize,
+    pitch_negative: bool,
+) -> Vec<u8> {
+    let mut dst = vec![0u8; (width * height * 4) as usize];
+    for y in 0..height {
+        let actual_y = if pitch_negative {
+            (height - 1 - y) as usize
+        } else {
+            y as usize
+        };
+        let src_row = actual_y * abs_pitch;
+        let dst_row = (y as usize) * (width as usize) * 4;
+        for x in 0..width {
+            let src_idx = src_row + (x as usize) * 4;
+            let dst_idx = dst_row + (x as usize) * 4;
+            if src_idx + 3 < src.len() {
+                let b = src[src_idx] as u32;
+                let g = src[src_idx + 1] as u32;
+                let r = src[src_idx + 2] as u32;
+                let a = src[src_idx + 3] as u32;
+                let dst_px = match (r * 255 + a / 2).checked_div(a) {
+                    Some(r_scaled) => {
+                        let g_scaled = (g * 255 + a / 2) / a;
+                        let b_scaled = (b * 255 + a / 2) / a;
+                        [
+                            r_scaled.min(255) as u8,
+                            g_scaled.min(255) as u8,
+                            b_scaled.min(255) as u8,
+                            a as u8,
+                        ]
+                    }
+                    None => [0, 0, 0, 0],
+                };
+                dst[dst_idx..dst_idx + 4].copy_from_slice(&dst_px);
+            }
+        }
+    }
+    dst
 }
 
 // --- Fallback ---
