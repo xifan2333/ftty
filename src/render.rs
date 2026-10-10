@@ -1641,10 +1641,18 @@ pub fn build_row_foregrounds(vertices: &mut Vec<f32>, row: usize, ctx: &RenderCo
                 // Procedural box drawing and block elements glyph
             } else if let Some(glyph) = atlas.get(cell.c, cell.flags, fonts) {
                 if glyph.width > 0 && glyph.height > 0 {
-                    let gx = (x + glyph.offset_x as f32).round();
-                    let gy =
-                        (y + metrics.ascent as f32 - glyph.offset_y as f32 - glyph.height as f32)
+                    let (gx, gy) = if glyph.colored {
+                        let pad_x = (width - glyph.width as f32).max(0.0) / 2.0;
+                        let pad_y = (ch - glyph.height as f32).max(0.0) / 2.0;
+                        ((x + pad_x).round(), (y + pad_y).round())
+                    } else {
+                        let gx = (x + glyph.offset_x as f32).round();
+                        let gy = (y + metrics.ascent as f32
+                            - glyph.offset_y as f32
+                            - glyph.height as f32)
                             .round();
+                        (gx, gy)
+                    };
                     let [u, v] = glyph.position.map(|value| value as f32);
                     let w = glyph.width as f32;
                     let h = glyph.height as f32;

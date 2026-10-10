@@ -920,4 +920,16 @@ fn color_emoji_vertices_have_negative_alpha_in_render_pipeline() {
         glyph_quads[0][7] < 0.0,
         "colored emoji vertex must have negative alpha"
     );
+
+    let cw = fonts.metrics.cell_width as f32;
+    let ch = fonts.metrics.cell_height as f32;
+    let gx0 = glyph_quads[0][0];
+    let gy0 = glyph_quads[0][1];
+    assert!(
+        gx0 >= 0.0,
+        "emoji must start inside or at left edge of cell"
+    );
+    assert!(gx0 < 2.0 * cw, "emoji must start within wide cell width");
+    assert!(gy0 >= 0.0, "emoji must start inside or at top of cell");
+    assert!(gy0 < ch, "emoji must start within cell height");
 }
