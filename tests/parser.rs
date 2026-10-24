@@ -159,13 +159,24 @@ fn test_device_status_and_attributes_queries() {
     term.advance_bytes(b"\x1b[10;20H\x1b[6n");
     assert_eq!(term.take_responses(), vec![b"\x1b[10;20R".to_vec()]);
 
-    // Primary DA: CSI c
+    // Primary DA: CSI c advertises OSC 52 clipboard support when enabled.
+    term.advance_bytes(b"\x1b[c");
+    assert_eq!(term.take_responses(), vec![b"\x1b[?62;52;c".to_vec()]);
+
+    term.allow_osc52_write = false;
     term.advance_bytes(b"\x1b[c");
     assert_eq!(term.take_responses(), vec![b"\x1b[?62;c".to_vec()]);
 
     // Secondary DA: CSI > c
     term.advance_bytes(b"\x1b[>c");
     assert_eq!(term.take_responses(), vec![b"\x1b[>0;10;1c".to_vec()]);
+
+    // XTVERSION: CSI > q identifies ftty and its Kitty-compatible graphics support.
+    term.advance_bytes(b"\x1b[>0q");
+    assert_eq!(
+        term.take_responses(),
+        vec![format!("\x1bP>|ftty-kitty({})\x1b\\", env!("CARGO_PKG_VERSION")).into_bytes()]
+    );
 }
 
 #[test]

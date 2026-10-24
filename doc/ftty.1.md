@@ -263,7 +263,10 @@ Unless overridden in `[keybindings]`, the following bindings are active by defau
 # PROTOCOLS & EXTENSIONS
 
 **Kitty Graphics Protocol**
-: Implements native Kitty graphics escape codes (`\x1b_G...;payload\x1b\`). Supports action types transmit (`a=t`), transmit and display (`a=T`), query (`a=q`), delete (`a=d`), and placement (`a=p`). Zero-copy shared memory (`t=s`, `t=f`) and direct transmission (`t=d`, `t=m`) modes are supported, allowing seamless, high-performance image display in tools like **yazi(1)** and **image.nvim**. Responses are formatted strictly in compliance with the Kitty specification.
+: Implements native Kitty graphics escape codes (`\x1b_G...;payload\x1b\`). Supported actions are transmit (`a=t`), transmit and display (`a=T`), query (`a=q`), delete (`a=d`), and placement (`a=p`). Transmission media are direct base64 (`t=d`), file (`t=f`), temporary file (`t=t`), and POSIX shared memory (`t=s`), with `S=`/`O=` size and offset handling. Pixel formats are RGB (`f=24`), RGBA (`f=32`), and PNG (`f=100`), optionally zlib-compressed (`o=z`). Image numbers (`I=`), placement ids (`p=`), source rectangles, z-order, virtual placements (`U=1`), and Unicode placeholders are supported. Capability queries (`a=q`) load and validate the requested transport and payload before replying, honor `q=` quiet levels, and unlink shared-memory objects after reading. Animation actions (`a=f`, `a=a`, `a=c`) are explicitly unsupported and return `ENOTSUP`.
+
+**Terminal identification**
+: Replies to XTVERSION (`CSI > q`) with `DCS >|ftty-kitty(VERSION) ST`. The `ftty-kitty` name allows clients that identify Kitty graphics support by terminal name (for example **timg(1)** and **yazi(1)**) to select the Kitty renderer. Primary Device Attributes (`CSI c`) advertise the OSC 52 extension (`52`) when clipboard writes are enabled.
 
 **Wayland text-input-v3 (IME)**
 : Fully integrates Wayland `zwp_text_input_v3` protocol for input method engines such as **fcitx5(1)**. Accurately reports cursor rectangle coordinates in surface space to position candidate popup windows, with native preedit text rendering and styling.
@@ -289,6 +292,15 @@ Unless overridden in `[keybindings]`, the following bindings are active by defau
 
 **COLORTERM**
 : Set to `truecolor` to announce 24-bit direct RGB color capability.
+
+**TERM_PROGRAM**, **TERM_PROGRAM_VERSION**
+: Set to `ftty` and the running version.
+
+**KITTY_WINDOW_ID**
+: Set to `1` so Kitty-aware clients can recognize the graphics protocol without a query.
+
+**KITTY_PID**
+: Set to the ftty process id. Some clients (notably **chafa(1)**) use its presence to identify Kitty-compatible terminals. Remote-control variables such as `KITTY_LISTEN_ON` are intentionally not set.
 
 **WAYLAND_DISPLAY**
 : Names the Wayland compositor socket used for connection.

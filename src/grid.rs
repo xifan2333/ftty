@@ -789,6 +789,31 @@ impl Grid {
         self.placements.push(placement);
     }
 
+    fn delete_placements_at(&mut self, matches: impl Fn(&ImagePlacement) -> bool, free: bool) {
+        let mut affected = Vec::new();
+        for placement in &self.placements {
+            if matches(placement) && !affected.contains(&placement.image_id) {
+                affected.push(placement.image_id);
+            }
+        }
+        self.placements.retain(|placement| !matches(placement));
+        self.mark_visible_dirty();
+        if free {
+            self.free_images_without_placements(&affected);
+        }
+    }
+
+    fn free_images_without_placements(&mut self, image_ids: &[u32]) {
+        for &id in image_ids {
+            let placed = self.placements.iter().any(|p| p.image_id == id)
+                || self.alt_placements.iter().any(|p| p.image_id == id)
+                || self.virtual_placements.contains_key(&id);
+            if !placed {
+                self.remove_image_internal(id);
+            }
+        }
+    }
+
     /// Deletes images and/or placements matching the given delete target.
     pub fn delete_images(&mut self, target: DeleteTarget) {
         match target {
@@ -816,19 +841,83 @@ impl Grid {
                 self.remove_image_internal(id);
                 self.mark_visible_dirty();
             }
-            DeleteTarget::ByPlacement(p_id) => {
-                self.placements.retain(|p| p.placement_id != p_id);
-                self.alt_placements.retain(|p| p.placement_id != p_id);
+            DeleteTarget::ByIdPlacement(id, placement) => {
+                self.placements
+                    .retain(|p| !(p.image_id == id && p.placement_id == placement));
+                self.alt_placements
+                    .retain(|p| !(p.image_id == id && p.placement_id == placement));
                 self.mark_visible_dirty();
             }
-            DeleteTarget::AtCursor => {
-                let cursor_row = self.cursor.row;
-                let cursor_col = self.cursor.col;
-                let abs_line = self.scrollback.len() + cursor_row;
-                self.placements.retain(|p| {
-                    !(p.line == abs_line && cursor_col >= p.col && cursor_col < p.col + p.cols)
-                });
+            DeleteTarget::ByIdPlacementAndFree(id, placement) => {
+                self.placements
+                    .retain(|p| !(p.image_id == id && p.placement_id == placement));
+                self.alt_placements
+                    .retain(|p| !(p.image_id == id && p.placement_id == placement));
+                self.free_images_without_placements(&[id]);
                 self.mark_visible_dirty();
+            }
+            DeleteTarget::ByNumber { .. } => {
+                // The parser resolves image numbers before emitting the delete event.
+            }
+            DeleteTarget::AtCursor => {
+                let abs_line = self.scrollback.len() + self.cursor.row;
+                let col = self.cursor.col;
+                self.delete_placements_at(
+                    |p| {
+                        p.line <= abs_line
+                            && abs_line < p.line + p.rows
+                            && p.col <= col
+                            && col < p.col + p.cols
+                    },
+                    false,
+                );
+            }
+            DeleteTarget::AtCursorAndFree => {
+                let abs_line = self.scrollback.len() + self.cursor.row;
+                let col = self.cursor.col;
+                self.delete_placements_at(
+                    |p| {
+                        p.line <= abs_line
+                            && abs_line < p.line + p.rows
+                            && p.col <= col
+                            && col < p.col + p.cols
+                    },
+                    true,
+                );
+            }
+            DeleteTarget::AtAbsoluteCell { x, y, z, free } => {
+                let row = y.saturating_sub(1) as usize;
+                let col = x.saturating_sub(1) as usize;
+                let abs_line = self.scrollback.len() + row;
+                self.delete_placements_at(
+                    |p| {
+                        p.line <= abs_line
+                            && abs_line < p.line + p.rows
+                            && p.col <= col
+                            && col < p.col + p.cols
+                            && z.is_none_or(|z| p.z_index == z)
+                    },
+                    free,
+                );
+            }
+            DeleteTarget::ByColumn { x, free } => {
+                let col = x.saturating_sub(1) as usize;
+                self.delete_placements_at(|p| p.col <= col && col < p.col + p.cols, free);
+            }
+            DeleteTarget::ByRow { y, free } => {
+                let row = self.scrollback.len() + y.saturating_sub(1) as usize;
+                self.delete_placements_at(|p| p.line <= row && row < p.line + p.rows, free);
+            }
+            DeleteTarget::ByZIndex(z_index) => {
+                self.placements.retain(|p| p.z_index != z_index);
+                self.alt_placements.retain(|p| p.z_index != z_index);
+                self.mark_visible_dirty();
+            }
+            DeleteTarget::ByZIndexAndFree(z_index) => {
+                self.delete_placements_at(|p| p.z_index == z_index, true);
+            }
+            DeleteTarget::ByIdRange { lo, hi, free } => {
+                self.delete_placements_at(|p| lo <= p.image_id && p.image_id <= hi, free);
             }
         }
     }

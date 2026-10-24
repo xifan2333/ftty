@@ -795,6 +795,14 @@ impl Terminal {
             return;
         }
 
+        if action == 'q' && intermediates.contains(&b'>') && first_param == 0 {
+            // XTVERSION (CSI > q): identify the terminal for capability detection.
+            self.responses.push(
+                format!("\x1bP>|ftty-kitty({})\x1b\\", env!("CARGO_PKG_VERSION")).into_bytes(),
+            );
+            return;
+        }
+
         if action == 'u' {
             if intermediates.contains(&b'>') && flat_params.len() <= 1 {
                 // CSI > flags u - Push Kitty keyboard flags
@@ -953,8 +961,13 @@ impl Terminal {
                     // Secondary Device Attributes (DA2)
                     self.responses.push(b"\x1b[>0;10;1c".to_vec());
                 } else if first_param == 0 {
-                    // Primary Device Attributes (DA1) - VT220 response
-                    self.responses.push(b"\x1b[?62;c".to_vec());
+                    // Primary Device Attributes (DA1) - VT220 response.
+                    // Advertise OSC 52 clipboard access when writes are allowed, matching Kitty.
+                    if self.allow_osc52_write {
+                        self.responses.push(b"\x1b[?62;52;c".to_vec());
+                    } else {
+                        self.responses.push(b"\x1b[?62;c".to_vec());
+                    }
                 }
             }
             // SGR - Select Graphic Rendition

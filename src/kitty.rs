@@ -2,11 +2,13 @@
 
 use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
+use flate2::read::ZlibDecoder;
 use nix::fcntl::OFlag;
-use nix::sys::mman::shm_open;
+use nix::sys::mman::{shm_open, shm_unlink};
 use nix::sys::stat::Mode;
+use std::collections::HashMap;
 use std::fs;
-use std::io::{self, Cursor, Read};
+use std::io::{self, Cursor, Read, Seek, SeekFrom};
 
 // --- Model ---
 
@@ -20,6 +22,19 @@ pub enum KittyAction {
     Query,
     Place,
     Delete,
+    /// Animation frame transmission (`a=f`); recognized but unsupported.
+    TransmitFrame,
+    /// Animation control (`a=a`); recognized but unsupported.
+    ControlAnimation,
+    /// Animation frame composition (`a=c`); recognized but unsupported.
+    ComposeFrame,
+}
+
+/// Payload compression requested through the `o=` key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KittyCompression {
+    /// RFC 1950 zlib stream.
+    Zlib,
 }
 
 /// Pixel format of image payload.
@@ -49,8 +64,43 @@ pub enum DeleteTarget {
     AllAndFree,
     ById(u32),
     ByIdAndFree(u32),
-    ByPlacement(u32),
+    /// Delete one placement of an image (`d=i` combined with `p=`).
+    ByIdPlacement(u32, u32),
+    ByIdPlacementAndFree(u32, u32),
+    /// Newest image with a client image number (`d=n`), resolved by the parser.
+    ByNumber {
+        number: u32,
+        placement: Option<u32>,
+        free: bool,
+    },
     AtCursor,
+    AtCursorAndFree,
+    /// Delete placements intersecting an absolute cell (`d=p`/`d=q`), 1-based.
+    AtAbsoluteCell {
+        x: u32,
+        y: u32,
+        z: Option<i32>,
+        free: bool,
+    },
+    /// Delete placements intersecting a column (`d=x`), 1-based.
+    ByColumn {
+        x: u32,
+        free: bool,
+    },
+    /// Delete placements intersecting a row (`d=y`), 1-based.
+    ByRow {
+        y: u32,
+        free: bool,
+    },
+    /// Delete placements by z-index (`d=z`).
+    ByZIndex(i32),
+    ByZIndexAndFree(i32),
+    /// Delete images whose id is within an inclusive range (`d=r`).
+    ByIdRange {
+        lo: u32,
+        hi: u32,
+        free: bool,
+    },
 }
 
 /// Parsed Kitty APC command parameters.
@@ -64,6 +114,9 @@ pub struct KittyCommand {
     /// Whether the client sent an explicit `i=` key. The protocol only requires an
     /// `OK`/error acknowledgement when the client opted in by supplying an image id.
     pub id_explicit: bool,
+    /// Image number requested through `I=`; the terminal allocates the actual id.
+    pub image_number: Option<u32>,
+    pub number_explicit: bool,
     pub placement_id: Option<u32>,
     pub width: Option<u32>,
     pub height: Option<u32>,
@@ -78,6 +131,19 @@ pub struct KittyCommand {
     pub offset_x: u32,
     pub offset_y: u32,
     pub z_index: i32,
+    /// Number of bytes to read for file/shared-memory payloads (`S=`).
+    pub data_size: Option<u64>,
+    /// Byte offset within a file/shared-memory payload (`O=`).
+    pub data_offset: u64,
+    /// Optional payload compression (`o=`).
+    pub compression: Option<KittyCompression>,
+    /// Whether `f=`/`t=` were explicitly supplied, for capability probes.
+    pub format_explicit: bool,
+    pub medium_explicit: bool,
+    /// Standard error discovered while parsing the control data.
+    pub error: Option<&'static str>,
+    /// Parent image id for relative placements (`P=`), which are unsupported.
+    pub parent_id: Option<u32>,
     pub more_chunks: bool,
     pub do_not_move_cursor: bool,
     pub quiet: u8,
@@ -172,7 +238,13 @@ pub enum KittyEvent {
 #[must_use]
 pub fn parse_control_keys(s: &str) -> KittyCommand {
     let mut cmd = KittyCommand::default();
-    let mut delete_selector = None;
+    let mut delete_selector: Option<&str> = None;
+
+    fn set_error(cmd: &mut KittyCommand, message: &'static str) {
+        if cmd.error.is_none() {
+            cmd.error = Some(message);
+        }
+    }
 
     for pair in s.split(',') {
         let pair = pair.trim();
@@ -191,66 +263,291 @@ pub fn parse_control_keys(s: &str) -> KittyCommand {
                     "q" => KittyAction::Query,
                     "p" => KittyAction::Place,
                     "d" => KittyAction::Delete,
-                    _ => KittyAction::TransmitAndDisplay,
+                    "f" => {
+                        set_error(&mut cmd, "ENOTSUP: animation is not supported");
+                        KittyAction::TransmitFrame
+                    }
+                    "a" => {
+                        set_error(&mut cmd, "ENOTSUP: animation is not supported");
+                        KittyAction::ControlAnimation
+                    }
+                    "c" => {
+                        set_error(&mut cmd, "ENOTSUP: animation is not supported");
+                        KittyAction::ComposeFrame
+                    }
+                    _ => {
+                        set_error(&mut cmd, "EINVAL: unknown action");
+                        KittyAction::Transmit
+                    }
                 };
             }
             "f" => {
+                cmd.format_explicit = true;
                 cmd.format = match val {
                     "32" => KittyFormat::Rgba32,
                     "24" => KittyFormat::Rgb24,
                     "100" => KittyFormat::Png,
-                    _ => KittyFormat::Rgba32,
+                    _ => {
+                        set_error(&mut cmd, "EINVAL: unknown image format");
+                        KittyFormat::Rgba32
+                    }
                 };
             }
             "t" => {
+                cmd.medium_explicit = true;
                 cmd.medium = match val {
                     "d" => KittyMedium::Direct,
                     "f" => KittyMedium::File,
                     "t" => KittyMedium::TempFile,
                     "s" => KittyMedium::SharedMemory,
-                    _ => KittyMedium::Direct,
+                    _ => {
+                        set_error(&mut cmd, "EINVAL: unknown transmission medium");
+                        KittyMedium::Direct
+                    }
                 };
             }
-            "d" => {
-                delete_selector = Some(val);
-            }
-            "s" => cmd.width = val.parse().ok(),
-            "v" => cmd.height = val.parse().ok(),
+            "o" => match val {
+                "z" => cmd.compression = Some(KittyCompression::Zlib),
+                _ => set_error(&mut cmd, "EINVAL: unknown image compression"),
+            },
+            "d" => delete_selector = Some(val),
+            "s" => match val.parse() {
+                Ok(0) | Err(_) => {
+                    if val.parse::<u32>().is_err() {
+                        set_error(&mut cmd, "EINVAL: invalid image width");
+                    }
+                    cmd.width = None;
+                }
+                Ok(width) => cmd.width = Some(width),
+            },
+            "v" => match val.parse() {
+                Ok(0) | Err(_) => {
+                    if val.parse::<u32>().is_err() {
+                        set_error(&mut cmd, "EINVAL: invalid image height");
+                    }
+                    cmd.height = None;
+                }
+                Ok(height) => cmd.height = Some(height),
+            },
+            "S" => match val.parse() {
+                Ok(0) => cmd.data_size = None,
+                Ok(size) => cmd.data_size = Some(size),
+                Err(_) => set_error(&mut cmd, "EINVAL: invalid data size"),
+            },
+            "O" => match val.parse() {
+                Ok(offset) => cmd.data_offset = offset,
+                Err(_) => set_error(&mut cmd, "EINVAL: invalid data offset"),
+            },
             "i" => {
-                cmd.image_id = val.parse().ok();
                 cmd.id_explicit = true;
+                match val.parse() {
+                    Ok(0) | Err(_) => {
+                        if val.parse::<u32>().is_err() {
+                            set_error(&mut cmd, "EINVAL: invalid image id");
+                        }
+                        cmd.image_id = None;
+                    }
+                    Ok(id) => cmd.image_id = Some(id),
+                }
             }
-            "p" => cmd.placement_id = val.parse().ok(),
-            "c" => cmd.cols = val.parse().ok(),
-            "r" => cmd.rows = val.parse().ok(),
-            "x" => cmd.src_x = val.parse().ok(),
-            "y" => cmd.src_y = val.parse().ok(),
-            "w" => cmd.src_w = val.parse().ok(),
-            "h" => cmd.src_h = val.parse().ok(),
-            "X" => cmd.offset_x = val.parse().unwrap_or(0),
-            "Y" => cmd.offset_y = val.parse().unwrap_or(0),
-            "z" => cmd.z_index = val.parse().unwrap_or(0),
-            "m" => cmd.more_chunks = val == "1",
-            "C" => cmd.do_not_move_cursor = val == "1",
-            "U" => cmd.is_virtual = val == "1",
-            "q" => cmd.quiet = val.parse().unwrap_or(0),
+            "I" => {
+                cmd.number_explicit = true;
+                match val.parse() {
+                    Ok(0) | Err(_) => {
+                        if val.parse::<u32>().is_err() {
+                            set_error(&mut cmd, "EINVAL: invalid image number");
+                        }
+                        cmd.image_number = None;
+                    }
+                    Ok(number) => cmd.image_number = Some(number),
+                }
+            }
+            "p" => match val.parse() {
+                Ok(0) | Err(_) => {
+                    if val.parse::<u32>().is_err() {
+                        set_error(&mut cmd, "EINVAL: invalid placement id");
+                    }
+                    cmd.placement_id = None;
+                }
+                Ok(id) => cmd.placement_id = Some(id),
+            },
+            "c" => match val.parse() {
+                Ok(0) | Err(_) => {
+                    if val.parse::<u32>().is_err() {
+                        set_error(&mut cmd, "EINVAL: invalid column count");
+                    }
+                    cmd.cols = None;
+                }
+                Ok(cols) => cmd.cols = Some(cols),
+            },
+            "r" => match val.parse() {
+                Ok(0) | Err(_) => {
+                    if val.parse::<u32>().is_err() {
+                        set_error(&mut cmd, "EINVAL: invalid row count");
+                    }
+                    cmd.rows = None;
+                }
+                Ok(rows) => cmd.rows = Some(rows),
+            },
+            "x" => match val.parse() {
+                Ok(x) => cmd.src_x = Some(x),
+                Err(_) => set_error(&mut cmd, "EINVAL: invalid source x"),
+            },
+            "y" => match val.parse() {
+                Ok(y) => cmd.src_y = Some(y),
+                Err(_) => set_error(&mut cmd, "EINVAL: invalid source y"),
+            },
+            "w" => match val.parse() {
+                Ok(0) | Err(_) => {
+                    if val.parse::<u32>().is_err() {
+                        set_error(&mut cmd, "EINVAL: invalid source width");
+                    }
+                    cmd.src_w = None;
+                }
+                Ok(width) => cmd.src_w = Some(width),
+            },
+            "h" => match val.parse() {
+                Ok(0) | Err(_) => {
+                    if val.parse::<u32>().is_err() {
+                        set_error(&mut cmd, "EINVAL: invalid source height");
+                    }
+                    cmd.src_h = None;
+                }
+                Ok(height) => cmd.src_h = Some(height),
+            },
+            "X" => match val.parse() {
+                Ok(offset) => cmd.offset_x = offset,
+                Err(_) => set_error(&mut cmd, "EINVAL: invalid x offset"),
+            },
+            "Y" => match val.parse() {
+                Ok(offset) => cmd.offset_y = offset,
+                Err(_) => set_error(&mut cmd, "EINVAL: invalid y offset"),
+            },
+            "z" => match val.parse() {
+                Ok(z) => cmd.z_index = z,
+                Err(_) => set_error(&mut cmd, "EINVAL: invalid z-index"),
+            },
+            "P" => {
+                match val.parse() {
+                    Ok(parent) => cmd.parent_id = Some(parent),
+                    Err(_) => set_error(&mut cmd, "EINVAL: invalid parent image id"),
+                }
+                set_error(&mut cmd, "ENOTSUP: relative placements are not supported");
+            }
+            "m" => match val {
+                "0" => cmd.more_chunks = false,
+                "1" => cmd.more_chunks = true,
+                _ => set_error(&mut cmd, "EINVAL: invalid chunk flag"),
+            },
+            "C" => match val {
+                "0" => cmd.do_not_move_cursor = false,
+                "1" => cmd.do_not_move_cursor = true,
+                _ => set_error(&mut cmd, "EINVAL: invalid cursor flag"),
+            },
+            "U" => match val {
+                "0" => cmd.is_virtual = false,
+                "1" => cmd.is_virtual = true,
+                _ => set_error(&mut cmd, "EINVAL: invalid virtual placement flag"),
+            },
+            "q" => match val {
+                "0" => cmd.quiet = 0,
+                "1" => cmd.quiet = 1,
+                "2" => cmd.quiet = 2,
+                _ => set_error(&mut cmd, "EINVAL: invalid quiet level"),
+            },
+            // Usage hints are advisory; ftty does not need to act on them.
+            "N" => {}
             _ => {}
         }
     }
 
+    if cmd.image_id.is_some() && cmd.image_number.is_some() {
+        set_error(&mut cmd, "EINVAL: both image id and image number specified");
+    }
+
     if let Some(val) = delete_selector {
+        let x = cmd.src_x.unwrap_or(0);
+        let y = cmd.src_y.unwrap_or(0);
         cmd.delete_target = match val {
             "a" => DeleteTarget::All,
             "A" => DeleteTarget::AllAndFree,
-            "c" | "C" => DeleteTarget::AtCursor,
-            "i" => cmd.image_id.map_or(DeleteTarget::All, DeleteTarget::ById),
-            "I" => cmd
-                .image_id
-                .map_or(DeleteTarget::AllAndFree, DeleteTarget::ByIdAndFree),
-            "p" | "P" => cmd
-                .placement_id
-                .map_or(DeleteTarget::All, DeleteTarget::ByPlacement),
-            _ => DeleteTarget::All,
+            "c" => DeleteTarget::AtCursor,
+            "C" => DeleteTarget::AtCursorAndFree,
+            "i" => match (cmd.image_id, cmd.placement_id) {
+                (Some(id), Some(placement)) => DeleteTarget::ByIdPlacement(id, placement),
+                (Some(id), None) => DeleteTarget::ById(id),
+                (None, _) => {
+                    set_error(&mut cmd, "EINVAL: image id required");
+                    DeleteTarget::All
+                }
+            },
+            "I" => match (cmd.image_id, cmd.placement_id) {
+                (Some(id), Some(placement)) => DeleteTarget::ByIdPlacementAndFree(id, placement),
+                (Some(id), None) => DeleteTarget::ByIdAndFree(id),
+                (None, _) => {
+                    set_error(&mut cmd, "EINVAL: image id required");
+                    DeleteTarget::AllAndFree
+                }
+            },
+            "n" | "N" => match cmd.image_number {
+                Some(number) => DeleteTarget::ByNumber {
+                    number,
+                    placement: cmd.placement_id,
+                    free: val == "N",
+                },
+                None => {
+                    set_error(&mut cmd, "EINVAL: image number required");
+                    DeleteTarget::All
+                }
+            },
+            "p" => DeleteTarget::AtAbsoluteCell {
+                x,
+                y,
+                z: None,
+                free: false,
+            },
+            "P" => DeleteTarget::AtAbsoluteCell {
+                x,
+                y,
+                z: None,
+                free: true,
+            },
+            "q" => DeleteTarget::AtAbsoluteCell {
+                x,
+                y,
+                z: Some(cmd.z_index),
+                free: false,
+            },
+            "Q" => DeleteTarget::AtAbsoluteCell {
+                x,
+                y,
+                z: Some(cmd.z_index),
+                free: true,
+            },
+            "r" => DeleteTarget::ByIdRange {
+                lo: x,
+                hi: y,
+                free: false,
+            },
+            "R" => DeleteTarget::ByIdRange {
+                lo: x,
+                hi: y,
+                free: true,
+            },
+            "x" => DeleteTarget::ByColumn { x, free: false },
+            "X" => DeleteTarget::ByColumn { x, free: true },
+            "y" => DeleteTarget::ByRow { y, free: false },
+            "Y" => DeleteTarget::ByRow { y, free: true },
+            "z" => DeleteTarget::ByZIndex(cmd.z_index),
+            "Z" => DeleteTarget::ByZIndexAndFree(cmd.z_index),
+            "f" | "F" => {
+                set_error(&mut cmd, "ENOTSUP: animation is not supported");
+                DeleteTarget::All
+            }
+            _ => {
+                set_error(&mut cmd, "ENOTSUP: unsupported delete selector");
+                DeleteTarget::All
+            }
         };
     } else {
         cmd.delete_target = DeleteTarget::All;
@@ -264,55 +561,38 @@ pub fn parse_control_keys(s: &str) -> KittyCommand {
 #[doc(hidden)]
 pub const MAX_SHM_PAYLOAD: u64 = 32 * 1024 * 1024;
 
+/// Upper bound for a zlib-compressed payload after inflation. This matches the
+/// grid's total image budget so a crafted stream cannot exhaust memory.
+pub const MAX_DECOMPRESSED_PAYLOAD: usize = 64 * 1024 * 1024;
+
 #[doc(hidden)]
 pub fn decode_image_data(id: u32, cmd: &KittyCommand, raw_payload: &[u8]) -> io::Result<ImageData> {
-    let bytes = match cmd.medium {
-        KittyMedium::Direct => {
-            // Direct payload: Base64 encoded data
-            BASE64_STANDARD
-                .decode(raw_payload)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-        }
-        KittyMedium::File | KittyMedium::TempFile => {
-            let path_bytes = BASE64_STANDARD
-                .decode(raw_payload)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            let path_str = std::str::from_utf8(&path_bytes)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            let path = std::path::Path::new(path_str);
-            let data = fs::read(path)?;
-            if cmd.medium == KittyMedium::TempFile {
-                let temp_dir = std::env::temp_dir();
-                // Security: only remove file if it resides in an approved temporary directory
-                if path.starts_with(&temp_dir)
-                    || path.starts_with("/tmp")
-                    || path.starts_with("/dev/shm")
-                {
-                    let _ = fs::remove_file(path);
-                }
-            }
-            data
-        }
-        KittyMedium::SharedMemory => {
-            let name_bytes = BASE64_STANDARD
-                .decode(raw_payload)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            let name_str = std::str::from_utf8(&name_bytes)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            read_shm_payload(name_str)?
-        }
-    };
+    if let Some(error) = cmd.error {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, error));
+    }
 
+    let bytes = read_payload_bytes(cmd, raw_payload)?;
+    let bytes = match cmd.compression {
+        Some(KittyCompression::Zlib) => inflate_zlib(&bytes)?,
+        None => bytes,
+    };
+    decode_image_bytes(id, cmd, bytes)
+}
+
+fn decode_image_bytes(id: u32, cmd: &KittyCommand, bytes: Vec<u8>) -> io::Result<ImageData> {
     match cmd.format {
         KittyFormat::Png => decode_png(id, &bytes),
         KittyFormat::Rgba32 => {
-            let width = cmd.width.ok_or_else(|| {
+            let width = cmd.width.filter(|&w| w > 0).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidInput, "missing width for raw RGBA")
             })?;
-            let height = cmd.height.ok_or_else(|| {
+            let height = cmd.height.filter(|&h| h > 0).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidInput, "missing height for raw RGBA")
             })?;
-            let expected_len = (width as usize) * (height as usize) * 4;
+            let expected_len = (width as usize)
+                .checked_mul(height as usize)
+                .and_then(|size| size.checked_mul(4))
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "image size overflow"))?;
             if bytes.len() != expected_len {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -330,13 +610,16 @@ pub fn decode_image_data(id: u32, cmd: &KittyCommand, raw_payload: &[u8]) -> io:
             })
         }
         KittyFormat::Rgb24 => {
-            let width = cmd.width.ok_or_else(|| {
+            let width = cmd.width.filter(|&w| w > 0).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidInput, "missing width for raw RGB")
             })?;
-            let height = cmd.height.ok_or_else(|| {
+            let height = cmd.height.filter(|&h| h > 0).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidInput, "missing height for raw RGB")
             })?;
-            let expected_len = (width as usize) * (height as usize) * 3;
+            let expected_len = (width as usize)
+                .checked_mul(height as usize)
+                .and_then(|size| size.checked_mul(3))
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "image size overflow"))?;
             if bytes.len() != expected_len {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -358,6 +641,133 @@ pub fn decode_image_data(id: u32, cmd: &KittyCommand, raw_payload: &[u8]) -> io:
             })
         }
     }
+}
+
+fn validate_capability_query(cmd: &KittyCommand, raw_payload: &[u8]) -> io::Result<()> {
+    let bytes = read_payload_bytes(cmd, raw_payload)?;
+    let bytes = match cmd.compression {
+        Some(KittyCompression::Zlib) => inflate_zlib(&bytes)?,
+        None => bytes,
+    };
+    // When the probe supplies image dimensions or a self-describing PNG, validate
+    // the complete image. Otherwise it is a transport/encoding probe (e.g. viuer
+    // testing `t=t` file access without s/v/f) and successful reading is enough.
+    if cmd.format == KittyFormat::Png || cmd.width.is_some() || cmd.height.is_some() {
+        let _ = decode_image_bytes(0, cmd, bytes)?;
+    }
+    Ok(())
+}
+
+fn read_payload_bytes(cmd: &KittyCommand, raw_payload: &[u8]) -> io::Result<Vec<u8>> {
+    match cmd.medium {
+        KittyMedium::Direct => BASE64_STANDARD
+            .decode(raw_payload)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error)),
+        KittyMedium::File | KittyMedium::TempFile => {
+            let path = decode_medium_name(raw_payload)?;
+            let path = std::path::Path::new(&path);
+            let result = read_file_range(path, cmd.data_offset, cmd.data_size);
+            if cmd.medium == KittyMedium::TempFile && is_temp_payload(path) {
+                let _ = fs::remove_file(path);
+            }
+            result
+        }
+        KittyMedium::SharedMemory => {
+            let name = decode_medium_name(raw_payload)?;
+            read_shm_payload_for_image(&name, cmd.data_offset, cmd.data_size)
+        }
+    }
+}
+
+fn decode_medium_name(raw_payload: &[u8]) -> io::Result<String> {
+    let decoded = BASE64_STANDARD
+        .decode(raw_payload)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    String::from_utf8(decoded).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+fn is_temp_payload(path: &std::path::Path) -> bool {
+    let temp_dir = std::env::temp_dir();
+    path.starts_with(&temp_dir) || path.starts_with("/tmp") || path.starts_with("/dev/shm")
+}
+
+fn bounded_read_length(available: u64, requested: Option<u64>) -> io::Result<u64> {
+    let length = requested.filter(|&size| size > 0).unwrap_or(available);
+    if length > MAX_SHM_PAYLOAD {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "payload exceeds the 32 MiB image payload limit",
+        ));
+    }
+    if length > available {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "payload is smaller than the requested data size",
+        ));
+    }
+    Ok(length)
+}
+
+fn read_file_range(path: &std::path::Path, offset: u64, size: Option<u64>) -> io::Result<Vec<u8>> {
+    let mut file = fs::File::open(path)?;
+    let total = file.metadata()?.len();
+    if offset > total {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "payload offset exceeds the file size",
+        ));
+    }
+    let length = bounded_read_length(total - offset, size)?;
+    file.seek(SeekFrom::Start(offset))?;
+    let mut bytes = vec![0; length as usize];
+    file.read_exact(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn read_shm_payload_for_image(name: &str, offset: u64, size: Option<u64>) -> io::Result<Vec<u8>> {
+    let file = fs::File::from(shm_open(name, OFlag::O_RDONLY, Mode::empty())?);
+    // Kitty unlinks a successfully opened client object immediately so the sender
+    // can observe reception and cannot leak names into /dev/shm.
+    let _ = shm_unlink(name);
+    let total = file.metadata()?.len();
+    if offset > total {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "shared memory offset exceeds the object size",
+        ));
+    }
+    let length = bounded_read_length(total - offset, size)?;
+    let mut bytes = vec![0; length as usize];
+    let mut file = file;
+    file.seek(SeekFrom::Start(offset))?;
+    file.read_exact(&mut bytes)?;
+    if file.metadata()?.len() != total {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "shared memory changed size during transfer",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn inflate_zlib(bytes: &[u8]) -> io::Result<Vec<u8>> {
+    let mut decoder = ZlibDecoder::new(bytes);
+    let mut output = Vec::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = decoder.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        if output.len().saturating_add(read) > MAX_DECOMPRESSED_PAYLOAD {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "decompressed image exceeds the 64 MiB limit",
+            ));
+        }
+        output.extend_from_slice(&buffer[..read]);
+    }
+    Ok(output)
 }
 
 #[doc(hidden)]
@@ -398,12 +808,31 @@ pub(crate) fn decode_png(id: u32, bytes: &[u8]) -> io::Result<ImageData> {
     let mut reader = decoder
         .read_info()
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    let mut buf = vec![0; reader.output_buffer_size().unwrap_or(4096)];
+    let output_size = reader
+        .output_buffer_size()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid PNG output size"))?;
+    if output_size > MAX_DECOMPRESSED_PAYLOAD {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "decoded PNG exceeds the 64 MiB limit",
+        ));
+    }
+    let mut buf = vec![0; output_size];
     let info = reader
         .next_frame(&mut buf)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     let width = info.width;
     let height = info.height;
+    if (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .is_none_or(|size| size > MAX_DECOMPRESSED_PAYLOAD)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "PNG dimensions exceed the image budget",
+        ));
+    }
 
     let (color_type, _) = reader.output_color_type();
     let rgba = match color_type {
@@ -476,6 +905,8 @@ pub struct KittyParser {
     chunked_command: Option<KittyCommand>,
     chunked_payload: Vec<u8>,
     next_image_id: u32,
+    /// Latest image id allocated for each client-supplied `I=` image number.
+    image_numbers: HashMap<u32, u32>,
     #[doc(hidden)]
     pub clean_scratch: Vec<u8>,
     #[doc(hidden)]
@@ -486,7 +917,7 @@ pub struct KittyParser {
 #[derive(Debug, PartialEq)]
 pub enum KittyStreamChunk<'a> {
     Text(&'a [u8]),
-    Event(KittyEvent),
+    Event(Box<KittyEvent>),
 }
 
 impl KittyParser {
@@ -537,7 +968,7 @@ impl KittyParser {
                 if byte == 0x07 {
                     self.in_apc = false;
                     if let Some(event) = self.finish_apc() {
-                        callback(KittyStreamChunk::Event(event));
+                        callback(KittyStreamChunk::Event(Box::new(event)));
                     }
                     self.apc_buffer.clear();
                     i += 1;
@@ -547,7 +978,7 @@ impl KittyParser {
                         if bytes[i + 1] == b'\\' {
                             self.in_apc = false;
                             if let Some(event) = self.finish_apc() {
-                                callback(KittyStreamChunk::Event(event));
+                                callback(KittyStreamChunk::Event(Box::new(event)));
                             }
                             self.apc_buffer.clear();
                             i += 2;
@@ -674,7 +1105,7 @@ impl KittyParser {
                 clean.extend_from_slice(text);
             }
             KittyStreamChunk::Event(event) => {
-                events.push(event);
+                events.push(*event);
             }
         });
 
@@ -692,25 +1123,8 @@ impl KittyParser {
         let keys_str = std::str::from_utf8(keys_bytes).ok()?;
         let command = parse_control_keys(keys_str);
 
-        // Capability probing query (a=q)
-        if command.action == KittyAction::Query {
-            let id = command.image_id.unwrap_or(0);
-            return Some(KittyEvent::Response(kitty_response(id, None, "OK")));
-        }
-
-        // Delete action (a=d)
-        if command.action == KittyAction::Delete {
-            return Some(KittyEvent::Delete {
-                target: command.delete_target,
-            });
-        }
-
-        // Placement of existing image (a=p)
-        if command.action == KittyAction::Place {
-            return Some(KittyEvent::Place { command });
-        }
-
-        // Handle chunking (m=1 / m=0)
+        // Resolve chunked commands before dispatching so a chunked query is only
+        // validated once the complete payload has arrived.
         let (full_command, raw_payload) = if command.more_chunks {
             if self.chunked_command.is_none() {
                 self.chunked_command = Some(command);
@@ -726,35 +1140,138 @@ impl KittyParser {
             (command, payload_bytes.to_vec())
         };
 
-        let image_id = full_command.image_id.unwrap_or_else(|| {
-            let id = self.next_image_id;
-            self.next_image_id += 1;
-            id
-        });
+        // Capability probing query (a=q): load and validate, but never store or display.
+        if full_command.action == KittyAction::Query {
+            let Some(id) = full_command.image_id else {
+                // Kitty requires an image id to address the response.
+                return None;
+            };
+            if let Some(error) = full_command.error {
+                return kitty_error_response(&full_command, id, error);
+            }
+            return match validate_capability_query(&full_command, &raw_payload) {
+                Ok(()) => kitty_success_response(&full_command, id, "OK"),
+                Err(error) => kitty_error_response(&full_command, id, &kitty_error_message(&error)),
+            };
+        }
 
-        // Decode payload to raw image data
-        match decode_image_data(image_id, &full_command, &raw_payload) {
-            Ok(image) => {
-                let mut cmd = full_command;
-                cmd.image_id = Some(image_id);
-                Some(KittyEvent::Transmit {
-                    command: cmd,
-                    image,
+        if let Some(error) = full_command.error {
+            let id = full_command
+                .image_id
+                .or_else(|| {
+                    full_command
+                        .image_number
+                        .and_then(|number| self.image_numbers.get(&number).copied())
                 })
+                .unwrap_or(0);
+            return if id == 0 {
+                None
+            } else {
+                kitty_error_response(&full_command, id, error)
+            };
+        }
+
+        if full_command.action == KittyAction::Delete {
+            let target = match full_command.delete_target {
+                DeleteTarget::ByNumber {
+                    number,
+                    placement,
+                    free,
+                } => match self.image_numbers.get(&number).copied() {
+                    Some(id) => match (placement, free) {
+                        (Some(placement), true) => {
+                            DeleteTarget::ByIdPlacementAndFree(id, placement)
+                        }
+                        (Some(placement), false) => DeleteTarget::ByIdPlacement(id, placement),
+                        (None, true) => DeleteTarget::ByIdAndFree(id),
+                        (None, false) => DeleteTarget::ById(id),
+                    },
+                    None => DeleteTarget::ByNumber {
+                        number,
+                        placement,
+                        free,
+                    },
+                },
+                other => other,
+            };
+            return Some(KittyEvent::Delete { target });
+        }
+
+        if full_command.action == KittyAction::Place {
+            let mut command = full_command;
+            if command.image_id.is_none()
+                && let Some(number) = command.image_number
+            {
+                command.image_id = self.image_numbers.get(&number).copied();
             }
-            Err(err) => {
-                if full_command.quiet < 2 {
-                    Some(KittyEvent::Response(kitty_response(
-                        image_id,
-                        full_command.placement_id,
-                        &err.to_string(),
-                    )))
-                } else {
-                    None
+            let Some(id) = command.image_id else {
+                return kitty_error_response(&command, 0, "ENOENT:image not found");
+            };
+            command.image_id = Some(id);
+            return Some(KittyEvent::Place { command });
+        }
+
+        let mut command = full_command;
+        let image_id = command.image_id.unwrap_or_else(|| self.allocate_image_id());
+        command.image_id = Some(image_id);
+
+        match decode_image_data(image_id, &command, &raw_payload) {
+            Ok(image) => {
+                if let Some(number) = command.image_number {
+                    self.image_numbers.insert(number, image_id);
                 }
+                Some(KittyEvent::Transmit { command, image })
             }
+            Err(error) => kitty_error_response(&command, image_id, &kitty_error_message(&error)),
         }
     }
+
+    fn allocate_image_id(&mut self) -> u32 {
+        let id = self.next_image_id.max(1);
+        self.next_image_id = id.wrapping_add(1).max(1);
+        id
+    }
+}
+
+fn kitty_error_message(error: &io::Error) -> String {
+    let code = match error.kind() {
+        io::ErrorKind::NotFound => "ENOENT",
+        io::ErrorKind::Unsupported => "ENOTSUP",
+        _ => "EINVAL",
+    };
+    format!("{code}: {error}")
+}
+
+fn kitty_success_response(
+    command: &KittyCommand,
+    image_id: u32,
+    message: &str,
+) -> Option<KittyEvent> {
+    if command.quiet > 0 {
+        return None;
+    }
+    Some(KittyEvent::Response(kitty_response_full(
+        image_id,
+        command.image_number,
+        command.placement_id,
+        message,
+    )))
+}
+
+fn kitty_error_response(
+    command: &KittyCommand,
+    image_id: u32,
+    message: &str,
+) -> Option<KittyEvent> {
+    if command.quiet > 1 {
+        return None;
+    }
+    Some(KittyEvent::Response(kitty_response_full(
+        image_id,
+        command.image_number,
+        command.placement_id,
+        message,
+    )))
 }
 
 /// Encodes a Kitty graphics acknowledgement for an image and optional placement id.
@@ -762,12 +1279,37 @@ impl KittyParser {
 /// The wire format is `<ESC>_Gi=<id>[,p=<placement id>];<message><ESC>\\` per official Kitty graphics specification.
 #[must_use]
 pub fn kitty_response(image_id: u32, placement_id: Option<u32>, message: &str) -> Vec<u8> {
-    match placement_id.filter(|id| *id != 0) {
-        Some(placement_id) => {
-            format!("\x1b_Gi={image_id},p={placement_id};{message}\x1b\\").into_bytes()
-        }
-        None => format!("\x1b_Gi={image_id};{message}\x1b\\").into_bytes(),
+    kitty_response_full(image_id, None, placement_id, message)
+}
+
+/// Encodes a Kitty acknowledgement including an optional `I=` image number.
+#[must_use]
+pub fn kitty_response_full(
+    image_id: u32,
+    image_number: Option<u32>,
+    placement_id: Option<u32>,
+    message: &str,
+) -> Vec<u8> {
+    let mut control = String::new();
+    if image_id != 0 {
+        control.push_str(&format!("i={image_id}"));
     }
+    if let Some(number) = image_number.filter(|number| *number != 0) {
+        if !control.is_empty() {
+            control.push(',');
+        }
+        control.push_str(&format!("I={number}"));
+    }
+    if let Some(placement_id) = placement_id.filter(|id| *id != 0) {
+        if !control.is_empty() {
+            control.push(',');
+        }
+        control.push_str(&format!("p={placement_id}"));
+    }
+    if control.is_empty() {
+        control.push_str("i=0");
+    }
+    format!("\x1b_G{control};{message}\x1b\\").into_bytes()
 }
 
 pub mod command {
@@ -776,11 +1318,14 @@ pub mod command {
 
 pub mod model {
     pub use super::{
-        DeleteTarget, ImageData, ImagePlacement, KittyAction, KittyCommand, KittyEvent,
-        KittyFormat, KittyMedium,
+        DeleteTarget, ImageData, ImagePlacement, KittyAction, KittyCommand, KittyCompression,
+        KittyEvent, KittyFormat, KittyMedium,
     };
 }
 
 pub mod payload {
-    pub use super::{MAX_SHM_PAYLOAD, decode_image_data, read_shm_bytes, read_shm_payload};
+    pub use super::{
+        MAX_DECOMPRESSED_PAYLOAD, MAX_SHM_PAYLOAD, decode_image_data, read_shm_bytes,
+        read_shm_payload,
+    };
 }

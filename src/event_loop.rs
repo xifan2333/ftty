@@ -21,7 +21,7 @@ use crate::font::{CellMetrics, FontManager, GlyphAtlas};
 use crate::input::ime::ImeState;
 use crate::input::selection::{Selection, SelectionPoint, SelectionType};
 use crate::input::{KeyAction, KeyboardHandler};
-use crate::kitty::{ImagePlacement, KittyAction, KittyEvent, KittyParser, kitty_response};
+use crate::kitty::{ImagePlacement, KittyAction, KittyEvent, KittyParser, kitty_response_full};
 use crate::parser::Terminal;
 use crate::pty::Pty;
 use crate::render::{ColorScheme, HoveredHyperlinkSpan, RenderOptions, Renderer};
@@ -395,10 +395,10 @@ pub fn run_event_loop_with_connection(
                                             state.process_terminal_output(text, &pty_qh);
                                         }
                                         crate::kitty::KittyStreamChunk::Event(event) => {
-                                            if let KittyEvent::Response(resp) = &event {
+                                            if let KittyEvent::Response(resp) = event.as_ref() {
                                                 state.write_pty_blocking(resp);
                                             } else {
-                                                state.handle_kitty_event(event);
+                                                state.handle_kitty_event(*event);
                                             }
                                         }
                                     });
@@ -1096,9 +1096,10 @@ impl AppState {
                 }
 
                 let wants_ack = command.action == KittyAction::TransmitAndDisplayWithResponse
-                    || command.id_explicit;
+                    || command.id_explicit
+                    || command.number_explicit;
                 if wants_ack && command.quiet == 0 {
-                    let resp = kitty_response(image_id, ack_id, "OK");
+                    let resp = kitty_response_full(image_id, command.image_number, ack_id, "OK");
                     self.write_pty_blocking(&resp);
                 }
             }
@@ -1110,7 +1111,12 @@ impl AppState {
                 let ack_id = command.placement_id.filter(|id| *id != 0);
                 let Some(image) = self.terminal.grid.images.get(&image_id) else {
                     if command.quiet < 2 {
-                        let resp = kitty_response(image_id, ack_id, "ENOENT:image not found");
+                        let resp = kitty_response_full(
+                            image_id,
+                            command.image_number,
+                            ack_id,
+                            "ENOENT:image not found",
+                        );
                         self.write_pty_blocking(&resp);
                     }
                     return;
@@ -1179,9 +1185,10 @@ impl AppState {
                     );
                 }
                 let wants_ack = command.action == KittyAction::TransmitAndDisplayWithResponse
-                    || (command.id_explicit && command.quiet == 0);
-                if wants_ack {
-                    let resp = kitty_response(image_id, ack_id, "OK");
+                    || command.id_explicit
+                    || command.number_explicit;
+                if wants_ack && command.quiet == 0 {
+                    let resp = kitty_response_full(image_id, command.image_number, ack_id, "OK");
                     self.write_pty_blocking(&resp);
                 }
             }

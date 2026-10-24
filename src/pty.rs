@@ -82,10 +82,11 @@ impl Pty {
             .env("TERM_PROGRAM", "ftty")
             .env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"))
             .env("KITTY_WINDOW_ID", "1")
+            .env("KITTY_PID", std::process::id().to_string())
+            .env_remove("KITTY_LISTEN_ON")
             .env_remove("WEZTERM_EXECUTABLE")
             .env_remove("WEZTERM_PANE")
             .env_remove("WEZTERM_UNIX_SOCKET")
-            .env_remove("KITTY_PID")
             .env_remove("ALACRITTY_WINDOW_ID")
             .env_remove("ALACRITTY_LOG")
             .env_remove("KONSOLE_VERSION")
@@ -217,7 +218,7 @@ mod tests {
             Some(&[
                 "/bin/sh",
                 "-c",
-                "test -t 0 && test -t 1 && test -t 2 && stty size </dev/tty && printf '%s|%s\\n' \"$TERM\" \"$COLORTERM\"",
+                "test -t 0 && test -t 1 && test -t 2 && stty size </dev/tty && printf '%s|%s|%s|%s\\n' \"$TERM\" \"$COLORTERM\" \"$KITTY_WINDOW_ID\" \"$KITTY_PID\"",
             ]),
             80,
             24,
@@ -255,7 +256,13 @@ mod tests {
             output.contains("24 80"),
             "missing controlling TTY: {output:?}"
         );
-        assert!(output.contains("xterm-256color|truecolor"), "{output:?}");
+        assert!(
+            output.contains(&format!(
+                "xterm-256color|truecolor|1|{}",
+                std::process::id()
+            )),
+            "{output:?}"
+        );
         assert_eq!(std::env::var_os("TERM"), parent_term);
         assert_eq!(std::env::var_os("COLORTERM"), parent_colorterm);
     }
