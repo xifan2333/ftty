@@ -1261,12 +1261,16 @@ impl Selection {
             }
 
             line_str.clear();
-            for cell in &row.cells[start_col..end_col] {
+            for (offset, cell) in row.cells[start_col..end_col].iter().enumerate() {
                 if !cell
                     .flags
                     .intersects(CellFlags::WIDE_CHAR_SPACER | CellFlags::WRAP_SPACER)
                 {
-                    line_str.push(cell.c);
+                    if let Some(text) = row.cluster_text(start_col + offset) {
+                        line_str.push_str(text);
+                    } else {
+                        line_str.push(cell.c);
+                    }
                 }
             }
 
