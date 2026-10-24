@@ -1389,6 +1389,13 @@ pub(crate) fn visible_glyph(cell: &Cell) -> bool {
             .intersects(CellFlags::HIDDEN | CellFlags::WIDE_CHAR_SPACER | CellFlags::WRAP_SPACER)
 }
 
+/// Formatting code points that should never be rasterized on their own.
+fn is_cluster_format(c: char) -> bool {
+    matches!(c, '\u{200D}' | '\u{FE0E}' | '\u{FE0F}')
+        || ('\u{E0020}'..='\u{E007F}').contains(&c)
+        || ('\u{1F3FB}'..='\u{1F3FF}').contains(&c)
+}
+
 #[doc(hidden)]
 pub fn prepare_atlas(
     grid: &Grid,
@@ -1416,11 +1423,21 @@ pub fn prepare_atlas(
             if !line.dirty.get() && attempt == 0 && !repacked {
                 continue;
             }
-            for cell in line.cells.iter().filter(|cell| visible_glyph(cell)) {
-                if crate::render::box_drawing::is_procedural_glyph(cell.c) {
+            for (col, cell) in line.cells.iter().enumerate() {
+                if !visible_glyph(cell) {
                     continue;
                 }
-                full |= atlas.get_or_insert(cell.c, cell.flags, fonts).is_none();
+                if !crate::render::box_drawing::is_procedural_glyph(cell.c) {
+                    full |= atlas.get_or_insert(cell.c, cell.flags, fonts).is_none();
+                }
+                if let Some(cluster) = line.cluster_text(col) {
+                    for extra in cluster.chars().skip(1) {
+                        if is_cluster_format(extra) {
+                            continue;
+                        }
+                        full |= atlas.get_or_insert(extra, cell.flags, fonts).is_none();
+                    }
+                }
             }
         }
         if !full || attempt == 1 {
@@ -1700,6 +1717,40 @@ pub fn build_row_foregrounds(vertices: &mut Vec<f32>, row: usize, ctx: &RenderCo
                 }
             }
         }
+        if let Some(cluster) = line.cluster_text(col) {
+            for extra in cluster.chars().skip(1) {
+                if is_cluster_format(extra) {
+                    continue;
+                }
+                let extra_width = crate::width::wcwidth(extra, grid.ambiguous_width);
+                if extra_width >= 2 {
+                    continue;
+                }
+                let Some(glyph) = atlas.get(extra, cell.flags, fonts) else {
+                    continue;
+                };
+                if glyph.width == 0 || glyph.height == 0 {
+                    continue;
+                }
+                let origin = if extra_width <= 0 {
+                    x + width * 0.5
+                } else {
+                    x + cw
+                };
+                let gx = (origin + glyph.offset_x as f32).round();
+                let gy = (y + metrics.ascent as f32 - glyph.offset_y as f32 - glyph.height as f32)
+                    .round();
+                let [u, v] = glyph.position.map(|value| value as f32);
+                let w = glyph.width as f32;
+                let h = glyph.height as f32;
+                push_quad(
+                    vertices,
+                    [gx, gy, gx + w, gy + h],
+                    [[u, v], [u + w, v + h]],
+                    color,
+                );
+            }
+        }
         let has_explicit_underline = cell.flags.contains(CellFlags::UNDERLINE);
         let has_hover_underline = (cell.hyperlink_id.is_some() || cell.c != ' ')
             && options.hovered_span.is_some_and(|span| {
@@ -1849,7 +1900,8 @@ pub fn build_dynamic_overlays(vertices: &mut Vec<f32>, ctx: &RenderContext<'_>) 
                 if remaining_cols == 0 {
                     break;
                 }
-                let char_width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(1);
+                let char_width =
+                    crate::width::wcwidth(c, grid.ambiguous_width).clamp(0, 2) as usize;
                 let visible_cols = char_width.min(remaining_cols);
                 let px = pad_x + cur_col as f32 * cw;
                 let py = pad_y + crow as f32 * ch;

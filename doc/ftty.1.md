@@ -268,6 +268,9 @@ Unless overridden in `[keybindings]`, the following bindings are active by defau
 **Terminal identification**
 : Replies to XTVERSION (`CSI > q`) with `DCS >|ftty-kitty(VERSION) ST`. The `ftty-kitty` name allows clients that identify Kitty graphics support by terminal name (for example **timg(1)** and **yazi(1)**) to select the Kitty renderer. Primary Device Attributes (`CSI c`) advertise the OSC 52 extension (`52`) when clipboard writes are enabled.
 
+**Unicode text width**
+: Character-cell allocation follows the python-wcwidth `wcswidth()` reference model used by **ucs-detect(1)**. Emoji ZWJ sequences, variation selectors 15/16, regional-indicator flags, Fitzpatrick modifiers, spacing marks (`Mc`), and virama conjuncts are measured as grapheme clusters capped at two cells; combining marks are retained with their base cell. East Asian Ambiguous characters default to one cell.
+
 **Wayland text-input-v3 (IME)**
 : Fully integrates Wayland `zwp_text_input_v3` protocol for input method engines such as **fcitx5(1)**. Accurately reports cursor rectangle coordinates in surface space to position candidate popup windows, with native preedit text rendering and styling.
 

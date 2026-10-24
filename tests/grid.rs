@@ -973,7 +973,8 @@ fn test_ascii_fast_path_writing_and_wrapping() {
 #[test]
 fn test_cell_memory_footprint() {
     assert!(std::mem::size_of::<ftty::grid::Cell>() <= 24);
-    assert!(std::mem::size_of::<ftty::grid::Row>() <= 40);
+    // One extra pointer tracks lazily allocated grapheme-cluster text for complex rows.
+    assert!(std::mem::size_of::<ftty::grid::Row>() <= 48);
 }
 
 #[test]
@@ -1567,4 +1568,177 @@ fn test_bce_erase_wide_character_boundaries() {
             .contains(CellFlags::WIDE_CHAR_SPACER)
     );
     assert_eq!(grid.lines[1].cells[9].bg, red_bg);
+}
+
+#[test]
+fn test_grapheme_cluster_widths_follow_python_wcswidth() {
+    let fg = Color::DefaultForeground;
+    let bg = Color::DefaultBackground;
+
+    // Family ZWJ sequence: two cells, one cluster, cursor advances by two.
+    let mut grid = Grid::new(20, 2, 0);
+    for c in "👨\u{200d}👩\u{200d}👧\u{200d}👦".chars() {
+        grid.write_char(c, fg, bg, CellFlags::empty());
+    }
+    assert_eq!(grid.cursor.col, 2);
+    assert!(grid.lines[0].cells[0].flags.contains(CellFlags::WIDE_CHAR));
+    assert!(
+        grid.lines[0].cells[1]
+            .flags
+            .contains(CellFlags::WIDE_CHAR_SPACER)
+    );
+    assert_eq!(
+        grid.lines[0].cluster_text(0),
+        Some("👨\u{200d}👩\u{200d}👧\u{200d}👦")
+    );
+
+    // VS16 widens a narrow base and narrows matching state.
+    let mut grid = Grid::new(10, 1, 0);
+    for c in "❤\u{fe0f}".chars() {
+        grid.write_char(c, fg, bg, CellFlags::empty());
+    }
+    assert_eq!(grid.cursor.col, 2);
+    assert_eq!(grid.lines[0].cluster_text(0), Some("❤\u{fe0f}"));
+
+    let mut grid = Grid::new(10, 1, 0);
+    for c in "⌚\u{fe0e}".chars() {
+        grid.write_char(c, fg, bg, CellFlags::empty());
+    }
+    assert_eq!(grid.cursor.col, 1);
+    assert!(!grid.lines[0].cells[0].flags.contains(CellFlags::WIDE_CHAR));
+
+    // Regional-indicator flags and Fitzpatrick modifiers stay in one double cell.
+    let mut grid = Grid::new(10, 1, 0);
+    for c in "🇺🇸".chars() {
+        grid.write_char(c, fg, bg, CellFlags::empty());
+    }
+    assert_eq!(grid.cursor.col, 2);
+    assert_eq!(grid.lines[0].cluster_text(0), Some("🇺🇸"));
+
+    let mut grid = Grid::new(10, 1, 0);
+    for c in "👍🏽".chars() {
+        grid.write_char(c, fg, bg, CellFlags::empty());
+    }
+    assert_eq!(grid.cursor.col, 2);
+    assert_eq!(grid.lines[0].cluster_text(0), Some("👍🏽"));
+
+    // Spacing marks cap the cluster at two cells instead of disappearing.
+    let mut grid = Grid::new(10, 1, 0);
+    for c in "कि".chars() {
+        grid.write_char(c, fg, bg, CellFlags::empty());
+    }
+    assert_eq!(grid.cursor.col, 2);
+    assert_eq!(grid.lines[0].cluster_text(0), Some("कि"));
+
+    // Virama conjuncts also cap at two cells.
+    let mut grid = Grid::new(10, 1, 0);
+    for c in "क्न".chars() {
+        grid.write_char(c, fg, bg, CellFlags::empty());
+    }
+    assert_eq!(grid.cursor.col, 2);
+    assert_eq!(grid.lines[0].cluster_text(0), Some("क्न"));
+}
+
+#[test]
+fn test_ambiguous_width_is_configurable() {
+    let fg = Color::DefaultForeground;
+    let bg = Color::DefaultBackground;
+    let mut grid = Grid::new(10, 1, 0);
+    grid.write_char('¡', fg, bg, CellFlags::empty());
+    assert_eq!(grid.cursor.col, 1);
+    grid.set_ambiguous_width(2);
+    grid.write_char('¡', fg, bg, CellFlags::empty());
+    assert_eq!(grid.cursor.col, 3);
+    assert!(grid.lines[0].cells[1].flags.contains(CellFlags::WIDE_CHAR));
+}
+
+#[test]
+fn test_grapheme_clusters_survive_edits_reflow_and_extraction() {
+    let fg = Color::DefaultForeground;
+    let bg = Color::DefaultBackground;
+    let family = "👨\u{200d}👩\u{200d}👧\u{200d}👦";
+
+    let mut grid = Grid::new(10, 2, 100);
+    for c in family.chars() {
+        grid.write_char(c, fg, bg, CellFlags::empty());
+    }
+    grid.write_char('X', fg, bg, CellFlags::empty());
+    assert_eq!(grid.extract_visible_text(), format!("{family}X\n\n"));
+
+    // Insert/delete/erase move the cluster text with its root cell.
+    grid.cursor.col = 0;
+    grid.insert_blank_chars(1);
+    assert_eq!(grid.lines[0].cluster_text(1), Some(family));
+    grid.delete_chars(1);
+    assert_eq!(grid.lines[0].cluster_text(0), Some(family));
+    grid.cursor.col = 0;
+    grid.erase_chars(2);
+    assert_eq!(grid.lines[0].cluster_text(0), None);
+    assert_eq!(grid.lines[0].cells[0].c, ' ');
+
+    // Reflow keeps cluster text attached while wrapping and growing back.
+    let mut grid = Grid::new(10, 2, 100);
+    for c in family.chars() {
+        grid.write_char(c, fg, bg, CellFlags::empty());
+    }
+    grid.resize(1, 2);
+    grid.resize(10, 2);
+    assert_eq!(grid.visible_line(0).cluster_text(0), Some(family));
+    assert_eq!(grid.cursor.col, 2);
+}
+
+#[test]
+fn test_ascii_run_then_combining_mark_stays_in_one_cluster() {
+    let fg = Color::DefaultForeground;
+    let bg = Color::DefaultBackground;
+    let mut grid = Grid::new(10, 1, 0);
+    grid.write_ascii_run(
+        b"e",
+        fg,
+        bg,
+        CellFlags::empty(),
+        Color::DefaultForeground,
+        None,
+    );
+    grid.write_char('\u{0301}', fg, bg, CellFlags::empty());
+    assert_eq!(grid.cursor.col, 1);
+    assert_eq!(grid.lines[0].cluster_text(0), Some("e\u{0301}"));
+}
+
+#[test]
+fn test_grid_cursor_matches_wcswidth_reference_corpus() {
+    fn hex_to_string(hex: &str) -> String {
+        let hex = hex.as_bytes();
+        let bytes: Vec<u8> = hex
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| {
+                let text = std::str::from_utf8(pair).unwrap();
+                u8::from_str_radix(text, 16).unwrap()
+            })
+            .collect();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    let fg = Color::DefaultForeground;
+    let bg = Color::DefaultBackground;
+    for line in include_str!("data/width_cases.txt").lines() {
+        let (hex, expected) = line.split_once('\t').unwrap();
+        let expected: i32 = expected.parse().unwrap();
+        if expected < 0 {
+            continue;
+        }
+        let text = hex_to_string(hex);
+        let mut grid = Grid::new(256, 1, 0);
+        for c in text.chars() {
+            grid.write_char(c, fg, bg, CellFlags::empty());
+        }
+        assert_eq!(
+            grid.cursor.col as i32,
+            expected,
+            "cursor mismatch for {}",
+            text.escape_unicode()
+        );
+    }
 }

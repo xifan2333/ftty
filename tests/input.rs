@@ -971,6 +971,28 @@ mod selection_tests {
     }
 
     #[test]
+    fn test_selection_extracts_complete_grapheme_clusters() {
+        use ftty::grid::CellFlags;
+
+        let mut grid = Grid::new(20, 1, 0);
+        let family = "👨\u{200d}👩\u{200d}👧\u{200d}👦";
+        for c in family.chars() {
+            grid.write_char(
+                c,
+                ftty::color::Color::DefaultForeground,
+                ftty::color::Color::DefaultBackground,
+                CellFlags::empty(),
+            );
+        }
+        let sel = Selection::new(
+            SelectionPoint::new(0, 0),
+            SelectionPoint::new(0, 1),
+            SelectionType::Simple,
+        );
+        assert_eq!(sel.extract_text(&grid), family);
+    }
+
+    #[test]
     fn test_selection_line_span() {
         let sel = Selection::new(
             SelectionPoint::new(1, 5),
