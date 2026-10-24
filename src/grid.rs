@@ -2,10 +2,10 @@
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::num::NonZeroU32;
-use unicode_width::UnicodeWidthChar;
 
 use crate::color::Color;
 use crate::kitty::{DeleteTarget, ImageData, ImagePlacement};
+use crate::width::{WidthAction, WidthState};
 
 // --- Cell & Row ---
 
@@ -146,6 +146,8 @@ pub type PlaceholderMap = HashMap<usize, (u16, u16, u8)>;
 pub struct Row {
     pub cells: Vec<Cell>,
     pub placeholders: Option<Box<PlaceholderMap>>,
+    /// Full grapheme-cluster text for cells that contain more than one code point.
+    pub clusters: Option<Box<HashMap<usize, String>>>,
     pub wrapped: bool,
     pub dirty: DirtyCell<bool>,
 }
@@ -156,6 +158,7 @@ impl Row {
         Self {
             cells: vec![Cell::default(); cols],
             placeholders: None,
+            clusters: None,
             wrapped: false,
             dirty: DirtyCell::new(true),
         }
@@ -170,12 +173,19 @@ impl Row {
                     .contains(CellFlags::WIDE_CHAR)
             {
                 self.cells[new_cols - 1] = Cell::default();
+                self.clear_cluster(new_cols - 1);
             }
             self.cells.truncate(new_cols);
             if let Some(coords) = &mut self.placeholders {
                 coords.retain(|&col, _| col < new_cols);
                 if coords.is_empty() {
                     self.placeholders = None;
+                }
+            }
+            if let Some(clusters) = &mut self.clusters {
+                clusters.retain(|&col, _| col < new_cols);
+                if clusters.is_empty() {
+                    self.clusters = None;
                 }
             }
             self.dirty.set(true);
@@ -190,6 +200,7 @@ impl Row {
         Self {
             cells: vec![Cell::blank(bg); cols],
             placeholders: None,
+            clusters: None,
             wrapped: false,
             dirty: DirtyCell::new(true),
         }
@@ -202,8 +213,100 @@ impl Row {
     pub fn reset_with_bg(&mut self, bg: Color) {
         self.cells.fill(Cell::blank(bg));
         self.placeholders = None;
+        self.clusters = None;
         self.wrapped = false;
         self.dirty.set(true);
+    }
+
+    /// Returns the full grapheme-cluster text for `col` when it spans multiple code points.
+    #[must_use]
+    pub fn cluster_text(&self, col: usize) -> Option<&str> {
+        self.clusters
+            .as_ref()
+            .and_then(|clusters| clusters.get(&col))
+            .map(String::as_str)
+    }
+
+    /// Appends a code point to the cluster rooted at `col`, creating storage if needed.
+    pub fn append_cluster_char(&mut self, col: usize, c: char) {
+        if col >= self.cells.len() {
+            return;
+        }
+        let clusters = self
+            .clusters
+            .get_or_insert_with(|| Box::new(HashMap::new()));
+        let text = clusters
+            .entry(col)
+            .or_insert_with(|| self.cells[col].c.to_string());
+        text.push(c);
+        self.dirty.set(true);
+    }
+
+    /// Stores complete cluster text for a cell (used by reflow).
+    pub fn set_cluster_text(&mut self, col: usize, text: String) {
+        if col >= self.cells.len() || text.chars().count() <= 1 {
+            return;
+        }
+        self.clusters
+            .get_or_insert_with(|| Box::new(HashMap::new()))
+            .insert(col, text);
+        self.dirty.set(true);
+    }
+
+    pub fn clear_cluster(&mut self, col: usize) {
+        if let Some(clusters) = &mut self.clusters {
+            clusters.remove(&col);
+            if clusters.is_empty() {
+                self.clusters = None;
+            }
+        }
+    }
+
+    pub fn clear_clusters_range(&mut self, start: usize, end: usize) {
+        if let Some(clusters) = &mut self.clusters {
+            clusters.retain(|&col, _| col < start || col >= end);
+            if clusters.is_empty() {
+                self.clusters = None;
+            }
+        }
+    }
+
+    fn shift_clusters(&mut self, start: usize, end: usize, delta: isize) {
+        let Some(clusters) = &mut self.clusters else {
+            return;
+        };
+        let mut shifted = HashMap::with_capacity(clusters.len());
+        for (&col, text) in clusters.iter() {
+            let target = if col >= start && col < end {
+                if delta >= 0 {
+                    col + delta as usize
+                } else {
+                    match col.checked_sub(delta.unsigned_abs()) {
+                        Some(target) => target,
+                        None => continue,
+                    }
+                }
+            } else {
+                col
+            };
+            if target < self.cells.len() {
+                shifted.insert(target, text.clone());
+            }
+        }
+        if shifted.is_empty() {
+            self.clusters = None;
+        } else {
+            self.clusters = Some(Box::new(shifted));
+        }
+        self.dirty.set(true);
+    }
+
+    pub fn shift_clusters_right(&mut self, start: usize, count: usize) {
+        self.shift_clusters(start, self.cells.len(), count as isize);
+    }
+
+    pub fn shift_clusters_left(&mut self, start: usize, count: usize) {
+        self.shift_clusters(start, self.cells.len(), -(count as isize));
     }
 }
 
@@ -583,6 +686,13 @@ pub struct Grid {
     // Recycling pool for evicted or discarded rows to eliminate Vec<Cell> allocations.
     #[doc(hidden)]
     pub row_pool: Vec<Row>,
+
+    /// Incremental grapheme width state for contiguous printed text.
+    pub(crate) width_state: WidthState,
+    /// Root cell of the grapheme cluster currently receiving attachments.
+    pub(crate) cluster_anchor: Option<(usize, usize)>,
+    /// Width model for East Asian Ambiguous characters.
+    pub(crate) ambiguous_width: u8,
 }
 
 impl Grid {
@@ -616,6 +726,9 @@ impl Grid {
             alt_saved_cursor: None,
             alt_placements: Vec::new(),
             row_pool: Vec::new(),
+            width_state: WidthState::new(),
+            cluster_anchor: None,
+            ambiguous_width: crate::width::AMBIGUOUS_NARROW,
         }
     }
 
@@ -923,6 +1036,7 @@ impl Grid {
     }
 
     pub fn enter_alt_screen(&mut self) {
+        self.reset_width_state();
         if self.alt_lines.is_none() {
             let alt = (0..self.rows).map(|_| Row::new(self.cols)).collect();
             self.alt_lines = Some(std::mem::replace(&mut self.lines, alt));
@@ -938,6 +1052,7 @@ impl Grid {
 
     /// Restores the primary screen buffer.
     pub fn exit_alt_screen(&mut self) {
+        self.reset_width_state();
         if let Some(primary) = self.alt_lines.take() {
             self.lines = primary;
             if let Some(cursor) = self.alt_cursor.take() {
@@ -1205,12 +1320,16 @@ impl Grid {
         for r in 0..self.rows {
             let row = self.visible_line(r);
             line_str.clear();
-            for cell in &row.cells {
+            for (col, cell) in row.cells.iter().enumerate() {
                 if !cell
                     .flags
                     .intersects(CellFlags::WIDE_CHAR_SPACER | CellFlags::WRAP_SPACER)
                 {
-                    line_str.push(cell.c);
+                    if let Some(text) = row.cluster_text(col) {
+                        line_str.push_str(text);
+                    } else {
+                        line_str.push(cell.c);
+                    }
                 }
             }
             if row.wrapped {
@@ -1230,12 +1349,16 @@ impl Grid {
         let mut line_str = String::with_capacity(self.cols);
         for row in self.scrollback.iter().chain(self.lines.iter()) {
             line_str.clear();
-            for cell in &row.cells {
+            for (col, cell) in row.cells.iter().enumerate() {
                 if !cell
                     .flags
                     .intersects(CellFlags::WIDE_CHAR_SPACER | CellFlags::WRAP_SPACER)
                 {
-                    line_str.push(cell.c);
+                    if let Some(text) = row.cluster_text(col) {
+                        line_str.push_str(text);
+                    } else {
+                        line_str.push(cell.c);
+                    }
                 }
             }
             if row.wrapped {
@@ -1270,6 +1393,7 @@ impl Grid {
 
     /// Scrolls lines inside the active scroll region upward with the specified background color (BCE).
     pub fn scroll_up_with_bg(&mut self, count: usize, bg: Color) {
+        self.reset_width_state();
         let region_len = self
             .scroll_region_bottom
             .saturating_sub(self.scroll_region_top)
@@ -1342,6 +1466,7 @@ impl Grid {
 
     /// Scrolls lines inside the active scroll region downward with the specified background color (BCE).
     pub fn scroll_down_with_bg(&mut self, count: usize, bg: Color) {
+        self.reset_width_state();
         let region_len = self
             .scroll_region_bottom
             .saturating_sub(self.scroll_region_top)
@@ -1382,12 +1507,14 @@ impl Grid {
 
     /// Clears part or all of the active display screen with the specified background color (BCE).
     pub fn clear_screen_with_bg(&mut self, mode: ClearMode, bg: Color) {
+        self.reset_width_state();
         let blank_cell = Cell::blank(bg);
         match mode {
             ClearMode::Below => {
                 if self.cursor.row < self.rows {
                     let col = self.cursor.col;
                     self.lines[self.cursor.row].cells[col..].fill(blank_cell);
+                    self.lines[self.cursor.row].clear_clusters_range(col, self.cols);
                     for row in &mut self.lines[self.cursor.row + 1..] {
                         row.reset_with_bg(bg);
                     }
@@ -1401,6 +1528,7 @@ impl Grid {
                     }
                     let col = (self.cursor.col + 1).min(self.cols);
                     self.lines[self.cursor.row].cells[..col].fill(blank_cell);
+                    self.lines[self.cursor.row].clear_clusters_range(0, col);
                     self.lines[self.cursor.row].dirty.set(true);
                 }
             }
@@ -1468,6 +1596,7 @@ impl Grid {
         if self.cursor.row >= self.rows {
             return;
         }
+        self.reset_width_state();
         let blank_cell = Cell::blank(bg);
         let row = &mut self.lines[self.cursor.row];
         match mode {
@@ -1477,6 +1606,7 @@ impl Grid {
                     start -= 1;
                 }
                 row.cells[start..].fill(blank_cell);
+                row.clear_clusters_range(start, self.cols);
             }
             ClearMode::Above => {
                 let mut end = (self.cursor.col + 1).min(self.cols);
@@ -1484,6 +1614,7 @@ impl Grid {
                     end += 1;
                 }
                 row.cells[..end].fill(blank_cell);
+                row.clear_clusters_range(0, end);
             }
             ClearMode::All | ClearMode::Saved => {
                 row.reset_with_bg(bg);
@@ -1508,16 +1639,36 @@ impl Grid {
         hyperlink_id: Option<u32>,
     ) {
         let hl_id = hyperlink_id.and_then(std::num::NonZeroU32::new);
+        self.ensure_width_continuity();
         let mut rest = text;
+
+        // A run normally starts fresh cells, but a pending ZWJ or virama changes the
+        // first character's fate; let the grapheme state machine decide those.
+        while !rest.is_empty()
+            && (self.width_state.skip_next() || self.width_state.prev_was_virama())
+        {
+            self.write_char_styled(
+                rest[0] as char,
+                fg,
+                bg,
+                flags,
+                underline_color,
+                hyperlink_id,
+            );
+            rest = &rest[1..];
+        }
+
         while !rest.is_empty() {
             if self.cursor.col >= self.cols {
                 self.lines[self.cursor.row].wrapped = true;
                 self.newline_with_bg(bg);
                 self.cursor.col = 0;
+                self.reset_width_state();
             }
 
             let row = self.cursor.row;
             if row >= self.rows {
+                self.reset_width_state();
                 break;
             }
 
@@ -1542,6 +1693,7 @@ impl Grid {
                     hyperlink_id: hl_id,
                 };
             }
+            row_line.clear_clusters_range(col, col + take);
             if let Some(coords) = &mut row_line.placeholders {
                 for c in col..col + take {
                     coords.remove(&c);
@@ -1552,92 +1704,136 @@ impl Grid {
             }
             row_line.dirty.set(true);
             self.cursor.col += take;
+            self.cluster_anchor = Some((row, col + take - 1));
+            if let Some(&last) = chunk.last() {
+                self.width_state.observe_ascii_run(last as char);
+            }
         }
     }
 
-    /// Writes a character with extended styling attributes including underline color and hyperlink id.
-    pub fn write_char_styled(
+    /// Selects the width model for East Asian Ambiguous characters (1 or 2 cells).
+    pub fn set_ambiguous_width(&mut self, width: u8) {
+        self.ambiguous_width = if width == crate::width::AMBIGUOUS_WIDE {
+            crate::width::AMBIGUOUS_WIDE
+        } else {
+            crate::width::AMBIGUOUS_NARROW
+        };
+        self.reset_width_state();
+    }
+
+    pub(crate) fn reset_width_state(&mut self) {
+        self.width_state.reset();
+        self.cluster_anchor = None;
+    }
+
+    /// Consumes a C0/C1 control immediately following a ZWJ, matching wcswidth().
+    pub(crate) fn consume_skipped_control(&mut self) -> bool {
+        if !self.width_state.skip_next() {
+            return false;
+        }
+        let _ = self.width_state.consume_skipped();
+        true
+    }
+
+    fn ensure_width_continuity(&mut self) {
+        let Some((row, col)) = self.cluster_anchor else {
+            return;
+        };
+        if row >= self.rows || col >= self.cols {
+            self.reset_width_state();
+            return;
+        }
+        let width = if self.lines[row].cells[col]
+            .flags
+            .contains(CellFlags::WIDE_CHAR)
+        {
+            2
+        } else {
+            1
+        };
+        let end = col.saturating_add(width);
+        let adjacent = self.cursor.row == row
+            && (self.cursor.col == end || (self.cursor.col == self.cols && end >= self.cols));
+        if !adjacent {
+            self.reset_width_state();
+        }
+    }
+
+    fn clear_cell_slot(&mut self, row: usize, col: usize) {
+        if row >= self.rows || col >= self.cols {
+            return;
+        }
+        let mut clear = [usize::MAX; 2];
+        let mut count = 0;
+        let flags = self.lines[row].cells[col].flags;
+        if flags.contains(CellFlags::WIDE_CHAR) {
+            clear[count] = col;
+            count += 1;
+            if col + 1 < self.cols {
+                clear[count] = col + 1;
+                count += 1;
+            }
+        } else if flags.contains(CellFlags::WIDE_CHAR_SPACER) {
+            if col > 0 {
+                clear[count] = col - 1;
+                count += 1;
+            }
+            clear[count] = col;
+            count += 1;
+        } else {
+            clear[count] = col;
+            count += 1;
+        }
+        for &target in &clear[..count] {
+            self.lines[row].cells[target] = Cell::default();
+            self.lines[row].clear_cluster(target);
+            if let Some(coords) = &mut self.lines[row].placeholders {
+                coords.remove(&target);
+                if coords.is_empty() {
+                    self.lines[row].placeholders = None;
+                }
+            }
+        }
+    }
+
+    // Styling fields are intentionally forwarded without an intermediate allocation.
+    #[allow(clippy::too_many_arguments)]
+    fn write_base_cluster(
         &mut self,
         c: char,
+        width: u32,
         fg: Color,
         bg: Color,
         flags: CellFlags,
         underline_color: Color,
-        hyperlink_id: Option<u32>,
+        hl_id: Option<std::num::NonZeroU32>,
     ) {
-        let hl_id = hyperlink_id.and_then(std::num::NonZeroU32::new);
-        if c.is_ascii() && c >= ' ' {
-            let col = self.cursor.col;
-            let row = self.cursor.row;
-            if col < self.cols && row < self.rows {
-                self.lines[row].cells[col] = Cell {
-                    c,
-                    fg,
-                    bg,
-                    underline_color,
-                    flags,
-                    hyperlink_id: hl_id,
-                };
-                if !self.lines[row].dirty.get() {
-                    self.lines[row].dirty.set(true);
-                }
-                if let Some(coords) = &mut self.lines[row].placeholders {
-                    coords.remove(&col);
-                    if coords.is_empty() {
-                        self.lines[row].placeholders = None;
-                    }
-                }
-                self.cursor.col += 1;
-                return;
-            }
-        }
-
-        let width = if c.is_ascii() && c >= ' ' {
-            1
-        } else {
-            c.width().unwrap_or(1)
-        };
-        if width == 0 {
-            // Combining character: decode Kitty Unicode placeholder diacritics
-            if let Some(idx) = diacritic_to_index(c)
-                && self.cursor.col > 0
-                && self.cursor.row < self.rows
-            {
-                let target_col = self.cursor.col - 1;
-                let target_row = self.cursor.row;
-                if self.lines[target_row].cells[target_col].c == KITTY_PLACEHOLDER
-                    && let Some(coords) = &mut self.lines[target_row].placeholders
-                    && let Some(coord) = coords.get_mut(&target_col)
-                {
-                    match coord.2 {
-                        0 => coord.0 = idx,
-                        1 => coord.1 = idx,
-                        _ => {}
-                    }
-                    coord.2 = coord.2.saturating_add(1);
-                }
-            }
+        let width = width.clamp(1, 2) as usize;
+        if self.cursor.row >= self.rows {
+            self.reset_width_state();
             return;
         }
-
-        // Line wrap if wide char doesn't fit or col reached end
-        if self.cursor.col + width > self.cols {
+        if self.cursor.col >= self.cols || self.cursor.col + width > self.cols {
             self.lines[self.cursor.row].wrapped = true;
             self.newline_with_bg(bg);
             self.cursor.col = 0;
         }
-
         if self.cursor.row >= self.rows || self.cursor.col >= self.cols {
+            self.reset_width_state();
             return;
+        }
+
+        let row = self.cursor.row;
+        let col = self.cursor.col;
+        self.clear_cell_slot(row, col);
+        if width == 2 && col + 1 < self.cols {
+            self.clear_cell_slot(row, col + 1);
         }
 
         let mut cell_flags = flags;
         if width == 2 {
             cell_flags |= CellFlags::WIDE_CHAR;
         }
-
-        let col = self.cursor.col;
-        let row = self.cursor.row;
         self.lines[row].cells[col] = Cell {
             c,
             fg,
@@ -1662,11 +1858,6 @@ impl Grid {
                 .placeholders
                 .get_or_insert_with(|| Box::new(HashMap::new()))
                 .insert(col, (img_row, img_col, 0));
-        } else if let Some(coords) = &mut self.lines[row].placeholders {
-            coords.remove(&col);
-            if coords.is_empty() {
-                self.lines[row].placeholders = None;
-            }
         }
 
         if width == 2 && col + 1 < self.cols {
@@ -1678,12 +1869,128 @@ impl Grid {
                 flags: flags | CellFlags::WIDE_CHAR_SPACER,
                 hyperlink_id: hl_id,
             };
+            self.lines[row].clear_cluster(col + 1);
         }
 
+        self.cluster_anchor = Some((row, col));
         self.cursor.col += width;
         if self.cursor.col >= self.cols {
-            // Defer wrapping until next printable char or explicit move
             self.cursor.col = self.cols;
+        }
+    }
+
+    fn attach_cluster_char(&mut self, c: char, width: u32) {
+        let Some((row, col)) = self.cluster_anchor else {
+            return;
+        };
+        if row >= self.rows || col >= self.cols {
+            self.reset_width_state();
+            return;
+        }
+        let old_width = if self.lines[row].cells[col]
+            .flags
+            .contains(CellFlags::WIDE_CHAR)
+        {
+            2
+        } else {
+            1
+        };
+        let target = width.clamp(1, 2) as usize;
+
+        if target > old_width && old_width == 1 {
+            if col + 2 <= self.cols {
+                let base = self.lines[row].cells[col];
+                self.lines[row].cells[col].flags |= CellFlags::WIDE_CHAR;
+                self.lines[row].cells[col + 1] = Cell {
+                    c: ' ',
+                    fg: base.fg,
+                    bg: base.bg,
+                    underline_color: base.underline_color,
+                    flags: (base.flags & !CellFlags::WIDE_CHAR) | CellFlags::WIDE_CHAR_SPACER,
+                    hyperlink_id: base.hyperlink_id,
+                };
+                self.lines[row].clear_cluster(col + 1);
+                if self.cursor.row == row && self.cursor.col == col + 1 {
+                    self.cursor.col += 1;
+                }
+                self.lines[row].dirty.set(true);
+            }
+        } else if target < old_width && old_width == 2 {
+            self.lines[row].cells[col]
+                .flags
+                .remove(CellFlags::WIDE_CHAR);
+            if col + 1 < self.cols {
+                self.lines[row].cells[col + 1] = Cell::blank(self.lines[row].cells[col].bg);
+                self.lines[row].clear_cluster(col + 1);
+            }
+            if self.cursor.row == row && self.cursor.col >= col + 2 {
+                self.cursor.col = self.cursor.col.saturating_sub(1);
+            }
+            self.lines[row].dirty.set(true);
+        }
+
+        self.lines[row].append_cluster_char(col, c);
+        self.lines[row].dirty.set(true);
+    }
+
+    fn try_placeholder_diacritic(&mut self, c: char) -> bool {
+        let Some(idx) = diacritic_to_index(c) else {
+            return false;
+        };
+        if self.cursor.row >= self.rows || self.cursor.col == 0 {
+            return false;
+        }
+        let target_row = self.cursor.row;
+        let target_col = self.cursor.col.min(self.cols).saturating_sub(1);
+        if self.lines[target_row].cells[target_col].c != KITTY_PLACEHOLDER {
+            return false;
+        }
+        if let Some(coords) = &mut self.lines[target_row].placeholders
+            && let Some(coord) = coords.get_mut(&target_col)
+        {
+            match coord.2 {
+                0 => coord.0 = idx,
+                1 => coord.1 = idx,
+                _ => {}
+            }
+            coord.2 = coord.2.saturating_add(1);
+        }
+        true
+    }
+
+    /// Writes a character with extended styling attributes including underline color and hyperlink id.
+    pub fn write_char_styled(
+        &mut self,
+        c: char,
+        fg: Color,
+        bg: Color,
+        flags: CellFlags,
+        underline_color: Color,
+        hyperlink_id: Option<u32>,
+    ) {
+        let hl_id = hyperlink_id.and_then(std::num::NonZeroU32::new);
+        self.ensure_width_continuity();
+        if self.try_placeholder_diacritic(c) {
+            return;
+        }
+
+        match self.width_state.step(c, self.ambiguous_width) {
+            WidthAction::Start { width } => {
+                self.write_base_cluster(c, width, fg, bg, flags, underline_color, hl_id);
+            }
+            WidthAction::StartOrJoin { width } => {
+                if self.cluster_anchor.is_some() {
+                    self.attach_cluster_char(c, width);
+                } else {
+                    self.write_base_cluster(c, width, fg, bg, flags, underline_color, hl_id);
+                }
+            }
+            WidthAction::Attach { width } => {
+                if self.cluster_anchor.is_some() {
+                    self.attach_cluster_char(c, width);
+                }
+            }
+            WidthAction::Drop | WidthAction::Control => {}
         }
     }
 
@@ -1727,6 +2034,7 @@ impl Grid {
         if self.cursor.row >= self.rows || self.cursor.col >= self.cols {
             return;
         }
+        self.reset_width_state();
         let row = &mut self.lines[self.cursor.row];
         let col = self.cursor.col;
         let count = count.min(self.cols - col);
@@ -1738,6 +2046,8 @@ impl Grid {
         for cell in &mut row.cells[col..col + count] {
             *cell = blank_cell;
         }
+        row.shift_clusters_right(col, count);
+        row.clear_clusters_range(col, col + count);
         row.dirty.set(true);
     }
 
@@ -1751,6 +2061,7 @@ impl Grid {
         if self.cursor.row >= self.rows || self.cursor.col >= self.cols {
             return;
         }
+        self.reset_width_state();
         let row = &mut self.lines[self.cursor.row];
         let col = self.cursor.col;
         let count = count.min(self.cols - col);
@@ -1762,6 +2073,8 @@ impl Grid {
         for cell in &mut row.cells[self.cols - count..] {
             *cell = blank_cell;
         }
+        row.shift_clusters_left(col, count);
+        row.clear_clusters_range(self.cols - count, self.cols);
         row.dirty.set(true);
     }
 
@@ -1775,6 +2088,7 @@ impl Grid {
         if self.cursor.row >= self.rows || self.cursor.col >= self.cols {
             return;
         }
+        self.reset_width_state();
         let row = &mut self.lines[self.cursor.row];
         let col = self.cursor.col;
         let count = count.min(self.cols - col);
@@ -1799,6 +2113,7 @@ impl Grid {
                 coords.remove(&i);
             }
         }
+        row.clear_clusters_range(start, end);
         if let Some(coords) = &mut row.placeholders
             && coords.is_empty()
         {
@@ -1814,6 +2129,7 @@ impl Grid {
 
     /// Inserts lines at cursor row, shifting lines down with specified background color (BCE).
     pub fn insert_lines_with_bg(&mut self, count: usize, bg: Color) {
+        self.reset_width_state();
         if self.cursor.row < self.scroll_region_top || self.cursor.row > self.scroll_region_bottom {
             return;
         }
@@ -1835,6 +2151,7 @@ impl Grid {
 
     /// Deletes lines at cursor row, shifting lines up with specified background color (BCE).
     pub fn delete_lines_with_bg(&mut self, count: usize, bg: Color) {
+        self.reset_width_state();
         if self.cursor.row < self.scroll_region_top || self.cursor.row > self.scroll_region_bottom {
             return;
         }
@@ -1894,7 +2211,7 @@ pub(crate) fn shift_placements(placements: &mut Vec<ImagePlacement>, amount: usi
     });
 }
 
-type ReflowCell = (crate::grid::Cell, Option<(u16, u16, u8)>);
+type ReflowCell = (crate::grid::Cell, Option<(u16, u16, u8)>, Option<String>);
 
 impl Grid {
     /// Resizes the grid dimensions.
@@ -1902,6 +2219,7 @@ impl Grid {
     /// Shrinking keeps the cursor's line on screen and discards rows below it first, so content
     /// above the cursor does not scroll away while the area beneath it is still empty.
     pub fn resize(&mut self, new_cols: usize, new_rows: usize) {
+        self.reset_width_state();
         let new_cols = new_cols.max(1);
         let new_rows = new_rows.max(1);
 
@@ -2130,7 +2448,7 @@ impl Grid {
                     .as_ref()
                     .and_then(|m| m.get(&col_idx))
                     .copied();
-                current_cells.push((*cell, ph));
+                current_cells.push((*cell, ph, row.cluster_text(col_idx).map(ToOwned::to_owned)));
             }
 
             if is_cursor_row && current_cursor_offset.is_none() {
@@ -2257,12 +2575,17 @@ impl Grid {
                 }
 
                 let mut row = Row::new(new_cols);
-                for (i, (cell, ph)) in lline.cells[offset..offset + actual_len].iter().enumerate() {
+                for (i, (cell, ph, cluster)) in
+                    lline.cells[offset..offset + actual_len].iter().enumerate()
+                {
                     row.cells[i] = *cell;
                     if let Some(coord) = ph {
                         row.placeholders
                             .get_or_insert_with(|| Box::new(std::collections::HashMap::new()))
                             .insert(i, *coord);
+                    }
+                    if let Some(text) = cluster {
+                        row.set_cluster_text(i, text.clone());
                     }
                 }
                 if actual_len < chunk_len {

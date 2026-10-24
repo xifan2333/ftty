@@ -1203,8 +1203,15 @@ pub fn find_url_in_grid(
                 } else {
                     1
                 };
-                text.push(cell.c);
-                coords.push((abs_line, c_idx, width));
+                if let Some(cluster) = line.cluster_text(c_idx) {
+                    for ch in cluster.chars() {
+                        text.push(ch);
+                        coords.push((abs_line, c_idx, width));
+                    }
+                } else {
+                    text.push(cell.c);
+                    coords.push((abs_line, c_idx, width));
+                }
             }
         }
     }

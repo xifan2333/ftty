@@ -360,6 +360,15 @@ graphics support by terminal name (for example \f[B]timg(1)\f[R] and
 Primary Device Attributes (\f[CR]CSI c\f[R]) advertise the OSC 52
 extension (\f[CR]52\f[R]) when clipboard writes are enabled.
 .TP
+\f[B]Unicode text width\f[R]
+Character\-cell allocation follows the python\-wcwidth
+\f[CR]wcswidth()\f[R] reference model used by \f[B]ucs\-detect(1)\f[R].
+Emoji ZWJ sequences, variation selectors 15/16, regional\-indicator
+flags, Fitzpatrick modifiers, spacing marks (\f[CR]Mc\f[R]), and virama
+conjuncts are measured as grapheme clusters capped at two cells;
+combining marks are retained with their base cell.
+East Asian Ambiguous characters default to one cell.
+.TP
 \f[B]Wayland text\-input\-v3 (IME)\f[R]
 Fully integrates Wayland \f[CR]zwp_text_input_v3\f[R] protocol for input
 method engines such as \f[B]fcitx5(1)\f[R].

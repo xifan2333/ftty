@@ -21,6 +21,7 @@ pub mod pty;
 #[allow(unsafe_code)]
 pub mod render;
 pub mod wayland;
+pub mod width;
 
 pub use alloc::trim_memory;
 pub use color::{Color, Rgb, default_256_palette};
@@ -45,3 +46,4 @@ pub use parser::{Terminal, VtParser};
 pub use pty::Pty;
 pub use render::{ColorScheme, HoveredHyperlinkSpan, RenderOptions, Renderer};
 pub use wayland::{OfferData, WaylandState, WindowState};
+pub use width::{WidthAction, WidthState, wcswidth, wcwidth};
