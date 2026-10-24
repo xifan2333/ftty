@@ -200,6 +200,7 @@ dependencies = [
  "bitflags",
  "calloop",
  "calloop-wayland-source",
+ "flate2",
  "fontconfig",
  "freetype-rs",
  "glow",

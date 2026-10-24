@@ -18,9 +18,10 @@ use ftty::kitty::payload::{MAX_SHM_PAYLOAD, decode_image_data, read_shm_bytes, r
 use ftty::kitty::{KittyParser, MAX_RECYCLED_CLEAN_BYTES, kitty_response};
 
 #[test]
-fn shared_memory_loads_images_and_rejects_oversized_payloads() {
+fn shared_memory_loads_images_unlinks_and_rejects_oversized_payloads() {
     use nix::sys::mman::shm_unlink;
     use std::io::Write;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     struct ShmName(String);
     impl Drop for ShmName {
@@ -29,19 +30,23 @@ fn shared_memory_loads_images_and_rejects_oversized_payloads() {
         }
     }
 
-    let name = format!("/ftty-kitty-test-{}", std::process::id());
-    let fd = shm_open(
-        name.as_str(),
-        OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_RDWR,
-        Mode::S_IRUSR | Mode::S_IWUSR,
-    )
-    .unwrap();
-    let name = ShmName(name);
-    let mut file = fs::File::from(fd);
-    assert_eq!(read_shm_payload(&name.0).unwrap(), Vec::<u8>::new());
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    fn make_shm(data: &[u8]) -> ShmName {
+        let suffix = NEXT.fetch_add(1, Ordering::Relaxed);
+        let name = format!("/ftty-kitty-test-{}-{suffix}", std::process::id());
+        let fd = shm_open(
+            name.as_str(),
+            OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_RDWR,
+            Mode::S_IRUSR | Mode::S_IWUSR,
+        )
+        .unwrap();
+        let mut file = fs::File::from(fd);
+        file.write_all(data).unwrap();
+        ShmName(name)
+    }
 
     let pixels = [255, 128, 0, 255];
-    file.write_all(&pixels).unwrap();
+    let name = make_shm(&pixels);
     let command = KittyCommand {
         medium: KittyMedium::SharedMemory,
         width: Some(1),
@@ -51,11 +56,17 @@ fn shared_memory_loads_images_and_rejects_oversized_payloads() {
     let image = decode_image_data(7, &command, BASE64_STANDARD.encode(&name.0).as_bytes()).unwrap();
     assert_eq!(image.rgba.as_deref(), Some(pixels.as_slice()));
     assert_eq!((image.id, image.width, image.height), (7, 1, 1));
+    assert!(
+        read_shm_payload(&name.0).is_err(),
+        "decode_image_data must unlink the shared-memory object"
+    );
 
     // A sparse object can exceed the cap without consuming that much RAM.
-    file.set_len(MAX_SHM_PAYLOAD + 1).unwrap();
+    let oversized = make_shm(&[]);
+    let fd = shm_open(oversized.0.as_str(), OFlag::O_RDWR, Mode::empty()).unwrap();
+    fs::File::from(fd).set_len(MAX_SHM_PAYLOAD + 1).unwrap();
     assert_eq!(
-        read_shm_payload(&name.0).unwrap_err().kind(),
+        read_shm_payload(&oversized.0).unwrap_err().kind(),
         io::ErrorKind::InvalidData,
     );
 }
@@ -95,6 +106,189 @@ fn test_parse_kitty_query() {
         }
         other => panic!("Expected query response, got {:?}", other),
     }
+}
+
+#[test]
+fn kitty_query_validates_real_client_probes_and_unlinks_shm() {
+    use nix::sys::mman::shm_unlink;
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let name = format!(
+        "/ftty-kitty-probe-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    );
+    let fd = shm_open(
+        name.as_str(),
+        OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_RDWR,
+        Mode::S_IRUSR | Mode::S_IWUSR,
+    )
+    .unwrap();
+    fs::File::from(fd).write_all(&[0, 0, 0, 255]).unwrap();
+
+    let mut parser = KittyParser::new();
+    // ratatui-image's shared-memory probe.
+    let probe = format!(
+        "\x1b_Gi=33,s=1,v=1,a=q,t=s,f=32;{}\x1b\\",
+        BASE64_STANDARD.encode(name.as_bytes())
+    );
+    let (_, events) = parser.filter_bytes(probe.as_bytes());
+    assert_eq!(
+        events,
+        vec![KittyEvent::Response(b"\x1b_Gi=33;OK\x1b\\".to_vec())]
+    );
+    assert!(
+        shm_open(name.as_str(), OFlag::O_RDONLY, Mode::empty()).is_err(),
+        "a successful query must unlink the transport object"
+    );
+    let _ = shm_unlink(name.as_str());
+
+    // viuer's direct RGB probe.
+    let (_, events) = parser.filter_bytes(b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\");
+    assert_eq!(
+        events,
+        vec![KittyEvent::Response(b"\x1b_Gi=31;OK\x1b\\".to_vec())]
+    );
+
+    // A feature probe must not claim unsupported formats.
+    let (_, events) = parser.filter_bytes(b"\x1b_Gi=34,a=q,f=99;\x1b\\");
+    let KittyEvent::Response(response) = &events[0] else {
+        panic!("expected an error response, got {events:?}");
+    };
+    assert!(String::from_utf8_lossy(response).contains("EINVAL"));
+
+    // An unsupported compression stream must not be acknowledged.
+    let (_, events) = parser.filter_bytes(b"\x1b_Gi=35,s=1,v=1,a=q,f=24,o=z;AAAA\x1b\\");
+    let KittyEvent::Response(response) = &events[0] else {
+        panic!("expected an error response, got {events:?}");
+    };
+    assert!(!String::from_utf8_lossy(response).contains(";OK"));
+}
+
+#[test]
+fn kitty_query_honors_quiet_flags_and_requires_id() {
+    let mut parser = KittyParser::new();
+    let (_, events) = parser.filter_bytes(b"\x1b_Gi=1,s=1,v=1,a=q,t=d,f=24,q=1;AAAA\x1b\\");
+    assert!(events.is_empty(), "q=1 must suppress successful responses");
+
+    let (_, events) = parser.filter_bytes(b"\x1b_Gi=2,a=q,f=99,q=1;\x1b\\");
+    assert_eq!(events.len(), 1, "q=1 must not suppress errors");
+
+    let (_, events) = parser.filter_bytes(b"\x1b_Gi=3,a=q,f=99,q=2;\x1b\\");
+    assert!(events.is_empty(), "q=2 must suppress errors too");
+
+    let (_, events) = parser.filter_bytes(b"\x1b_Ga=q,t=d,f=24;AAAA\x1b\\");
+    assert!(
+        events.is_empty(),
+        "a query without i= has no response address"
+    );
+}
+
+#[test]
+fn kitty_zlib_payloads_are_inflated_before_decoding() {
+    use flate2::Compression;
+    use flate2::write::ZlibEncoder;
+    use std::io::Write;
+
+    let raw = [10u8, 20, 30, 255];
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
+    encoder.write_all(&raw).unwrap();
+    let compressed = encoder.finish().unwrap();
+    let b64 = BASE64_STANDARD.encode(compressed);
+    let seq = format!("\x1b_Ga=t,f=32,s=1,v=1,o=z,i=51;{b64}\x1b\\");
+
+    let mut parser = KittyParser::new();
+    let (_, events) = parser.filter_bytes(seq.as_bytes());
+    let KittyEvent::Transmit { command, image } = &events[0] else {
+        panic!("expected Transmit, got {events:?}");
+    };
+    assert_eq!(command.image_id, Some(51));
+    assert_eq!(image.rgba.as_deref(), Some(raw.as_slice()));
+
+    // The same payload validates a compression capability query.
+    let probe = format!("\x1b_Gi=52,s=1,v=1,a=q,t=d,f=32,o=z;{b64}\x1b\\");
+    let (_, events) = parser.filter_bytes(probe.as_bytes());
+    assert_eq!(
+        events,
+        vec![KittyEvent::Response(b"\x1b_Gi=52;OK\x1b\\".to_vec())]
+    );
+}
+
+#[test]
+fn kitty_image_numbers_allocate_ids_and_resolve_placements() {
+    let b64 = BASE64_STANDARD.encode([1u8, 2, 3, 4]);
+    let seq = format!("\x1b_Ga=t,f=32,s=1,v=1,I=7;{b64}\x1b\\");
+    let mut parser = KittyParser::new();
+    let (_, events) = parser.filter_bytes(seq.as_bytes());
+    let KittyEvent::Transmit { command, image } = &events[0] else {
+        panic!("expected Transmit, got {events:?}");
+    };
+    assert_eq!(command.image_number, Some(7));
+    assert!(command.image_id.is_some());
+    let allocated = image.id;
+
+    let (_, events) = parser.filter_bytes(b"\x1b_Ga=p,I=7\x1b\\");
+    let KittyEvent::Place { command } = &events[0] else {
+        panic!("expected Place, got {events:?}");
+    };
+    assert_eq!(command.image_id, Some(allocated));
+
+    let (_, events) = parser.filter_bytes(b"\x1b_Ga=t,i=3,I=7;AAAA\x1b\\");
+    let KittyEvent::Response(response) = &events[0] else {
+        panic!("expected EINVAL response, got {events:?}");
+    };
+    assert!(String::from_utf8_lossy(response).contains("EINVAL"));
+}
+
+#[test]
+fn kitty_file_and_shm_payloads_honor_offset_and_size() {
+    use std::io::Write;
+
+    let path = std::env::temp_dir().join(format!(
+        "ftty-kitty-offset-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let mut file = fs::File::create(&path).unwrap();
+    file.write_all(&[9, 9, 9, 9, 1, 2, 3, 255]).unwrap();
+    drop(file);
+
+    let mut parser = KittyParser::new();
+    let seq = format!(
+        "\x1b_Gi=61,s=1,v=1,a=q,t=f,f=32,O=4,S=4;{}\x1b\\",
+        BASE64_STANDARD.encode(path.to_string_lossy().as_bytes())
+    );
+    let (_, events) = parser.filter_bytes(seq.as_bytes());
+    assert_eq!(
+        events,
+        vec![KittyEvent::Response(b"\x1b_Gi=61;OK\x1b\\".to_vec())]
+    );
+    let _ = fs::remove_file(&path);
+
+    let t = std::env::temp_dir().join(format!(
+        "ftty-kitty-temp-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::write(&t, [1u8, 2, 3, 4]).unwrap();
+    let seq = format!(
+        "\x1b_Gi=62,a=q,t=t;{}\x1b\\",
+        BASE64_STANDARD.encode(t.to_string_lossy().as_bytes())
+    );
+    let (_, events) = parser.filter_bytes(seq.as_bytes());
+    assert_eq!(
+        events,
+        vec![KittyEvent::Response(b"\x1b_Gi=62;OK\x1b\\".to_vec())]
+    );
+    assert!(!t.exists(), "t=t query must delete the temporary file");
 }
 
 #[test]
