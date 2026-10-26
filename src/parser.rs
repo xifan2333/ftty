@@ -557,9 +557,6 @@ impl Perform for Terminal {
     }
 
     fn execute(&mut self, byte: u8) {
-        if self.grid.consume_skipped_control() {
-            return;
-        }
         match byte {
             b'\n' | 0x0B | 0x0C => {
                 self.grid.newline_with_bg(self.active_bg);

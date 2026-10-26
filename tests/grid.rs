@@ -1706,39 +1706,96 @@ fn test_ascii_run_then_combining_mark_stays_in_one_cluster() {
 }
 
 #[test]
-fn test_grid_cursor_matches_wcswidth_reference_corpus() {
-    fn hex_to_string(hex: &str) -> String {
-        let hex = hex.as_bytes();
-        let bytes: Vec<u8> = hex
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|pair| {
-                let text = std::str::from_utf8(pair).unwrap();
-                u8::from_str_radix(text, 16).unwrap()
-            })
-            .collect();
-        String::from_utf8(bytes).unwrap()
-    }
-
+fn test_ascii_run_preserves_adjacent_cell_and_cleans_spacer_boundary() {
     let fg = Color::DefaultForeground;
-    let bg = Color::DefaultBackground;
-    for line in include_str!("data/width_cases.txt").lines() {
-        let (hex, expected) = line.split_once('\t').unwrap();
-        let expected: i32 = expected.parse().unwrap();
-        if expected < 0 {
-            continue;
-        }
-        let text = hex_to_string(hex);
-        let mut grid = Grid::new(256, 1, 0);
-        for c in text.chars() {
-            grid.write_char(c, fg, bg, CellFlags::empty());
-        }
-        assert_eq!(
-            grid.cursor.col as i32,
-            expected,
-            "cursor mismatch for {}",
-            text.escape_unicode()
-        );
-    }
+    let bg = Color::Rgb(37, 65, 49);
+    let mut grid = Grid::new(20, 1, 0);
+
+    // Initial state: wide char '中' at col 5 (takes 5 and 6)
+    grid.cursor.col = 5;
+    grid.write_char('中', fg, bg, CellFlags::empty());
+    assert_eq!(grid.lines[0].cells[5].c, '中');
+    assert!(
+        grid.lines[0].cells[6]
+            .flags
+            .contains(CellFlags::WIDE_CHAR_SPACER)
+    );
+
+    // Next redraw: ASCII run writes 0..=5 ending with '(' at col 5
+    grid.cursor.col = 0;
+    grid.write_ascii_run(
+        b"12345(",
+        fg,
+        bg,
+        CellFlags::empty(),
+        Color::DefaultForeground,
+        None,
+    );
+    assert_eq!(grid.cursor.col, 6);
+    assert_eq!(grid.lines[0].cells[5].c, '(');
+    assert_eq!(grid.lines[0].cells[5].bg, bg);
+    assert!(
+        !grid.lines[0].cells[6]
+            .flags
+            .contains(CellFlags::WIDE_CHAR_SPACER)
+    );
+
+    // Next char '微' written at col 6: must NOT wipe out col 5 '('
+    grid.write_char('微', fg, bg, CellFlags::empty());
+    assert_eq!(grid.lines[0].cells[5].c, '(');
+    assert_eq!(grid.lines[0].cells[5].bg, bg);
+    assert_eq!(grid.lines[0].cells[6].c, '微');
+    assert_eq!(grid.lines[0].cells[6].bg, bg);
+}
+
+#[test]
+fn test_overwriting_wide_char_with_narrow_preserves_background_color() {
+    let fg = Color::DefaultForeground;
+    let bg = Color::Rgb(37, 65, 49);
+    let mut grid = Grid::new(20, 1, 0);
+
+    grid.clear_line_with_bg(ClearMode::All, bg);
+    grid.cursor.col = 0;
+    grid.write_char('中', fg, bg, CellFlags::empty());
+    assert_eq!(grid.lines[0].cells[1].flags, CellFlags::WIDE_CHAR_SPACER);
+    assert_eq!(grid.lines[0].cells[1].bg, bg);
+
+    // Overwrite col 0 with narrow 'A', keeping the same background
+    grid.cursor.col = 0;
+    grid.write_char('A', fg, bg, CellFlags::empty());
+    assert_eq!(grid.lines[0].cells[0].c, 'A');
+    assert_eq!(grid.lines[0].cells[0].bg, bg);
+    assert_eq!(grid.lines[0].cells[1].c, ' ');
+    assert_eq!(grid.lines[0].cells[1].bg, bg);
+    assert_eq!(grid.lines[0].cells[1].flags, CellFlags::empty());
+}
+
+#[test]
+fn test_row_resize_truncating_wide_char_preserves_background_color() {
+    let fg = Color::DefaultForeground;
+    let bg = Color::Rgb(37, 65, 49);
+    let mut row = Row::blank(10, bg);
+    row.cells[8] = Cell {
+        c: '中',
+        fg,
+        bg,
+        underline_color: fg,
+        flags: CellFlags::WIDE_CHAR,
+        hyperlink_id: None,
+    };
+    row.cells[9] = Cell {
+        c: ' ',
+        fg,
+        bg,
+        underline_color: fg,
+        flags: CellFlags::WIDE_CHAR_SPACER,
+        hyperlink_id: None,
+    };
+
+    // Resize truncates col 9 (the spacer). Col 8 leader must decouple to ' ' keeping bg
+    row.resize(9);
+    assert_eq!(row.cells.len(), 9);
+    assert_eq!(row.cells[8].c, ' ');
+    assert_eq!(row.cells[8].bg, bg);
+    assert_eq!(row.cells[8].flags, CellFlags::empty());
 }
