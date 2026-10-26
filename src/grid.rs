@@ -5,7 +5,9 @@ use std::num::NonZeroU32;
 
 use crate::color::Color;
 use crate::kitty::{DeleteTarget, ImageData, ImagePlacement};
-use crate::width::{WidthAction, WidthState};
+use crate::width::{
+    AMBIGUOUS_NARROW, AMBIGUOUS_WIDE, continues_grapheme, grapheme_display_width, wcwidth,
+};
 
 // --- Cell & Row ---
 
@@ -167,13 +169,8 @@ impl Row {
     pub fn resize(&mut self, new_cols: usize) {
         if new_cols < self.cells.len() {
             // Prevent splitting a wide character across the truncation boundary.
-            if new_cols > 0
-                && self.cells[new_cols - 1]
-                    .flags
-                    .contains(CellFlags::WIDE_CHAR)
-            {
-                self.cells[new_cols - 1] = Cell::default();
-                self.clear_cluster(new_cols - 1);
+            if new_cols > 0 {
+                self.sever_wide_at(new_cols - 1);
             }
             self.cells.truncate(new_cols);
             if let Some(coords) = &mut self.placeholders {
@@ -216,6 +213,42 @@ impl Row {
         self.clusters = None;
         self.wrapped = false;
         self.dirty.set(true);
+    }
+
+    /// Decouples any wide character relationship crossing `col`.
+    ///
+    /// Following Contour's multi-cell overwriting design: when either half of a wide
+    /// character is touched, its partner is cleanly decoupled to an ordinary blank space
+    /// while strictly preserving its existing background color and attributes (no default
+    /// background destruction).
+    pub fn sever_wide_at(&mut self, col: usize) {
+        if col >= self.cells.len() {
+            return;
+        }
+        let flags = self.cells[col].flags;
+        if flags.contains(CellFlags::WIDE_CHAR) {
+            self.cells[col].flags.remove(CellFlags::WIDE_CHAR);
+            self.cells[col].c = ' ';
+            self.clear_cluster(col);
+            if col + 1 < self.cells.len() {
+                self.cells[col + 1]
+                    .flags
+                    .remove(CellFlags::WIDE_CHAR_SPACER);
+                self.cells[col + 1].c = ' ';
+                self.clear_cluster(col + 1);
+            }
+            self.dirty.set(true);
+        } else if flags.contains(CellFlags::WIDE_CHAR_SPACER) {
+            self.cells[col].flags.remove(CellFlags::WIDE_CHAR_SPACER);
+            self.cells[col].c = ' ';
+            self.clear_cluster(col);
+            if col > 0 {
+                self.cells[col - 1].flags.remove(CellFlags::WIDE_CHAR);
+                self.cells[col - 1].c = ' ';
+                self.clear_cluster(col - 1);
+            }
+            self.dirty.set(true);
+        }
     }
 
     /// Returns the full grapheme-cluster text for `col` when it spans multiple code points.
@@ -687,10 +720,10 @@ pub struct Grid {
     #[doc(hidden)]
     pub row_pool: Vec<Row>,
 
-    /// Incremental grapheme width state for contiguous printed text.
-    pub(crate) width_state: WidthState,
     /// Root cell of the grapheme cluster currently receiving attachments.
     pub(crate) cluster_anchor: Option<(usize, usize)>,
+    /// Reusable scratch buffer for grapheme boundary checks.
+    pub(crate) scratch_cluster: String,
     /// Width model for East Asian Ambiguous characters.
     pub(crate) ambiguous_width: u8,
 }
@@ -726,9 +759,9 @@ impl Grid {
             alt_saved_cursor: None,
             alt_placements: Vec::new(),
             row_pool: Vec::new(),
-            width_state: WidthState::new(),
             cluster_anchor: None,
-            ambiguous_width: crate::width::AMBIGUOUS_NARROW,
+            scratch_cluster: String::with_capacity(32),
+            ambiguous_width: AMBIGUOUS_NARROW,
         }
     }
 
@@ -1642,33 +1675,17 @@ impl Grid {
         self.ensure_width_continuity();
         let mut rest = text;
 
-        // A run normally starts fresh cells, but a pending ZWJ or virama changes the
-        // first character's fate; let the grapheme state machine decide those.
-        while !rest.is_empty()
-            && (self.width_state.skip_next() || self.width_state.prev_was_virama())
-        {
-            self.write_char_styled(
-                rest[0] as char,
-                fg,
-                bg,
-                flags,
-                underline_color,
-                hyperlink_id,
-            );
-            rest = &rest[1..];
-        }
-
         while !rest.is_empty() {
             if self.cursor.col >= self.cols {
                 self.lines[self.cursor.row].wrapped = true;
                 self.newline_with_bg(bg);
                 self.cursor.col = 0;
-                self.reset_width_state();
+                self.cluster_anchor = None;
             }
 
             let row = self.cursor.row;
             if row >= self.rows {
-                self.reset_width_state();
+                self.cluster_anchor = None;
                 break;
             }
 
@@ -1681,7 +1698,13 @@ impl Grid {
             let chunk = &rest[..take];
             rest = &rest[take..];
 
+            // Following Contour: cleanly sever wide characters at both boundaries of the run
             let row_line = &mut self.lines[row];
+            row_line.sever_wide_at(col);
+            if col + take < self.cols {
+                row_line.sever_wide_at(col + take);
+            }
+
             let target_cells = &mut row_line.cells[col..col + take];
             for (cell, &byte) in target_cells.iter_mut().zip(chunk.iter()) {
                 *cell = Cell {
@@ -1705,34 +1728,21 @@ impl Grid {
             row_line.dirty.set(true);
             self.cursor.col += take;
             self.cluster_anchor = Some((row, col + take - 1));
-            if let Some(&last) = chunk.last() {
-                self.width_state.observe_ascii_run(last as char);
-            }
         }
     }
 
     /// Selects the width model for East Asian Ambiguous characters (1 or 2 cells).
     pub fn set_ambiguous_width(&mut self, width: u8) {
-        self.ambiguous_width = if width == crate::width::AMBIGUOUS_WIDE {
-            crate::width::AMBIGUOUS_WIDE
+        self.ambiguous_width = if width == AMBIGUOUS_WIDE {
+            AMBIGUOUS_WIDE
         } else {
             crate::width::AMBIGUOUS_NARROW
         };
-        self.reset_width_state();
-    }
-
-    pub(crate) fn reset_width_state(&mut self) {
-        self.width_state.reset();
         self.cluster_anchor = None;
     }
 
-    /// Consumes a C0/C1 control immediately following a ZWJ, matching wcswidth().
-    pub(crate) fn consume_skipped_control(&mut self) -> bool {
-        if !self.width_state.skip_next() {
-            return false;
-        }
-        let _ = self.width_state.consume_skipped();
-        true
+    pub(crate) fn reset_width_state(&mut self) {
+        self.cluster_anchor = None;
     }
 
     fn ensure_width_continuity(&mut self) {
@@ -1740,7 +1750,7 @@ impl Grid {
             return;
         };
         if row >= self.rows || col >= self.cols {
-            self.reset_width_state();
+            self.cluster_anchor = None;
             return;
         }
         let width = if self.lines[row].cells[col]
@@ -1755,44 +1765,7 @@ impl Grid {
         let adjacent = self.cursor.row == row
             && (self.cursor.col == end || (self.cursor.col == self.cols && end >= self.cols));
         if !adjacent {
-            self.reset_width_state();
-        }
-    }
-
-    fn clear_cell_slot(&mut self, row: usize, col: usize) {
-        if row >= self.rows || col >= self.cols {
-            return;
-        }
-        let mut clear = [usize::MAX; 2];
-        let mut count = 0;
-        let flags = self.lines[row].cells[col].flags;
-        if flags.contains(CellFlags::WIDE_CHAR) {
-            clear[count] = col;
-            count += 1;
-            if col + 1 < self.cols {
-                clear[count] = col + 1;
-                count += 1;
-            }
-        } else if flags.contains(CellFlags::WIDE_CHAR_SPACER) {
-            if col > 0 {
-                clear[count] = col - 1;
-                count += 1;
-            }
-            clear[count] = col;
-            count += 1;
-        } else {
-            clear[count] = col;
-            count += 1;
-        }
-        for &target in &clear[..count] {
-            self.lines[row].cells[target] = Cell::default();
-            self.lines[row].clear_cluster(target);
-            if let Some(coords) = &mut self.lines[row].placeholders {
-                coords.remove(&target);
-                if coords.is_empty() {
-                    self.lines[row].placeholders = None;
-                }
-            }
+            self.cluster_anchor = None;
         }
     }
 
@@ -1801,16 +1774,16 @@ impl Grid {
     fn write_base_cluster(
         &mut self,
         c: char,
-        width: u32,
+        width: usize,
         fg: Color,
         bg: Color,
         flags: CellFlags,
         underline_color: Color,
         hl_id: Option<std::num::NonZeroU32>,
     ) {
-        let width = width.clamp(1, 2) as usize;
+        let width = width.clamp(1, 2);
         if self.cursor.row >= self.rows {
-            self.reset_width_state();
+            self.cluster_anchor = None;
             return;
         }
         if self.cursor.col >= self.cols || self.cursor.col + width > self.cols {
@@ -1819,15 +1792,17 @@ impl Grid {
             self.cursor.col = 0;
         }
         if self.cursor.row >= self.rows || self.cursor.col >= self.cols {
-            self.reset_width_state();
+            self.cluster_anchor = None;
             return;
         }
 
         let row = self.cursor.row;
         let col = self.cursor.col;
-        self.clear_cell_slot(row, col);
+
+        // Sever any wide character relationship crossing the cells we are writing over
+        self.lines[row].sever_wide_at(col);
         if width == 2 && col + 1 < self.cols {
-            self.clear_cell_slot(row, col + 1);
+            self.lines[row].sever_wide_at(col + 1);
         }
 
         let mut cell_flags = flags;
@@ -1842,6 +1817,7 @@ impl Grid {
             flags: cell_flags,
             hyperlink_id: hl_id,
         };
+        self.lines[row].clear_cluster(col);
         self.lines[row].dirty.set(true);
 
         if c == KITTY_PLACEHOLDER {
@@ -1879,14 +1855,20 @@ impl Grid {
         }
     }
 
-    fn attach_cluster_char(&mut self, c: char, width: u32) {
+    fn attach_cluster_char(&mut self, c: char) {
         let Some((row, col)) = self.cluster_anchor else {
             return;
         };
         if row >= self.rows || col >= self.cols {
-            self.reset_width_state();
+            self.cluster_anchor = None;
             return;
         }
+        self.lines[row].append_cluster_char(col, c);
+        let cluster = self.lines[row]
+            .cluster_text(col)
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.lines[row].cells[col].c.to_string());
+        let target_width = grapheme_display_width(&cluster, self.ambiguous_width);
         let old_width = if self.lines[row].cells[col]
             .flags
             .contains(CellFlags::WIDE_CHAR)
@@ -1895,10 +1877,10 @@ impl Grid {
         } else {
             1
         };
-        let target = width.clamp(1, 2) as usize;
 
-        if target > old_width && old_width == 1 {
+        if target_width > old_width && old_width == 1 {
             if col + 2 <= self.cols {
+                self.lines[row].sever_wide_at(col + 1);
                 let base = self.lines[row].cells[col];
                 self.lines[row].cells[col].flags |= CellFlags::WIDE_CHAR;
                 self.lines[row].cells[col + 1] = Cell {
@@ -1915,22 +1897,19 @@ impl Grid {
                 }
                 self.lines[row].dirty.set(true);
             }
-        } else if target < old_width && old_width == 2 {
+        } else if target_width < old_width && old_width == 2 {
             self.lines[row].cells[col]
                 .flags
                 .remove(CellFlags::WIDE_CHAR);
             if col + 1 < self.cols {
+                self.lines[row].sever_wide_at(col + 1);
                 self.lines[row].cells[col + 1] = Cell::blank(self.lines[row].cells[col].bg);
-                self.lines[row].clear_cluster(col + 1);
             }
             if self.cursor.row == row && self.cursor.col >= col + 2 {
                 self.cursor.col = self.cursor.col.saturating_sub(1);
             }
             self.lines[row].dirty.set(true);
         }
-
-        self.lines[row].append_cluster_char(col, c);
-        self.lines[row].dirty.set(true);
     }
 
     fn try_placeholder_diacritic(&mut self, c: char) -> bool {
@@ -1974,24 +1953,39 @@ impl Grid {
             return;
         }
 
-        match self.width_state.step(c, self.ambiguous_width) {
-            WidthAction::Start { width } => {
-                self.write_base_cluster(c, width, fg, bg, flags, underline_color, hl_id);
+        // Check if `c` continues the grapheme cluster at the anchor cell
+        if let Some((row, col)) = self.cluster_anchor
+            && row < self.rows
+            && col < self.cols
+        {
+            let cell_c = self.lines[row].cells[col].c;
+            let continues = if let Some(cluster) = self.lines[row].cluster_text(col) {
+                continues_grapheme(cluster, c, &mut self.scratch_cluster)
+            } else {
+                let mut s = String::with_capacity(8);
+                s.push(cell_c);
+                continues_grapheme(&s, c, &mut self.scratch_cluster)
+            };
+            if continues {
+                self.attach_cluster_char(c);
+                return;
             }
-            WidthAction::StartOrJoin { width } => {
-                if self.cluster_anchor.is_some() {
-                    self.attach_cluster_char(c, width);
-                } else {
-                    self.write_base_cluster(c, width, fg, bg, flags, underline_color, hl_id);
-                }
-            }
-            WidthAction::Attach { width } => {
-                if self.cluster_anchor.is_some() {
-                    self.attach_cluster_char(c, width);
-                }
-            }
-            WidthAction::Drop | WidthAction::Control => {}
         }
+
+        let w = wcwidth(c, self.ambiguous_width);
+        if w < 0 {
+            self.cluster_anchor = None;
+            return;
+        }
+        if w == 0 {
+            // Unattached zero-width / combining character
+            if self.cluster_anchor.is_some() {
+                self.attach_cluster_char(c);
+            }
+            return;
+        }
+
+        self.write_base_cluster(c, w as usize, fg, bg, flags, underline_color, hl_id);
     }
 
     /// Performs a newline (LF): moves cursor down, scrolling if necessary.
@@ -2039,6 +2033,17 @@ impl Grid {
         let col = self.cursor.col;
         let count = count.min(self.cols - col);
 
+        if row.cells[col].flags.contains(CellFlags::WIDE_CHAR_SPACER) {
+            row.sever_wide_at(col);
+        }
+        if self.cols > count
+            && row.cells[self.cols - count - 1]
+                .flags
+                .contains(CellFlags::WIDE_CHAR)
+        {
+            row.sever_wide_at(self.cols - count - 1);
+        }
+
         for i in (col + count..self.cols).rev() {
             row.cells[i] = row.cells[i - count];
         }
@@ -2065,6 +2070,17 @@ impl Grid {
         let row = &mut self.lines[self.cursor.row];
         let col = self.cursor.col;
         let count = count.min(self.cols - col);
+
+        if row.cells[col].flags.contains(CellFlags::WIDE_CHAR_SPACER) {
+            row.sever_wide_at(col);
+        }
+        if col + count < self.cols
+            && row.cells[col + count]
+                .flags
+                .contains(CellFlags::WIDE_CHAR_SPACER)
+        {
+            row.sever_wide_at(col + count);
+        }
 
         for i in col..self.cols - count {
             row.cells[i] = row.cells[i + count];

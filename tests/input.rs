@@ -169,8 +169,20 @@ fn test_keyboard_keymap_and_translation() {
     let tab = handler.handle_key(15);
     assert_eq!(tab, Some(b"\t".to_vec()));
 
-    // Test Escape key (evdev code 1)
-    let esc = handler.handle_key(1);
+    // Test Escape key (find physical/configured keycode for Escape)
+    let esc_raw = (8..150)
+        .find(|&kc| {
+            handler
+                .state
+                .as_ref()
+                .unwrap()
+                .key_get_one_sym(xkbcommon::xkb::Keycode::new(kc))
+                .raw()
+                == xkbcommon::xkb::keysyms::KEY_Escape
+        })
+        .map(|kc| kc - 8)
+        .unwrap_or(1);
+    let esc = handler.handle_key(esc_raw);
     assert_eq!(esc, Some(b"\x1b".to_vec()));
 
     // Test Arrow Up (evdev code 103)
