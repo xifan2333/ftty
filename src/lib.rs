@@ -37,7 +37,10 @@ pub use input::mouse::{
     MouseEncoding, MouseModifiers, MouseState, MouseTracking, encode_mouse_event,
 };
 pub use input::selection::{Selection, SelectionPoint, SelectionType, find_word_boundaries};
-pub use input::{KeyAction, KeyboardHandler, parse_key_combo};
+pub use input::{
+    KeyAction, KeyboardHandler, PointerContext, PointerController, PointerOutcome, find_url_at_col,
+    find_url_in_grid, parse_key_combo, x11_button_index,
+};
 pub use kitty::{
     DeleteTarget, ImageData, ImagePlacement, KittyAction, KittyCommand, KittyEvent, KittyFormat,
     KittyMedium, KittyParser, kitty_response,

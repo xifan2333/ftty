@@ -1329,6 +1329,13 @@ pub fn find_word_boundaries(row: &Row, col: usize) -> (usize, usize) {
     (start, end)
 }
 
+pub mod pointer;
+
+pub use pointer::{
+    PointerContext, PointerController, PointerOutcome, find_url_at_col, find_url_in_grid,
+    x11_button_index,
+};
+
 pub mod ime {
     pub use super::{ImeState, Preedit, calculate_cursor_rect};
 }

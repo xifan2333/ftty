@@ -294,18 +294,18 @@ fn pointer_events_from_the_wire_drive_mouse_reports() {
     conn.prepare_read().unwrap().read().unwrap();
     queue.dispatch_pending(&mut app).unwrap();
 
-    assert!(app.mouse_reported, "left press was not forwarded");
-    assert_eq!(app.mouse_button, 0);
+    assert!(app.pointer.mouse_reported, "left press was not forwarded");
+    assert_eq!(app.pointer.mouse_button, 0);
     assert!(
-        !app.mouse_pressed,
+        !app.pointer.mouse_pressed,
         "local selection must stay idle while reporting"
     );
     assert_eq!(app.last_serial, 9);
 
     // Turning tracking off hands the very same press back to local selection.
     app.terminal.mouse.tracking = MouseTracking::Disabled;
-    app.mouse_reported = false;
-    app.mouse_pos = [(cw * 2.5) + pad_x, (ch * 1.5) + pad_y];
+    app.pointer.mouse_reported = false;
+    app.pointer.mouse_pos = [(cw * 2.5) + pad_x, (ch * 1.5) + pad_y];
     let mut events = Vec::new();
     for word in [pointer_id, (24 << 16) | 3, 10, 400, 0x110, 1] {
         events.extend_from_slice(&word.to_ne_bytes());
@@ -313,9 +313,9 @@ fn pointer_events_from_the_wire_drive_mouse_reports() {
     server.write_all(&events).unwrap();
     conn.prepare_read().unwrap().read().unwrap();
     queue.dispatch_pending(&mut app).unwrap();
-    assert!(app.mouse_pressed);
-    assert!(!app.mouse_reported);
-    assert_eq!(app.selection.start, SelectionPoint::new(1, 2));
+    assert!(app.pointer.mouse_pressed);
+    assert!(!app.pointer.mouse_reported);
+    assert_eq!(app.pointer.selection.start, SelectionPoint::new(1, 2));
 }
 
 #[test]
