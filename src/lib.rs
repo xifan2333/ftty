@@ -42,8 +42,8 @@ pub use input::{
     find_url_in_grid, parse_key_combo, x11_button_index,
 };
 pub use kitty::{
-    DeleteTarget, ImageData, ImagePlacement, KittyAction, KittyCommand, KittyEvent, KittyFormat,
-    KittyMedium, KittyParser, kitty_response,
+    DeleteTarget, GraphicContext, GraphicOutcome, GraphicStore, ImageData, ImagePlacement,
+    KittyAction, KittyCommand, KittyEvent, KittyFormat, KittyMedium, KittyParser, kitty_response,
 };
 pub use parser::{Terminal, VtParser};
 pub use pty::Pty;

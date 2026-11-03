@@ -1316,6 +1316,13 @@ pub mod command {
     pub use super::parse_control_keys;
 }
 
+pub mod store;
+
+pub use store::{
+    GraphicContext, GraphicOutcome, GraphicStore, KITTY_PLACEHOLDER, MAX_PLACEMENTS,
+    MAX_STORED_IMAGE_BYTES, MAX_STORED_IMAGES, collect_placeholder_ids,
+};
+
 pub mod model {
     pub use super::{
         DeleteTarget, ImageData, ImagePlacement, KittyAction, KittyCommand, KittyCompression,
