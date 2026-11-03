@@ -9,7 +9,7 @@ The stateful controller that maintains pointer interactions, text selection life
 _Avoid_: MouseManager, PointerHandler, InputService
 
 **PointerOutcome**:
-The composite set of platform-neutral semantic actions produced by evaluating a pointer event.
+The composite set of semantic actions and compositor cursor updates produced by evaluating a pointer event.
 _Avoid_: PointerEvent, MouseAction, InputResult
 
 **Selection**:

@@ -1267,6 +1267,13 @@ mod pointer_controller_tests {
         assert_eq!(axis_down.scroll_lines, Some(2));
         assert!(axis_down.needs_redraw);
 
+        // Clamped to 100 lines on large inputs
+        let massive_down = controller.handle_axis(3000.0, &ctx);
+        assert_eq!(massive_down.scroll_lines, Some(100));
+
+        let massive_up = controller.handle_axis(-3000.0, &ctx);
+        assert_eq!(massive_up.scroll_lines, Some(-100));
+
         // 2. Alt screen mode: sends VT arrow escapes
         let alt_ctx = PointerContext::new(
             &grid,

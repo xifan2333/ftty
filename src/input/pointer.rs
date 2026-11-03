@@ -62,7 +62,7 @@ impl<'a> PointerContext<'a> {
     }
 }
 
-/// Composite set of platform-neutral semantic actions produced by evaluating a pointer event.
+/// Composite set of semantic actions and compositor cursor updates produced by evaluating a pointer event.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PointerOutcome {
     /// Byte sequence to write to the PTY (e.g. SGR 1006 mouse report, alt-screen arrow sequences).
@@ -283,6 +283,7 @@ impl PointerController {
         (span_changed, shape_update)
     }
 
+    /// Evaluates the active cursor shape against the current surface context and updates cached state.
     fn evaluate_cursor_shape(&mut self, ctx: &PointerContext<'_>) -> Option<Shape> {
         if !self.pointer_in_surface {
             self.current_cursor_shape = None;
@@ -514,8 +515,13 @@ impl PointerController {
                 ..Default::default()
             }
         } else {
+            let clamped_lines = if lines < 0 {
+                -(count as i32)
+            } else {
+                count as i32
+            };
             PointerOutcome {
-                scroll_lines: Some(lines),
+                scroll_lines: Some(clamped_lines),
                 needs_redraw: true,
                 ..Default::default()
             }
@@ -528,6 +534,7 @@ impl PointerController {
         PointerOutcome::default()
     }
 
+    /// Encodes the pointer event as escape sequences according to active terminal mouse tracking mode.
     fn encode_mouse(
         &self,
         button: u8,

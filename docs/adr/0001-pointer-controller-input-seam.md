@@ -4,7 +4,7 @@
 Wayland pointer event dispatch (`src/wayland.rs`) previously accessed over 15 fine-grained fields on `AppState` directly and contained terminal-specific interaction logic, including SGR 1006 mouse protocol reporting, multi-click word/line selection gestures, drag tracking, and hyperlink hit-testing. This tightly coupled the platform windowing layer to terminal emulation semantics and made pointer interaction logic impossible to test without mocking Wayland compositors.
 
 ## Decision
-We introduce `PointerController` under `src/input/pointer.rs` as a deep module owning all pointer state, text selection lifecycles, and gesture timing. The platform layer (`src/wayland.rs`) passes transient layout and terminal metrics via `PointerContext` into explicit event handlers (`handle_motion`, `handle_button`, etc.) and receives a declarative, platform-agnostic `PointerOutcome` struct.
+We introduce `PointerController` under `src/input/pointer.rs` as a deep module owning all pointer state, text selection lifecycles, and gesture timing. The platform layer (`src/wayland.rs`) passes transient layout and terminal metrics via `PointerContext` into explicit event handlers (`handle_motion`, `handle_button`, etc.) and receives a declarative `PointerOutcome` struct carrying semantic actions and compositor cursor shape updates.
 
 ## Consequences
 - `AppState` eliminates 15 loose pointer and selection fields in favor of a single `PointerController` instance.
