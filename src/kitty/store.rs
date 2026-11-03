@@ -392,6 +392,70 @@ impl GraphicStore {
         }
     }
 
+    /// Shifts placements up within a designated scroll region.
+    pub fn shift_region_up(&mut self, top_line: usize, bottom_line: usize, count: usize) {
+        self.placements.retain_mut(|p| {
+            if p.line >= top_line && p.line <= bottom_line {
+                let end_line = p.line + p.rows;
+                if end_line <= top_line + count {
+                    false
+                } else {
+                    p.line -= count;
+                    true
+                }
+            } else {
+                true
+            }
+        });
+    }
+
+    /// Shifts placements down within a designated scroll region.
+    pub fn shift_region_down(&mut self, top_line: usize, bottom_line: usize, count: usize) {
+        self.placements.retain_mut(|p| {
+            if p.line >= top_line && p.line <= bottom_line {
+                if p.line + count > bottom_line {
+                    false
+                } else {
+                    p.line += count;
+                    true
+                }
+            } else {
+                true
+            }
+        });
+    }
+
+    /// Rebases placements when scrollback history is cleared.
+    pub fn rebase_scrollback(&mut self, sb_len: usize) {
+        for placements in [&mut self.placements, &mut self.alt_placements] {
+            placements.retain_mut(|p| {
+                if p.line < sb_len {
+                    false
+                } else {
+                    p.line -= sb_len;
+                    true
+                }
+            });
+        }
+    }
+
+    /// Moves every placement anchored to a surviving row up by `amount`.
+    pub fn shift_placements(&mut self, amount: usize) {
+        if amount == 0 {
+            return;
+        }
+        for placements in [&mut self.placements, &mut self.alt_placements] {
+            placements.retain_mut(|p| {
+                if p.line < amount {
+                    false
+                } else {
+                    p.line -= amount;
+                    true
+                }
+            });
+        }
+    }
+
     /// Retains only placements satisfying the predicate across both active and alternate buffers.
     pub fn retain_mut_placements(
         &mut self,
