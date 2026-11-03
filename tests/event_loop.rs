@@ -816,7 +816,7 @@ fn test_kitty_place_event_derives_dimensions_and_advances_cursor() {
         command: transmit_cmd,
         image: img,
     });
-    assert_eq!(app.terminal.grid.placements.len(), 0);
+    assert_eq!(app.terminal.grid.graphics.placements().len(), 0);
     assert!(app.terminal.grid.contains_image(42));
 
     // Initial cursor position
@@ -832,8 +832,8 @@ fn test_kitty_place_event_derives_dimensions_and_advances_cursor() {
     app.handle_kitty_event(KittyEvent::Place { command: place_cmd });
 
     // Placement must derive cols (10) and rows (4) from the stored image
-    assert_eq!(app.terminal.grid.placements.len(), 1);
-    let p = &app.terminal.grid.placements[0];
+    assert_eq!(app.terminal.grid.graphics.placements().len(), 1);
+    let p = &app.terminal.grid.graphics.placements()[0];
     assert_eq!(p.image_id, 42);
     assert_eq!(p.cols, 10);
     assert_eq!(p.rows, 4);

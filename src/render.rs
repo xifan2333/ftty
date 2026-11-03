@@ -2053,12 +2053,11 @@ impl Renderer {
         self.image_vertices = bounded_image_vertex_buffer(image_vertices);
     }
 
-    pub(crate) fn sync_image_textures(&mut self, grid: &mut Grid) {
+    pub(crate) fn sync_image_textures(&mut self, graphics: &mut crate::kitty::GraphicStore) {
         let gl = &self.gl;
         let mut to_delete = Vec::new();
         self.image_textures.retain(|id, (tex, _, _, ver)| {
-            if let Some(_img) = grid.images.get(id) {
-                let current_ver = grid.image_versions.get(id).copied().unwrap_or(0);
+            if let Some(current_ver) = graphics.image_version(*id) {
                 if *ver == current_ver {
                     true
                 } else {
@@ -2079,57 +2078,55 @@ impl Renderer {
             }
         }
 
-        // Upload newly decoded images. Clearing `rgba` here releases the CPU copy and is
-        // accounting-neutral because `ImageData::byte_size()` depends only on width/height.
-        for (id, img) in &mut grid.images {
-            if !self.image_textures.contains_key(id) {
-                let ver = grid.image_versions.get(id).copied().unwrap_or(0);
-                if let Some(rgba) = &img.rgba {
-                    // SAFETY: draw holds this renderer's current EGL context. New textures
-                    // belong to it, and decoded RGBA pixels remain borrowed for the upload.
-                    unsafe {
-                        if let Ok(tex) = gl.create_texture() {
-                            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                            gl.tex_parameter_i32(
-                                glow::TEXTURE_2D,
-                                glow::TEXTURE_MIN_FILTER,
-                                glow::LINEAR as i32,
-                            );
-                            gl.tex_parameter_i32(
-                                glow::TEXTURE_2D,
-                                glow::TEXTURE_MAG_FILTER,
-                                glow::LINEAR as i32,
-                            );
-                            gl.tex_parameter_i32(
-                                glow::TEXTURE_2D,
-                                glow::TEXTURE_WRAP_S,
-                                glow::CLAMP_TO_EDGE as i32,
-                            );
-                            gl.tex_parameter_i32(
-                                glow::TEXTURE_2D,
-                                glow::TEXTURE_WRAP_T,
-                                glow::CLAMP_TO_EDGE as i32,
-                            );
-                            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
-                            gl.tex_image_2d(
-                                glow::TEXTURE_2D,
-                                0,
-                                glow::RGBA as i32,
-                                img.width as i32,
-                                img.height as i32,
-                                0,
-                                glow::RGBA,
-                                glow::UNSIGNED_BYTE,
-                                glow::PixelUnpackData::Slice(Some(rgba)),
-                            );
-                            self.image_textures
-                                .insert(*id, (tex, img.width, img.height, ver));
-                            img.rgba = None;
-                        }
-                    }
+        // Upload newly decoded images through GraphicStore's sync seam.
+        graphics.sync_gpu_textures(|id, width, height, ver, rgba| {
+            if self.image_textures.contains_key(&id) {
+                return false;
+            }
+            // SAFETY: draw holds this renderer's current EGL context. New textures
+            // belong to it, and decoded RGBA pixels remain borrowed for the upload.
+            unsafe {
+                if let Ok(tex) = gl.create_texture() {
+                    gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                    gl.tex_parameter_i32(
+                        glow::TEXTURE_2D,
+                        glow::TEXTURE_MIN_FILTER,
+                        glow::LINEAR as i32,
+                    );
+                    gl.tex_parameter_i32(
+                        glow::TEXTURE_2D,
+                        glow::TEXTURE_MAG_FILTER,
+                        glow::LINEAR as i32,
+                    );
+                    gl.tex_parameter_i32(
+                        glow::TEXTURE_2D,
+                        glow::TEXTURE_WRAP_S,
+                        glow::CLAMP_TO_EDGE as i32,
+                    );
+                    gl.tex_parameter_i32(
+                        glow::TEXTURE_2D,
+                        glow::TEXTURE_WRAP_T,
+                        glow::CLAMP_TO_EDGE as i32,
+                    );
+                    gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+                    gl.tex_image_2d(
+                        glow::TEXTURE_2D,
+                        0,
+                        glow::RGBA as i32,
+                        width as i32,
+                        height as i32,
+                        0,
+                        glow::RGBA,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::Slice(Some(rgba)),
+                    );
+                    self.image_textures.insert(id, (tex, width, height, ver));
+                    true
+                } else {
+                    false
                 }
             }
-        }
+        });
     }
 
     pub(crate) fn render_image_placements(
@@ -2147,7 +2144,7 @@ impl Renderer {
         let viewport_start = h.saturating_sub(grid.viewport_offset);
         let viewport_end = viewport_start + grid.rows;
 
-        for placement in &grid.placements {
+        for placement in grid.graphics.placements() {
             let is_match = if z_negative {
                 placement.z_index < 0
             } else {
@@ -2422,7 +2419,8 @@ impl Renderer {
             let box_w = b.col_end - b.col_start + 1;
             let box_h = b.row_end - b.row_start + 1;
             let (virt_cols, virt_rows) = grid
-                .virtual_placements
+                .graphics
+                .virtual_placements()
                 .get(&b.id)
                 .copied()
                 .unwrap_or((box_w, box_h));
@@ -2750,7 +2748,7 @@ impl Renderer {
             grid.mark_all_dirty();
         }
         self.build_incremental_vertices(grid, colors, fonts.metrics, fonts, atlas, options);
-        self.sync_image_textures(grid);
+        self.sync_image_textures(&mut grid.graphics);
 
         // SAFETY: this renderer owns the current context and all referenced GL objects.
         unsafe {

@@ -262,7 +262,7 @@ fn test_clear_screen_marks_affected_rows_dirty() {
 #[test]
 fn virtual_placement_images_are_preserved_across_evictions() {
     let mut grid = Grid::new(80, 24, 100);
-    grid.virtual_placements.insert(100, (10, 10));
+    grid.graphics.insert_virtual_placement(100, 10, 10);
     grid.write_char(
         KITTY_PLACEHOLDER,
         Color::Rgb(0, 0, 100),
@@ -280,7 +280,7 @@ fn virtual_placement_images_are_preserved_across_evictions() {
     }
 
     assert!(
-        grid.images.contains_key(&100),
+        grid.contains_image(100),
         "virtual image 100 must be preserved across eviction"
     );
 }
@@ -288,7 +288,7 @@ fn virtual_placement_images_are_preserved_across_evictions() {
 #[test]
 fn scrollback_virtual_placement_images_are_preserved_across_evictions() {
     let mut grid = Grid::new(80, 24, 100);
-    grid.virtual_placements.insert(100, (10, 10));
+    grid.graphics.insert_virtual_placement(100, 10, 10);
     grid.write_char(
         KITTY_PLACEHOLDER,
         Color::Rgb(0, 0, 100),
@@ -310,7 +310,7 @@ fn scrollback_virtual_placement_images_are_preserved_across_evictions() {
     }
 
     assert!(
-        grid.images.contains_key(&100),
+        grid.contains_image(100),
         "virtual image 100 in scrollback must be preserved across eviction"
     );
 }
@@ -454,7 +454,7 @@ fn shrink_evicts_placements_below_the_new_bottom() {
 
     assert_eq!(grid.cursor.row, 1);
     assert!(
-        grid.placements.is_empty(),
+        grid.graphics.placements().is_empty(),
         "a placement anchored below the new bottom row is evicted"
     );
 }
@@ -494,12 +494,12 @@ fn shrink_on_alternate_screen_evicts_truncated_placements() {
     grid.resize(10, 2);
 
     assert_eq!(
-        grid.placements.len(),
+        grid.graphics.placements().len(),
         1,
         "only the surviving row placement is retained"
     );
     assert_eq!(
-        grid.placements[0].line,
+        grid.graphics.placements()[0].line,
         grid.scrollback.len() + 1,
         "row 1 maintains its absolute row placement"
     );
@@ -540,17 +540,17 @@ fn primary_placements_are_parked_while_the_alternate_screen_is_active() {
         z_index: 0,
         ..Default::default()
     });
-    assert_eq!(grid.placements.len(), 1);
+    assert_eq!(grid.graphics.placements().len(), 1);
 
     grid.enter_alt_screen();
     assert!(
-        grid.placements.is_empty(),
+        grid.graphics.placements().is_empty(),
         "primary placements must not bleed onto the alternate screen"
     );
 
     grid.exit_alt_screen();
-    assert_eq!(grid.placements.len(), 1);
-    assert_eq!(grid.placements[0].line, 2);
+    assert_eq!(grid.graphics.placements().len(), 1);
+    assert_eq!(grid.graphics.placements()[0].line, 2);
 }
 
 #[test]
@@ -589,10 +589,10 @@ fn hidden_primary_images_survive_cache_eviction() {
     grid.exit_alt_screen();
 
     assert!(
-        grid.images.contains_key(&42),
+        grid.contains_image(42),
         "an image referenced by the hidden primary must not be evicted"
     );
-    assert_eq!(grid.placements.len(), 1);
+    assert_eq!(grid.graphics.placements().len(), 1);
 }
 
 #[test]
@@ -620,7 +620,8 @@ fn clear_saved_history_rebases_hidden_primary_placements() {
 
     assert_eq!(grid.scrollback.len(), 0);
     assert_eq!(
-        grid.placements[0].line, 1,
+        grid.graphics.placements()[0].line,
+        1,
         "the parked placement follows the cleared history"
     );
 }
@@ -813,9 +814,9 @@ fn test_image_placements_pool_has_bounded_capacity() {
             ..Default::default()
         });
     }
-    assert_eq!(grid.placements.len(), 1024);
+    assert_eq!(grid.graphics.placements().len(), 1024);
     // Oldest placements 0..76 were evicted by FIFO
-    assert_eq!(grid.placements[0].image_id, 76);
+    assert_eq!(grid.graphics.placements()[0].image_id, 76);
 }
 
 #[test]
@@ -885,10 +886,15 @@ fn test_saturated_row_recycling_rebases_image_placements() {
     grid.scroll_up(1);
 
     // Placement 1 on line 0 must be evicted
-    assert!(!grid.placements.iter().any(|p| p.image_id == 1));
+    assert!(!grid.graphics.placements().iter().any(|p| p.image_id == 1));
 
     // Placement 2 originally on line 3 must be decremented to line 2
-    let p2 = grid.placements.iter().find(|p| p.image_id == 2).unwrap();
+    let p2 = grid
+        .graphics
+        .placements()
+        .iter()
+        .find(|p| p.image_id == 2)
+        .unwrap();
     assert_eq!(p2.line, 2);
 }
 
@@ -1303,16 +1309,16 @@ fn test_stored_images_byte_budget_eviction() {
     }
 
     assert!(
-        grid.total_image_bytes() <= ftty::grid::MAX_STORED_IMAGE_BYTES,
+        grid.total_image_bytes() <= ftty::kitty::MAX_STORED_IMAGE_BYTES,
         "total bytes {} must not exceed MAX_STORED_IMAGE_BYTES {}",
         grid.total_image_bytes(),
-        ftty::grid::MAX_STORED_IMAGE_BYTES
+        ftty::kitty::MAX_STORED_IMAGE_BYTES
     );
     // Oldest images (1 and 2) must have been evicted by LRU
-    assert!(!grid.images.contains_key(&1));
-    assert!(!grid.images.contains_key(&2));
-    assert!(grid.images.contains_key(&5));
-    assert!(grid.images.contains_key(&6));
+    assert!(!grid.contains_image(1));
+    assert!(!grid.contains_image(2));
+    assert!(grid.contains_image(5));
+    assert!(grid.contains_image(6));
 }
 
 #[test]
@@ -1344,9 +1350,7 @@ fn test_image_bytes_counter_tracks_add_replace_and_remove() {
     assert_eq!(grid.total_image_bytes(), size(30, 5) + size(20, 20));
 
     // Unloading the CPU buffer after GPU upload must not affect the decoded byte budget.
-    if let Some(img) = grid.images.get_mut(&2) {
-        img.rgba = None;
-    }
+    grid.graphics.sync_gpu_textures(|id, _, _, _, _| id == 2);
     assert_eq!(grid.total_image_bytes(), size(30, 5) + size(20, 20));
 
     grid.delete_images(ftty::kitty::DeleteTarget::ByIdAndFree(1));
@@ -1354,7 +1358,7 @@ fn test_image_bytes_counter_tracks_add_replace_and_remove() {
 
     grid.delete_images(ftty::kitty::DeleteTarget::AllAndFree);
     assert_eq!(grid.total_image_bytes(), 0);
-    assert!(grid.images.is_empty());
+    assert!(grid.images().is_empty());
 }
 
 #[test]
@@ -1367,7 +1371,7 @@ fn test_single_oversized_image_rejected_without_exceeding_budget() {
         height: 5000,
         rgba: None,
     });
-    assert!(!grid.images.contains_key(&999));
+    assert!(!grid.contains_image(999));
     assert_eq!(grid.total_image_bytes(), 0);
 }
 

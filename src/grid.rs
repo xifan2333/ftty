@@ -668,10 +668,6 @@ mod tests {
 
 // --- Grid Core ---
 
-pub(crate) const MAX_PLACEMENTS: usize = 1024;
-pub(crate) const MAX_STORED_IMAGES: usize = 256;
-#[doc(hidden)]
-pub const MAX_STORED_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 #[doc(hidden)]
 pub const MAX_ROW_POOL_CAPACITY: usize = 64;
 
@@ -686,20 +682,8 @@ pub struct Grid {
     pub scrollback: VecDeque<Row>,
     pub viewport_offset: usize,
 
-    /// Stored Kitty images keyed by image id.
-    ///
-    /// Kept crate-private so the [`Self::image_bytes_total`] budget invariant cannot be broken by
-    /// outside code mutating the map or the size-defining [`ImageData`] fields directly. Use
-    /// [`Self::images`] for read-only access and the provided mutation methods to change state.
-    #[doc(hidden)]
-    pub images: HashMap<u32, ImageData>,
-    /// Running sum of `ImageData::byte_size()` across `images`, kept in sync on every mutation
-    /// so eviction checks never re-sum the whole map.
-    pub(crate) image_bytes_total: usize,
-    pub image_versions: HashMap<u32, u64>,
-    pub placements: Vec<ImagePlacement>,
-    pub virtual_placements: HashMap<u32, (usize, usize)>,
-    pub(crate) image_lru: Vec<u32>,
+    /// Kitty graphics image decoding, spatial placement indexing, and memory budgeting subsystem.
+    pub graphics: crate::kitty::GraphicStore,
 
     pub cursor: Cursor,
     pub saved_cursor: Cursor,
@@ -714,7 +698,6 @@ pub struct Grid {
     pub(crate) alt_lines: Option<Vec<Row>>,
     pub(crate) alt_cursor: Option<Cursor>,
     pub(crate) alt_saved_cursor: Option<Cursor>,
-    pub(crate) alt_placements: Vec<ImagePlacement>,
 
     // Recycling pool for evicted or discarded rows to eliminate Vec<Cell> allocations.
     #[doc(hidden)]
@@ -742,12 +725,7 @@ impl Grid {
             lines,
             scrollback: VecDeque::new(),
             viewport_offset: 0,
-            images: HashMap::new(),
-            image_bytes_total: 0,
-            image_versions: HashMap::new(),
-            placements: Vec::new(),
-            virtual_placements: HashMap::new(),
-            image_lru: Vec::new(),
+            graphics: crate::kitty::GraphicStore::new(),
             cursor: Cursor::default(),
             saved_cursor: Cursor::default(),
             scroll_region_top: 0,
@@ -757,7 +735,6 @@ impl Grid {
             alt_lines: None,
             alt_cursor: None,
             alt_saved_cursor: None,
-            alt_placements: Vec::new(),
             row_pool: Vec::new(),
             cluster_anchor: None,
             scratch_cluster: String::with_capacity(32),
@@ -805,267 +782,49 @@ impl Grid {
     /// Returns the sum of decoded RGBA byte sizes across all stored images.
     #[must_use]
     pub fn total_image_bytes(&self) -> usize {
-        self.image_bytes_total
+        self.graphics.total_image_bytes()
     }
 
     /// Read-only view of stored images keyed by image id.
     #[must_use]
     pub fn images(&self) -> &HashMap<u32, ImageData> {
-        &self.images
+        self.graphics.images()
+    }
+
+    /// Read-only view of image placements.
+    #[must_use]
+    pub fn placements(&self) -> &[ImagePlacement] {
+        self.graphics.placements()
     }
 
     /// Returns `true` if an image with the given id is currently stored.
     #[must_use]
     pub fn contains_image(&self, id: u32) -> bool {
-        self.images.contains_key(&id)
+        self.graphics.contains_image(id)
     }
 
-    pub(crate) fn remove_image_internal(&mut self, k: u32) {
-        if let Some(image) = self.images.remove(&k) {
-            self.image_bytes_total = self.image_bytes_total.saturating_sub(image.byte_size());
-        }
-        self.image_versions.remove(&k);
-        self.placements.retain(|p| p.image_id != k);
-        self.alt_placements.retain(|p| p.image_id != k);
-        self.virtual_placements.remove(&k);
-        self.image_lru.retain(|&id| id != k);
-    }
-
+    /// Adds a decoded image to the graphic store.
     pub fn add_image(&mut self, image: ImageData) {
-        let id = image.id;
-        if image.byte_size() > MAX_STORED_IMAGE_BYTES {
-            self.remove_image_internal(id);
-            return;
-        }
-
-        self.image_lru.retain(|&k| k != id);
-        self.image_lru.push(id);
-        let byte_size = image.byte_size();
-        if let Some(previous) = self.images.insert(id, image) {
-            self.image_bytes_total = self.image_bytes_total.saturating_sub(previous.byte_size());
-        }
-        self.image_bytes_total = self.image_bytes_total.saturating_add(byte_size);
-        let ver = self.image_versions.entry(id).or_insert(0);
-        *ver = ver.wrapping_add(1);
-
-        // Enforce both count limit (MAX_STORED_IMAGES) and byte budget (MAX_STORED_IMAGE_BYTES)
-        if self.images.len() > MAX_STORED_IMAGES
-            || self.total_image_bytes() > MAX_STORED_IMAGE_BYTES
-        {
-            let mut active_ids: std::collections::HashSet<u32> = self
-                .placements
-                .iter()
-                .chain(self.alt_placements.iter())
-                .map(|p| p.image_id)
-                .collect();
-            // Virtual image IDs stay alive while a placeholder on either screen or scrollback references them.
-            for row in self
-                .lines
+        let active = crate::kitty::collect_placeholder_ids(
+            self.lines
                 .iter()
                 .chain(self.alt_lines.iter().flatten())
-                .chain(self.scrollback.iter())
-            {
-                for cell in &row.cells {
-                    if cell.c != KITTY_PLACEHOLDER {
-                        continue;
-                    }
-                    let id_low24 = match cell.fg {
-                        Color::Rgb(r, g, b) => ((r as u32) << 16) | ((g as u32) << 8) | (b as u32),
-                        Color::Indexed(idx) => idx as u32,
-                        _ => 0,
-                    } & 0x00FF_FFFF;
-                    if id_low24 == 0 {
-                        continue;
-                    }
-                    active_ids.insert(id_low24);
-                    if let Some(&real_id) = self
-                        .virtual_placements
-                        .keys()
-                        .find(|&&k| (k & 0x00FF_FFFF) == id_low24)
-                    {
-                        active_ids.insert(real_id);
-                    }
-                }
-            }
-            self.virtual_placements
-                .retain(|id, _| active_ids.contains(id));
-
-            // First pass: evict unreferenced images in LRU order
-            let unplaced: Vec<u32> = self
-                .image_lru
-                .iter()
-                .copied()
-                .filter(|&k| k != id && !active_ids.contains(&k))
-                .collect();
-            for k in unplaced {
-                if self.images.len() <= MAX_STORED_IMAGES
-                    && self.total_image_bytes() <= MAX_STORED_IMAGE_BYTES
-                {
-                    break;
-                }
-                self.remove_image_internal(k);
-            }
-
-            // Second pass: if still exceeding budget, evict oldest referenced images
-            while self.images.len() > MAX_STORED_IMAGES
-                || self.total_image_bytes() > MAX_STORED_IMAGE_BYTES
-            {
-                let oldest = self.image_lru.iter().copied().find(|&k| k != id);
-                let Some(k) = oldest else { break };
-                self.remove_image_internal(k);
-            }
-        }
+                .chain(self.scrollback.iter()),
+        );
+        self.graphics.add_image(image, &active);
     }
 
     /// Adds an image placement instance anchored to grid cells with FIFO eviction.
-    /// If an existing placement with the same nonzero placement_id and image_id exists,
-    /// it is replaced per the Kitty graphics protocol specification.
     pub fn add_placement(&mut self, placement: ImagePlacement) {
-        if placement.placement_id != 0
-            && let Some(existing) = self.placements.iter_mut().find(|p| {
-                p.image_id == placement.image_id && p.placement_id == placement.placement_id
-            })
-        {
-            *existing = placement;
-            return;
-        }
-        if self.placements.len() >= MAX_PLACEMENTS {
-            self.placements.remove(0);
-        }
-        self.placements.push(placement);
-    }
-
-    fn delete_placements_at(&mut self, matches: impl Fn(&ImagePlacement) -> bool, free: bool) {
-        let mut affected = Vec::new();
-        for placement in &self.placements {
-            if matches(placement) && !affected.contains(&placement.image_id) {
-                affected.push(placement.image_id);
-            }
-        }
-        self.placements.retain(|placement| !matches(placement));
-        self.mark_visible_dirty();
-        if free {
-            self.free_images_without_placements(&affected);
-        }
-    }
-
-    fn free_images_without_placements(&mut self, image_ids: &[u32]) {
-        for &id in image_ids {
-            let placed = self.placements.iter().any(|p| p.image_id == id)
-                || self.alt_placements.iter().any(|p| p.image_id == id)
-                || self.virtual_placements.contains_key(&id);
-            if !placed {
-                self.remove_image_internal(id);
-            }
-        }
+        self.graphics.add_placement(placement);
     }
 
     /// Deletes images and/or placements matching the given delete target.
     pub fn delete_images(&mut self, target: DeleteTarget) {
-        match target {
-            DeleteTarget::All => {
-                self.placements.clear();
-                self.alt_placements.clear();
-                self.mark_visible_dirty();
-            }
-            DeleteTarget::AllAndFree => {
-                self.images.clear();
-                self.image_bytes_total = 0;
-                self.image_versions.clear();
-                self.placements.clear();
-                self.alt_placements.clear();
-                self.virtual_placements.clear();
-                self.image_lru.clear();
-                self.mark_visible_dirty();
-            }
-            DeleteTarget::ById(id) => {
-                self.placements.retain(|p| p.image_id != id);
-                self.alt_placements.retain(|p| p.image_id != id);
-                self.mark_visible_dirty();
-            }
-            DeleteTarget::ByIdAndFree(id) => {
-                self.remove_image_internal(id);
-                self.mark_visible_dirty();
-            }
-            DeleteTarget::ByIdPlacement(id, placement) => {
-                self.placements
-                    .retain(|p| !(p.image_id == id && p.placement_id == placement));
-                self.alt_placements
-                    .retain(|p| !(p.image_id == id && p.placement_id == placement));
-                self.mark_visible_dirty();
-            }
-            DeleteTarget::ByIdPlacementAndFree(id, placement) => {
-                self.placements
-                    .retain(|p| !(p.image_id == id && p.placement_id == placement));
-                self.alt_placements
-                    .retain(|p| !(p.image_id == id && p.placement_id == placement));
-                self.free_images_without_placements(&[id]);
-                self.mark_visible_dirty();
-            }
-            DeleteTarget::ByNumber { .. } => {
-                // The parser resolves image numbers before emitting the delete event.
-            }
-            DeleteTarget::AtCursor => {
-                let abs_line = self.scrollback.len() + self.cursor.row;
-                let col = self.cursor.col;
-                self.delete_placements_at(
-                    |p| {
-                        p.line <= abs_line
-                            && abs_line < p.line + p.rows
-                            && p.col <= col
-                            && col < p.col + p.cols
-                    },
-                    false,
-                );
-            }
-            DeleteTarget::AtCursorAndFree => {
-                let abs_line = self.scrollback.len() + self.cursor.row;
-                let col = self.cursor.col;
-                self.delete_placements_at(
-                    |p| {
-                        p.line <= abs_line
-                            && abs_line < p.line + p.rows
-                            && p.col <= col
-                            && col < p.col + p.cols
-                    },
-                    true,
-                );
-            }
-            DeleteTarget::AtAbsoluteCell { x, y, z, free } => {
-                let row = y.saturating_sub(1) as usize;
-                let col = x.saturating_sub(1) as usize;
-                let abs_line = self.scrollback.len() + row;
-                self.delete_placements_at(
-                    |p| {
-                        p.line <= abs_line
-                            && abs_line < p.line + p.rows
-                            && p.col <= col
-                            && col < p.col + p.cols
-                            && z.is_none_or(|z| p.z_index == z)
-                    },
-                    free,
-                );
-            }
-            DeleteTarget::ByColumn { x, free } => {
-                let col = x.saturating_sub(1) as usize;
-                self.delete_placements_at(|p| p.col <= col && col < p.col + p.cols, free);
-            }
-            DeleteTarget::ByRow { y, free } => {
-                let row = self.scrollback.len() + y.saturating_sub(1) as usize;
-                self.delete_placements_at(|p| p.line <= row && row < p.line + p.rows, free);
-            }
-            DeleteTarget::ByZIndex(z_index) => {
-                self.placements.retain(|p| p.z_index != z_index);
-                self.alt_placements.retain(|p| p.z_index != z_index);
-                self.mark_visible_dirty();
-            }
-            DeleteTarget::ByZIndexAndFree(z_index) => {
-                self.delete_placements_at(|p| p.z_index == z_index, true);
-            }
-            DeleteTarget::ByIdRange { lo, hi, free } => {
-                self.delete_placements_at(|p| lo <= p.image_id && p.image_id <= hi, free);
-            }
-        }
+        let abs_line = self.scrollback.len() + self.cursor.row;
+        self.graphics
+            .delete_images(target, abs_line, self.cursor.col);
+        self.mark_visible_dirty();
     }
 
     pub fn enter_alt_screen(&mut self) {
@@ -1078,7 +837,7 @@ impl Grid {
             self.cursor = Cursor::default();
             self.saved_cursor = Cursor::default();
             // Each screen owns its placements; the primary's are parked until it is restored.
-            self.alt_placements = std::mem::take(&mut self.placements);
+            self.graphics.switch_to_alt_screen();
             self.viewport_offset = 0;
         }
     }
@@ -1094,7 +853,7 @@ impl Grid {
             if let Some(saved) = self.alt_saved_cursor.take() {
                 self.saved_cursor = saved;
             }
-            self.placements = std::mem::take(&mut self.alt_placements);
+            self.graphics.restore_from_alt_screen();
             self.viewport_offset = 0;
             self.mark_all_dirty();
         }
@@ -1124,16 +883,7 @@ impl Grid {
 
     pub(crate) fn evict_oldest_scrollback_row(&mut self) -> Option<Row> {
         let row = self.scrollback.pop_front()?;
-        if !self.placements.is_empty() {
-            self.placements.retain_mut(|p| {
-                if p.line == 0 {
-                    false
-                } else {
-                    p.line -= 1;
-                    true
-                }
-            });
-        }
+        self.graphics.shift_on_scroll_up(1);
         self.total_evicted_rows = self.total_evicted_rows.saturating_add(1);
         while let Some(&first) = self.prompt_marks.first() {
             if first < self.total_evicted_rows {
@@ -1467,19 +1217,7 @@ impl Grid {
             self.shift_region_marks_up(self.scroll_region_top, self.scroll_region_bottom, count);
             let top_line = self.scrollback.len() + self.scroll_region_top;
             let bottom_line = self.scrollback.len() + self.scroll_region_bottom;
-            self.placements.retain_mut(|p| {
-                if p.line >= top_line && p.line <= bottom_line {
-                    let end_line = p.line + p.rows;
-                    if end_line <= top_line + count {
-                        false // All rows of the image scrolled out
-                    } else {
-                        p.line -= count;
-                        true
-                    }
-                } else {
-                    true
-                }
-            });
+            self.graphics.shift_region_up(top_line, bottom_line, count);
         }
         self.lines[self.scroll_region_top..=self.scroll_region_bottom].rotate_left(count);
         for row in
@@ -1512,18 +1250,8 @@ impl Grid {
         self.shift_region_marks_down(self.scroll_region_top, self.scroll_region_bottom, count);
         let top_line = self.scrollback.len() + self.scroll_region_top;
         let bottom_line = self.scrollback.len() + self.scroll_region_bottom;
-        self.placements.retain_mut(|p| {
-            if p.line >= top_line && p.line <= bottom_line {
-                if p.line + count > bottom_line {
-                    false // Entire image anchor shifted past the bottom
-                } else {
-                    p.line += count;
-                    true
-                }
-            } else {
-                true
-            }
-        });
+        self.graphics
+            .shift_region_down(top_line, bottom_line, count);
         self.lines[self.scroll_region_top..=self.scroll_region_bottom].rotate_right(count);
         for row in &mut self.lines[self.scroll_region_top..self.scroll_region_top + count] {
             row.reset_with_bg(bg);
@@ -1581,18 +1309,7 @@ impl Grid {
                 self.viewport_offset = 0;
                 self.total_evicted_rows = self.total_evicted_rows.saturating_add(sb_len);
                 self.prompt_marks.retain(|&m| m >= self.total_evicted_rows);
-                // Both screens share the scrollback base, so the hidden primary's placements need
-                // the same rebase as the active screen's.
-                for placements in [&mut self.placements, &mut self.alt_placements] {
-                    placements.retain_mut(|p| {
-                        if p.line < sb_len {
-                            false
-                        } else {
-                            p.line -= sb_len;
-                            true
-                        }
-                    });
-                }
+                self.graphics.rebase_scrollback(sb_len);
                 self.mark_all_dirty();
             }
         }
@@ -2211,22 +1928,6 @@ pub(crate) fn shrink_rows(
     removed
 }
 
-/// Moves every placement anchored to a surviving row up by `amount`, dropping the ones whose row
-/// was removed. Used when a screen trims its top rows without saving them to scrollback.
-pub(crate) fn shift_placements(placements: &mut Vec<ImagePlacement>, amount: usize) {
-    if amount == 0 {
-        return;
-    }
-    placements.retain_mut(|p| {
-        if p.line < amount {
-            false
-        } else {
-            p.line -= amount;
-            true
-        }
-    });
-}
-
 type ReflowCell = (crate::grid::Cell, Option<(u16, u16, u8)>, Option<String>);
 
 impl Grid {
@@ -2320,7 +2021,7 @@ impl Grid {
                     if let Some(saved) = &mut self.alt_saved_cursor {
                         saved.row = saved.row.saturating_sub(hidden_from_top);
                     }
-                    shift_placements(&mut self.alt_placements, hidden_from_top);
+                    self.graphics.shift_placements(hidden_from_top);
                 }
             } else {
                 // Primary screen with scrollback: trim below cursor first so active prompt/cursor survives.
@@ -2334,7 +2035,7 @@ impl Grid {
                 self.cursor.row = self.cursor.row.saturating_sub(from_top);
                 self.saved_cursor.row = self.saved_cursor.row.saturating_sub(from_top);
                 if !active_retains {
-                    shift_placements(&mut self.placements, from_top);
+                    self.graphics.shift_placements(from_top);
                     if from_top > 0 {
                         self.total_evicted_rows = self.total_evicted_rows.saturating_add(from_top);
                         while let Some(&first) = self.prompt_marks.first() {
@@ -2350,8 +2051,8 @@ impl Grid {
 
             let bottom_line = self.scrollback.len() + new_rows;
             let abs_bottom = self.total_evicted_rows + bottom_line;
-            self.placements.retain(|p| p.line < bottom_line);
-            self.alt_placements.retain(|p| p.line < bottom_line);
+            self.graphics
+                .retain_mut_placements(|p| p.line < bottom_line);
             self.prompt_marks.retain(|&m| m < abs_bottom);
         }
 
@@ -2404,7 +2105,7 @@ impl Grid {
                 current_has_prompt_mark = true;
             }
 
-            for p in &self.placements {
+            for p in self.graphics.placements() {
                 if p.line == abs_row {
                     current_placements.push((current_cells.len(), p.clone()));
                 }
@@ -2675,7 +2376,7 @@ impl Grid {
                 p.line < total_screen_lines
             }
         });
-        self.placements = new_placements;
+        self.graphics.update_placements_after_reflow(new_placements);
 
         // Apply updated cursor
         let max_row = new_rows.saturating_sub(1);
