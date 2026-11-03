@@ -12,6 +12,7 @@ use ftty::input::mouse::{MouseEncoding, MouseTracking};
 use ftty::input::selection::SelectionPoint;
 use ftty::parser::Terminal;
 use ftty::pty::Pty;
+use ftty::session::TerminalSession;
 use ftty::wayland::{WaylandState, WindowState};
 
 #[test]
@@ -154,7 +155,7 @@ fn test_xdg_toplevel_configure_sizing_behavior() {
     let registry = conn.display().get_registry(&qh, ());
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
-    let mut app = AppState::new(term, pty).expect("app");
+    let mut app = AppState::new(TerminalSession::new(term, pty)).expect("app");
 
     let comp =
         registry.bind::<wayland_client::protocol::wl_compositor::WlCompositor, _, _>(1, 4, &qh, ());
@@ -241,7 +242,7 @@ fn clipboard_offer_is_created_and_dispatched_from_the_wire() {
 
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).unwrap();
-    let mut app = AppState::new(term, pty).unwrap();
+    let mut app = AppState::new(TerminalSession::new(term, pty)).unwrap();
     conn.prepare_read().unwrap().read().unwrap();
     queue.dispatch_pending(&mut app).unwrap();
 
@@ -267,9 +268,9 @@ fn pointer_events_from_the_wire_drive_mouse_reports() {
 
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).unwrap();
-    let mut app = AppState::new(term, pty).unwrap();
-    app.terminal.mouse.tracking = MouseTracking::Drag;
-    app.terminal.mouse.encoding = MouseEncoding::Sgr;
+    let mut app = AppState::new(TerminalSession::new(term, pty)).unwrap();
+    app.session.terminal.mouse.tracking = MouseTracking::Drag;
+    app.session.terminal.mouse.encoding = MouseEncoding::Sgr;
     conn.prepare_read().unwrap().read().unwrap();
     queue.dispatch_pending(&mut app).unwrap();
 
@@ -303,7 +304,7 @@ fn pointer_events_from_the_wire_drive_mouse_reports() {
     assert_eq!(app.last_serial, 9);
 
     // Turning tracking off hands the very same press back to local selection.
-    app.terminal.mouse.tracking = MouseTracking::Disabled;
+    app.session.terminal.mouse.tracking = MouseTracking::Disabled;
     app.pointer.mouse_reported = false;
     app.pointer.mouse_pos = [(cw * 2.5) + pad_x, (ch * 1.5) + pad_y];
     let mut events = Vec::new();

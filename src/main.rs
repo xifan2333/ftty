@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use ftty::{AppState, Config, Pty, Terminal, run_event_loop_with_connection};
+use ftty::{AppState, Config, Pty, Terminal, TerminalSession, run_event_loop_with_connection};
 
 fn print_help() {
     println!(
@@ -151,21 +151,22 @@ fn main() {
             std::process::exit(1);
         }
     };
+    let session = TerminalSession::new(term, pty);
 
-    let mut app_state =
-        match AppState::with_font_and_config(term, pty, font_mgr, config, config_path) {
-            Ok(state) => state,
-            Err(e) => {
-                eprintln!("ftty: failed to initialize state: {e}");
-                std::process::exit(1);
-            }
-        };
+    let mut app_state = match AppState::with_font_and_config(session, font_mgr, config, config_path)
+    {
+        Ok(state) => state,
+        Err(e) => {
+            eprintln!("ftty: failed to initialize state: {e}");
+            std::process::exit(1);
+        }
+    };
 
     if let Some(id) = app_id {
         app_state.wayland.app_id = id;
     }
     if let Some(t) = title {
-        app_state.terminal.title = t.clone();
+        app_state.session.terminal.title = t.clone();
         app_state.wayland.title = t;
     }
 
