@@ -122,3 +122,40 @@ fn test_session_atomic_resize() {
     assert_eq!(session.terminal().cell_pixels, [10, 20]);
     assert_eq!(session.terminal().viewport_pixels, [1000, 600]);
 }
+
+#[test]
+fn test_session_kitty_stream_placement_and_cursor_advance() {
+    use base64::Engine;
+    use base64::prelude::BASE64_STANDARD;
+
+    let mut session = create_test_session(80, 24);
+
+    let raw = [0u8, 0, 255, 255];
+    let b64 = BASE64_STANDARD.encode(raw);
+    let payload = format!("\x1b_Ga=T,f=32,s=1,v=1,i=77;{b64}\x1b\\");
+    let outcome = session.process_incoming_bytes(payload.as_bytes(), 10.0, 20.0, false);
+
+    assert!(outcome.needs_redraw);
+    assert_eq!(session.terminal().grid.graphics.placements().len(), 1);
+}
+
+#[test]
+fn test_session_read_and_process_pty_title_aggregation() {
+    let mut session = create_test_session(80, 24);
+    session.write_input_bytes(b"printf '\\033]0;aggregated_title\\007'\n");
+
+    let mut found_title = false;
+    for _ in 0..50 {
+        std::thread::sleep(Duration::from_millis(20));
+        if let Ok(outcome) = session.read_and_process_pty(10.0, 20.0, false)
+            && outcome.title_update == Some("aggregated_title".to_string())
+        {
+            found_title = true;
+            break;
+        }
+    }
+    assert!(
+        found_title,
+        "read_and_process_pty must aggregate title notifications"
+    );
+}

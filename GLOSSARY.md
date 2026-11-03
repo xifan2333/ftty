@@ -31,3 +31,7 @@ _Avoid_: RenderService, DrawingContext, FrameRenderer
 **TerminalSession**:
 The orchestrator coordinating the pseudo-terminal (PTY) communication channel, escape sequence parsing, and terminal emulation state.
 _Avoid_: SessionManager, TermSession, PtyBridge
+
+**SessionOutcome**:
+The composite set of platform notifications produced by evaluating terminal PTY input and escape sequences.
+_Avoid_: TerminalEvent, SessionUpdate, ProcessResult

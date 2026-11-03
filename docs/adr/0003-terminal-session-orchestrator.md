@@ -8,5 +8,5 @@ We introduce `TerminalSession` under `src/session.rs` as a deep module that unif
 
 ## Consequences
 - `AppState` eliminates internal parser instances, PTY file descriptors, and synchronization timers, reducing to a clean platform coordinator.
-- Core terminal emulation and escape protocol responses become testable end-to-end in pure memory without spawning background processes or initializing Wayland event loops.
+- Core terminal emulation and escape protocol responses in `Terminal` can be verified in pure memory, and `TerminalSession` orchestrates full PTY I/O and parser demuxing without initializing Wayland event loops.
 - `event_loop.rs` transforms into a concise, low-maintenance event pump.

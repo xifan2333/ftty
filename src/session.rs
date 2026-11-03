@@ -107,13 +107,13 @@ impl TerminalSession {
         cell_pixels: [u16; 2],
         viewport_pixels: [u16; 2],
     ) -> io::Result<()> {
+        self.pty
+            .resize(cols, rows, viewport_pixels[0], viewport_pixels[1])?;
         let (c, r) = (cols as usize, rows as usize);
         if (self.terminal.grid.cols, self.terminal.grid.rows) != (c, r) {
             self.terminal.grid.resize(c, r);
         }
         self.terminal.set_geometry(cell_pixels, viewport_pixels);
-        self.pty
-            .resize(cols, rows, viewport_pixels[0], viewport_pixels[1])?;
 
         if !self.terminal.responses.is_empty() {
             for response in self.terminal.take_responses() {
@@ -166,7 +166,6 @@ impl TerminalSession {
             self.advance_vt_bytes(incoming, auto_scroll, &mut outcome);
         } else {
             let mut parser = std::mem::take(&mut self.kitty_parser);
-            let mut pty_responses = Vec::new();
 
             parser.process_stream(incoming, |chunk| match chunk {
                 KittyStreamChunk::Text(text) => {
@@ -198,18 +197,18 @@ impl TerminalSession {
                         self.advance_cursor_for_image(cols, rows, do_not_move);
                     }
                     if let Some(resp) = graphic_outcome.pty_response {
-                        pty_responses.push(resp);
+                        self.write_input_bytes(&resp);
                     }
                     if graphic_outcome.needs_redraw {
                         outcome.needs_redraw = true;
+                        if auto_scroll && !self.terminal.grid.is_alt_screen() {
+                            self.terminal.grid.scroll_viewport_bottom();
+                        }
                     }
                 }
             });
 
             self.kitty_parser = parser;
-            for resp in pty_responses {
-                self.write_input_bytes(&resp);
-            }
         }
 
         outcome.kitty_keyboard_flags = self.terminal.kitty_keyboard_flags;
@@ -280,6 +279,11 @@ impl TerminalSession {
         }
 
         self.terminal.advance_bytes(&mut self.vt_parser, text);
+
+        if self.terminal.sync_output_gen != self.last_sync_gen {
+            self.last_sync_gen = self.terminal.sync_output_gen;
+            self.sync_output_start = Some(Instant::now());
+        }
 
         if !self.terminal.responses.is_empty() {
             for response in self.terminal.take_responses() {

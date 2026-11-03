@@ -525,7 +525,13 @@ impl AppState {
             saturating_u16(phys_width.saturating_sub(u32::from(pad_x) * 2)),
             saturating_u16(phys_height.saturating_sub(u32::from(pad_y) * 2)),
         ];
-        self.pointer.clear_selection();
+        if (
+            self.session.terminal.grid.cols,
+            self.session.terminal.grid.rows,
+        ) != (cols as usize, rows as usize)
+        {
+            self.pointer.clear_selection();
+        }
         self.session.resize(
             cols,
             rows,
