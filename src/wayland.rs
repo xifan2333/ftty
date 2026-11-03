@@ -682,8 +682,8 @@ impl Dispatch<WlKeyboard, ()> for AppState {
             } => {
                 state.last_serial = serial;
                 if state.wayland.surface.as_ref() == Some(&surface) {
-                    if state.terminal.focus_reporting {
-                        let _ = state.pty.write_all(b"\x1b[I");
+                    if state.session.terminal.focus_reporting {
+                        state.session.write_input_bytes(b"\x1b[I");
                     }
                     state.ime.active = true;
                     state.last_ime_cursor_rect.set(None);
@@ -699,8 +699,8 @@ impl Dispatch<WlKeyboard, ()> for AppState {
             }
             wl_keyboard::Event::Leave { surface, .. } => {
                 if state.wayland.surface.as_ref() == Some(&surface) {
-                    if state.terminal.focus_reporting {
-                        let _ = state.pty.write_all(b"\x1b[O");
+                    if state.session.terminal.focus_reporting {
+                        state.session.write_input_bytes(b"\x1b[O");
                     }
                     state.ime.clear();
                     state.last_ime_cursor_rect.set(None);
@@ -725,11 +725,13 @@ impl Dispatch<WlKeyboard, ()> for AppState {
                 {
                     state.handle_key_action(action, Some(qh), Some(_conn));
                 } else if let Some(bytes) = state.keyboard.handle_key_event(key, pressed, false) {
-                    if pressed && state.config.auto_scroll() && !state.terminal.grid.is_alt_screen()
+                    if pressed
+                        && state.config.auto_scroll()
+                        && !state.session.terminal.grid.is_alt_screen()
                     {
-                        state.terminal.grid.scroll_viewport_bottom();
+                        state.session.terminal.grid.scroll_viewport_bottom();
                     }
-                    let _ = state.pty.write_all(&bytes);
+                    state.session.write_input_bytes(&bytes);
                 }
             }
             wl_keyboard::Event::Modifiers {
@@ -768,9 +770,9 @@ impl Dispatch<WlPointer, ()> for AppState {
             } => {
                 state.pointer_serial = serial;
                 state.last_serial = serial;
-                let resolver = |id: u32| state.terminal.hyperlink_url(id);
+                let resolver = |id: u32| state.session.terminal.hyperlink_url(id);
                 let ctx = Self::make_pointer_context(
-                    &state.terminal,
+                    &state.session.terminal,
                     &state.font_mgr,
                     &state.config,
                     &state.keyboard,
@@ -791,9 +793,9 @@ impl Dispatch<WlPointer, ()> for AppState {
                 surface_y,
                 ..
             } => {
-                let resolver = |id: u32| state.terminal.hyperlink_url(id);
+                let resolver = |id: u32| state.session.terminal.hyperlink_url(id);
                 let ctx = Self::make_pointer_context(
-                    &state.terminal,
+                    &state.session.terminal,
                     &state.font_mgr,
                     &state.config,
                     &state.keyboard,
@@ -811,9 +813,9 @@ impl Dispatch<WlPointer, ()> for AppState {
             } => {
                 state.last_serial = serial;
                 let pressed = button_state == ButtonState::Pressed;
-                let resolver = |id: u32| state.terminal.hyperlink_url(id);
+                let resolver = |id: u32| state.session.terminal.hyperlink_url(id);
                 let ctx = Self::make_pointer_context(
-                    &state.terminal,
+                    &state.session.terminal,
                     &state.font_mgr,
                     &state.config,
                     &state.keyboard,
@@ -830,9 +832,9 @@ impl Dispatch<WlPointer, ()> for AppState {
                 value,
                 ..
             } => {
-                let resolver = |id: u32| state.terminal.hyperlink_url(id);
+                let resolver = |id: u32| state.session.terminal.hyperlink_url(id);
                 let ctx = Self::make_pointer_context(
-                    &state.terminal,
+                    &state.session.terminal,
                     &state.font_mgr,
                     &state.config,
                     &state.keyboard,
@@ -909,7 +911,7 @@ impl AppState {
         hyperlink_resolver: Option<&'a dyn Fn(u32) -> Option<&'a str>>,
     ) -> PointerContext<'a> {
         Self::make_pointer_context(
-            &self.terminal,
+            &self.session.terminal,
             &self.font_mgr,
             &self.config,
             &self.keyboard,
@@ -938,15 +940,19 @@ impl AppState {
         }
         if let Some(lines) = outcome.scroll_lines {
             if lines < 0 {
-                self.terminal
+                self.session
+                    .terminal
                     .grid
                     .scroll_viewport_up(lines.unsigned_abs() as usize);
             } else {
-                self.terminal.grid.scroll_viewport_down(lines as usize);
+                self.session
+                    .terminal
+                    .grid
+                    .scroll_viewport_down(lines as usize);
             }
-            let resolver = |id: u32| self.terminal.hyperlink_url(id);
+            let resolver = |id: u32| self.session.terminal.hyperlink_url(id);
             let ctx = Self::make_pointer_context(
-                &self.terminal,
+                &self.session.terminal,
                 &self.font_mgr,
                 &self.config,
                 &self.keyboard,
@@ -986,7 +992,7 @@ impl AppState {
         if !self.pointer.is_in_surface() || self.pointer_serial == 0 {
             return;
         }
-        let resolver = |id: u32| self.terminal.hyperlink_url(id);
+        let resolver = |id: u32| self.session.terminal.hyperlink_url(id);
         let ctx = self.pointer_ctx(Some(&resolver));
         let shape = self.pointer.expected_cursor_shape(&ctx);
         if self.pointer.current_cursor_shape() == Some(shape) {
@@ -1000,9 +1006,9 @@ impl AppState {
 
     /// Updates the hovered hyperlink and cursor shape based on current pointer coordinates.
     pub fn update_hover_state(&mut self) {
-        let resolver = |id: u32| self.terminal.hyperlink_url(id);
+        let resolver = |id: u32| self.session.terminal.hyperlink_url(id);
         let ctx = Self::make_pointer_context(
-            &self.terminal,
+            &self.session.terminal,
             &self.font_mgr,
             &self.config,
             &self.keyboard,
@@ -1024,7 +1030,7 @@ impl AppState {
     /// Returns the resolved URL at the current pointer position if one exists.
     #[must_use]
     pub fn url_at_pointer(&self) -> Option<String> {
-        let resolver = |id: u32| self.terminal.hyperlink_url(id);
+        let resolver = |id: u32| self.session.terminal.hyperlink_url(id);
         let ctx = self.pointer_ctx(Some(&resolver));
         self.pointer.url_at_pointer(&ctx)
     }
@@ -1032,7 +1038,7 @@ impl AppState {
     /// Returns the absolute `(line, screen_row, col)` grid coordinates under the surface-relative pointer position.
     #[must_use]
     pub fn cell_at_pointer(&self, surface_x: f64, surface_y: f64) -> (usize, usize, usize) {
-        let resolver = |id: u32| self.terminal.hyperlink_url(id);
+        let resolver = |id: u32| self.session.terminal.hyperlink_url(id);
         let ctx = self.pointer_ctx(Some(&resolver));
         PointerController::cell_at_coords(surface_x, surface_y, &ctx)
     }
@@ -1043,7 +1049,7 @@ impl AppState {
     /// which is the conventional override that hands the pointer back to text selection.
     #[doc(hidden)]
     pub fn mouse_report_bytes(&self, button: u8, pressed: bool, motion: bool) -> Option<Vec<u8>> {
-        let resolver = |id: u32| self.terminal.hyperlink_url(id);
+        let resolver = |id: u32| self.session.terminal.hyperlink_url(id);
         let ctx = self.pointer_ctx(Some(&resolver));
         if !ctx.mouse_mode.is_reporting() {
             return None;
@@ -1128,14 +1134,14 @@ impl Dispatch<ZwpTextInputV3, ()> for AppState {
                 let (delete, commit) = state.ime.apply_done();
                 if let Some((before, after)) = delete {
                     for _ in 0..before {
-                        let _ = state.pty.write_all(b"\x08");
+                        state.session.write_input_bytes(b"\x08");
                     }
                     for _ in 0..after {
-                        let _ = state.pty.write_all(b"\x1b[3~");
+                        state.session.write_input_bytes(b"\x1b[3~");
                     }
                 }
                 if let Some(text) = commit {
-                    let _ = state.pty.write_all(text.as_bytes());
+                    state.session.write_input_bytes(text.as_bytes());
                 }
                 state.needs_redraw = true;
             }
@@ -1155,7 +1161,7 @@ impl AppState {
             return;
         };
         let (x, y, w, h) = crate::input::ime::calculate_cursor_rect(
-            &self.terminal.grid,
+            &self.session.terminal.grid,
             self.font_mgr.metrics,
             [self.config.padding_x(), self.config.padding_y()],
         );
@@ -1295,7 +1301,9 @@ impl Dispatch<WlDataOffer, ()> for AppState {
 impl AppState {
     /// Sets the clipboard content internally and offers it through the Wayland data device.
     pub fn set_clipboard_text(&mut self, text: String, qh: Option<&QueueHandle<Self>>) {
-        self.terminal.set_clipboard_content(Some(text.clone()));
+        self.session
+            .terminal
+            .set_clipboard_content(Some(text.clone()));
         self.clipboard_text = Some(text);
 
         if let (Some(qh), Some(manager), Some(device)) = (
@@ -1314,7 +1322,10 @@ impl AppState {
 
     /// Copies the currently selected text to the Wayland clipboard and internal buffer.
     pub fn copy_selection(&mut self, qh: Option<&QueueHandle<Self>>) {
-        let text = self.pointer.selection.extract_text(&self.terminal.grid);
+        let text = self
+            .pointer
+            .selection
+            .extract_text(&self.session.terminal.grid);
         if text.is_empty() {
             return;
         }
@@ -1324,7 +1335,7 @@ impl AppState {
 
     /// Pastes text from the Wayland clipboard into the terminal PTY.
     pub fn paste_clipboard(&mut self, conn: Option<&Connection>) {
-        let bracketed = self.terminal.bracketed_paste;
+        let bracketed = self.session.terminal.bracketed_paste;
         if let Some(offer_data) = &self.wayland.current_offer {
             if let Some(mime) = best_text_mime(&offer_data.mime_types)
                 && let Ok((read_fd, write_fd)) = nix::unistd::pipe2(OFlag::O_CLOEXEC)
@@ -1336,7 +1347,7 @@ impl AppState {
                     let _ = c.flush();
                 }
 
-                if let Ok(pty_fd) = self.pty.try_clone_master() {
+                if let Ok(pty_fd) = self.session.pty.try_clone_master() {
                     std::thread::spawn(move || {
                         // Limit paste payload to at most 10 MiB to prevent memory exhaustion
                         let mut reader = std::fs::File::from(read_fd).take(10 * 1024 * 1024);
@@ -1391,7 +1402,7 @@ impl AppState {
 
             if payload.len() <= 4096 {
                 self.write_pty_blocking(&payload);
-            } else if let Ok(pty_fd) = self.pty.try_clone_master() {
+            } else if let Ok(pty_fd) = self.session.pty.try_clone_master() {
                 std::thread::spawn(move || {
                     let mut to_write = &payload[..];
                     let start = std::time::Instant::now();

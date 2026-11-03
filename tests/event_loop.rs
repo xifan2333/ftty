@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::time::Duration;
 
 use ftty::color::Rgb;
@@ -8,7 +8,8 @@ use ftty::config::Config;
 use ftty::error::FttyError;
 
 fn new_test_app(term: Terminal, pty: Pty) -> Result<AppState, FttyError> {
-    AppState::with_loaded_config(term, pty, Config::default(), None)
+    let session = ftty::TerminalSession::new(term, pty);
+    AppState::with_loaded_config(session, Config::default(), None)
 }
 use ftty::event_loop::{AppState, terminal_size};
 use ftty::font::CellMetrics;
@@ -41,8 +42,8 @@ fn test_app_state_initialization() {
     let app = new_test_app(term, pty).expect("AppState new");
 
     assert!(app.running);
-    assert_eq!(app.terminal.grid.cols, 80);
-    assert_eq!(app.terminal.grid.rows, 24);
+    assert_eq!(app.session.terminal.grid.cols, 80);
+    assert_eq!(app.session.terminal.grid.rows, 24);
     assert!(app.font_mgr.metrics.cell_width > 0);
     assert!(app.font_mgr.metrics.cell_height > 0);
     assert!(!app.wayland.configured);
@@ -55,20 +56,20 @@ fn test_pty_and_terminal_roundtrip() {
     let mut app = new_test_app(term, pty).expect("AppState new");
 
     // Send a command to shell via PTY
-    app.pty
+    app.session
+        .pty
         .write_all(b"echo ftty_test_ok\n")
         .expect("write to pty");
 
     // Wait briefly and read output back into terminal
     let mut received = false;
+    let cw = app.font_mgr.metrics.cell_width as f32;
+    let ch = app.font_mgr.metrics.cell_height as f32;
     for _ in 0..50 {
         std::thread::sleep(Duration::from_millis(20));
-        let mut buf = [0u8; 1024];
-        if let Ok(n) = app.pty.read(&mut buf)
-            && n > 0
-        {
-            app.terminal.advance_bytes(&mut app.vt_parser, &buf[..n]);
+        if let Ok(_outcome) = app.session.read_and_process_pty(cw, ch, false) {
             let full_screen: String = app
+                .session
                 .terminal
                 .grid
                 .lines
@@ -107,12 +108,13 @@ fn test_app_state_reload_config() {
 
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
+    let session = ftty::TerminalSession::new(term, pty);
     let mut app =
-        AppState::with_config(term, pty, Some(config_path.clone())).expect("AppState with_config");
+        AppState::with_config(session, Some(config_path.clone())).expect("AppState with_config");
 
     assert_eq!(app.default_bg, Rgb::new(0, 0, 0));
     assert_eq!(app.default_fg, Rgb::new(255, 255, 255));
-    assert_eq!(app.terminal.grid.cursor.shape, CursorShape::Block);
+    assert_eq!(app.session.terminal.grid.cursor.shape, CursorShape::Block);
 
     // Update config file with new colors, cursor, and padding
     std::fs::write(
@@ -136,7 +138,10 @@ fn test_app_state_reload_config() {
 
     assert_eq!(app.default_bg, Rgb::new(18, 52, 86));
     assert_eq!(app.default_fg, Rgb::new(255, 0, 0));
-    assert_eq!(app.terminal.grid.cursor.shape, CursorShape::Underline);
+    assert_eq!(
+        app.session.terminal.grid.cursor.shape,
+        CursorShape::Underline
+    );
     assert_eq!(app.config.padding_x(), 20);
     assert_eq!(app.config.padding_y(), 20);
     assert!(app.needs_redraw);
@@ -164,8 +169,9 @@ fn test_combined_reload_updates_size_and_padding() {
 
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
+    let session = ftty::TerminalSession::new(term, pty);
     let mut app =
-        AppState::with_config(term, pty, Some(config_path.clone())).expect("AppState with_config");
+        AppState::with_config(session, Some(config_path.clone())).expect("AppState with_config");
 
     assert_eq!(app.font_mgr.font_size(), 11.0);
     assert_eq!(app.config.padding_x(), 10);
@@ -222,17 +228,19 @@ fn test_failed_reload_preserves_state() {
 
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
+    let session = ftty::TerminalSession::new(term, pty);
     let mut app =
-        AppState::with_config(term, pty, Some(config_path.clone())).expect("AppState with_config");
+        AppState::with_config(session, Some(config_path.clone())).expect("AppState with_config");
 
     // Populate scrollback with lines
     for _ in 0..10 {
-        app.terminal
+        app.session
+            .terminal
             .grid
             .scrollback
             .push_back(ftty::grid::Row::new(80));
     }
-    assert_eq!(app.terminal.grid.scrollback.len(), 10);
+    assert_eq!(app.session.terminal.grid.scrollback.len(), 10);
 
     // Write an invalid font size (0.0), along with changed colors, cursor, and smaller scrollback
     std::fs::write(
@@ -258,11 +266,11 @@ fn test_failed_reload_preserves_state() {
     app.reload_config();
 
     // Ensure state was NOT partially committed (scrollback must not be truncated!)
-    assert_eq!(app.terminal.grid.scrollback.len(), 10);
-    assert_eq!(app.terminal.grid.max_scrollback, 100);
+    assert_eq!(app.session.terminal.grid.scrollback.len(), 10);
+    assert_eq!(app.session.terminal.grid.max_scrollback, 100);
     assert_eq!(app.default_bg, Rgb::new(0, 0, 0));
     assert_eq!(app.default_fg, Rgb::new(255, 255, 255));
-    assert_eq!(app.terminal.grid.cursor.shape, CursorShape::Block);
+    assert_eq!(app.session.terminal.grid.cursor.shape, CursorShape::Block);
     assert_eq!(app.font_mgr.font_size(), 14.0);
     assert!(!app.needs_redraw);
 
@@ -280,36 +288,36 @@ fn test_handle_key_actions_scrolling_and_zoom() {
 
     // Populate lines and scrollback
     for _ in 0..50 {
-        app.terminal.grid.write_char(
+        app.session.terminal.grid.write_char(
             'A',
             Color::DefaultForeground,
             Color::DefaultBackground,
             CellFlags::empty(),
         );
-        app.terminal.grid.newline();
+        app.session.terminal.grid.newline();
     }
 
-    assert_eq!(app.terminal.grid.viewport_offset(), 0);
+    assert_eq!(app.session.terminal.grid.viewport_offset(), 0);
 
     // Page Up
     app.handle_key_action(KeyAction::ScrollbackUpPage, None, None);
-    assert_eq!(app.terminal.grid.viewport_offset(), 24);
+    assert_eq!(app.session.terminal.grid.viewport_offset(), 24);
 
     // Scroll to Top
     app.handle_key_action(KeyAction::ScrollbackHome, None, None);
     assert_eq!(
-        app.terminal.grid.viewport_offset(),
-        app.terminal.grid.scrollback.len()
+        app.session.terminal.grid.viewport_offset(),
+        app.session.terminal.grid.scrollback.len()
     );
 
     // Line Down
-    let top = app.terminal.grid.viewport_offset();
+    let top = app.session.terminal.grid.viewport_offset();
     app.handle_key_action(KeyAction::ScrollbackDownLine, None, None);
-    assert_eq!(app.terminal.grid.viewport_offset(), top - 1);
+    assert_eq!(app.session.terminal.grid.viewport_offset(), top - 1);
 
     // Scroll to Bottom
     app.handle_key_action(KeyAction::ScrollbackEnd, None, None);
-    assert_eq!(app.terminal.grid.viewport_offset(), 0);
+    assert_eq!(app.session.terminal.grid.viewport_offset(), 0);
 
     // Font zoom actions
     let initial_size = app.font_mgr.font_size();
@@ -333,7 +341,7 @@ fn test_copy_and_paste_clipboard() {
     let mut app = new_test_app(term, pty).expect("AppState new");
 
     for c in "copied_text".chars() {
-        app.terminal.grid.write_char(
+        app.session.terminal.grid.write_char(
             c,
             Color::DefaultForeground,
             Color::DefaultBackground,
@@ -363,7 +371,7 @@ fn test_pipe_visible_action_execution() {
     let mut app = new_test_app(term, pty).expect("AppState new");
 
     for c in "ftty_pipe_test".chars() {
-        app.terminal.grid.write_char(
+        app.session.terminal.grid.write_char(
             c,
             Color::DefaultForeground,
             Color::DefaultBackground,
@@ -419,8 +427,8 @@ fn mouse_reports_are_forwarded_only_when_tracking_is_enabled() {
     // Tracking disabled: the pointer stays available for local text selection.
     assert!(app.mouse_report_bytes(0, true, false).is_none());
 
-    app.terminal.mouse.tracking = MouseTracking::Drag;
-    app.terminal.mouse.encoding = MouseEncoding::Sgr;
+    app.session.terminal.mouse.tracking = MouseTracking::Drag;
+    app.session.terminal.mouse.encoding = MouseEncoding::Sgr;
     assert_eq!(
         app.mouse_report_bytes(0, true, false),
         Some(b"\x1b[<0;3;2M".to_vec())
@@ -495,8 +503,9 @@ fn test_font_chain_reload_and_zoom_preserves_fallbacks() {
 
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
+    let session = ftty::TerminalSession::new(term, pty);
     let mut app =
-        AppState::with_config(term, pty, Some(config_path.clone())).expect("AppState with_config");
+        AppState::with_config(session, Some(config_path.clone())).expect("AppState with_config");
 
     assert_eq!(
         app.font_mgr.families(),
@@ -541,16 +550,17 @@ fn test_update_hover_state_and_pointer_shape() {
 
     // Intern a real URL so hyperlink_id 1 is resolvable
     let id = app
+        .session
         .terminal
         .get_or_intern_hyperlink("https://example.com".to_string());
     assert_eq!(id, 1);
 
     // Cells at cols 4..=6 have hyperlink ID 1
     for col in 4..=6 {
-        app.terminal.grid.lines[0].cells[col].set_hyperlink_id(Some(1));
+        app.session.terminal.grid.lines[0].cells[col].set_hyperlink_id(Some(1));
     }
     // Cell at col 8 has hyperlink ID 0 (invalid/exhausted sentinel)
-    app.terminal.grid.lines[0].cells[8].set_hyperlink_id(Some(0));
+    app.session.terminal.grid.lines[0].cells[8].set_hyperlink_id(Some(0));
 
     let cw = f64::from(app.font_mgr.metrics.cell_width);
     let ch = f64::from(app.font_mgr.metrics.cell_height);
@@ -619,10 +629,11 @@ fn test_update_hover_state_and_pointer_shape() {
 fn test_app_state_with_loaded_config() {
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
+    let session = ftty::TerminalSession::new(term, pty);
     let config = ftty::config::Config::default();
-    let app = AppState::with_loaded_config(term, pty, config, None).expect("with_loaded_config");
-    assert_eq!(app.terminal.grid.cols, 80);
-    assert_eq!(app.terminal.grid.rows, 24);
+    let app = AppState::with_loaded_config(session, config, None).expect("with_loaded_config");
+    assert_eq!(app.session.terminal.grid.cols, 80);
+    assert_eq!(app.session.terminal.grid.rows, 24);
     assert!(app.font_mgr.metrics.cell_width > 0);
 }
 
@@ -630,12 +641,13 @@ fn test_app_state_with_loaded_config() {
 fn test_app_state_with_font_and_config() {
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
+    let session = ftty::TerminalSession::new(term, pty);
     let config = ftty::config::Config::default();
     let font_mgr = ftty::font::FontManager::load(14.0).expect("load font");
-    let app = AppState::with_font_and_config(term, pty, font_mgr, config, None)
+    let app = AppState::with_font_and_config(session, font_mgr, config, None)
         .expect("with_font_and_config");
-    assert_eq!(app.terminal.grid.cols, 80);
-    assert_eq!(app.terminal.grid.rows, 24);
+    assert_eq!(app.session.terminal.grid.cols, 80);
+    assert_eq!(app.session.terminal.grid.rows, 24);
     assert!(app.font_mgr.metrics.cell_width > 0);
     assert!(app.renderer.is_none());
 }
@@ -644,11 +656,12 @@ fn test_app_state_with_font_and_config() {
 fn test_app_state_with_font_and_config_initialization() {
     let term = Terminal::new(80, 24, 100);
     let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
+    let session = ftty::TerminalSession::new(term, pty);
     let config = ftty::config::Config::default();
     let font_mgr =
         ftty::font::FontManager::load_with_families(&config.font_families(), config.font_size())
             .expect("load font");
-    let app = AppState::with_font_and_config(term, pty, font_mgr, config, None)
+    let app = AppState::with_font_and_config(session, font_mgr, config, None)
         .expect("with_font_and_config");
     assert!(app.font_mgr.metrics.cell_width > 0);
     assert!(app.font_mgr.metrics.cell_height > 0);
@@ -758,7 +771,7 @@ fn test_plaintext_url_hover_with_ctrl() {
 
     let url = "https://github.com/xifan2333/ftty";
     for (i, c) in format!("Open {url} now!").chars().enumerate() {
-        app.terminal.grid.lines[0].cells[i].c = c;
+        app.session.terminal.grid.lines[0].cells[i].c = c;
     }
 
     let cw = f64::from(app.font_mgr.metrics.cell_width);
@@ -812,16 +825,27 @@ fn test_kitty_place_event_derives_dimensions_and_advances_cursor() {
         image_id: Some(42),
         ..Default::default()
     };
-    app.handle_kitty_event(KittyEvent::Transmit {
-        command: transmit_cmd,
-        image: img,
-    });
-    assert_eq!(app.terminal.grid.graphics.placements().len(), 0);
-    assert!(app.terminal.grid.contains_image(42));
+    let ctx = ftty::kitty::GraphicContext {
+        cell_width: cw,
+        cell_height: ch,
+        cursor_row: app.session.terminal.grid.cursor.row,
+        cursor_col: app.session.terminal.grid.cursor.col,
+        scrollback_len: app.session.terminal.grid.scrollback.len(),
+    };
+    let _ = app.session.terminal.grid.graphics.handle_event(
+        KittyEvent::Transmit {
+            command: transmit_cmd,
+            image: img,
+        },
+        ctx,
+        &std::collections::HashSet::new(),
+    );
+    assert_eq!(app.session.terminal.grid.graphics.placements().len(), 0);
+    assert!(app.session.terminal.grid.contains_image(42));
 
     // Initial cursor position
-    app.terminal.grid.cursor.col = 0;
-    app.terminal.grid.cursor.row = 2;
+    app.session.terminal.grid.cursor.col = 0;
+    app.session.terminal.grid.cursor.row = 2;
 
     // 2. Place image (a=p) without specifying cols and rows (omitted c and r)
     let place_cmd = KittyCommand {
@@ -829,16 +853,32 @@ fn test_kitty_place_event_derives_dimensions_and_advances_cursor() {
         image_id: Some(42),
         ..Default::default()
     };
-    app.handle_kitty_event(KittyEvent::Place { command: place_cmd });
+    let ctx2 = ftty::kitty::GraphicContext {
+        cell_width: cw,
+        cell_height: ch,
+        cursor_row: 2,
+        cursor_col: 0,
+        scrollback_len: app.session.terminal.grid.scrollback.len(),
+    };
+    let outcome = app.session.terminal.grid.graphics.handle_event(
+        KittyEvent::Place { command: place_cmd },
+        ctx2,
+        &std::collections::HashSet::new(),
+    );
 
     // Placement must derive cols (10) and rows (4) from the stored image
-    assert_eq!(app.terminal.grid.graphics.placements().len(), 1);
-    let p = &app.terminal.grid.graphics.placements()[0];
+    assert_eq!(app.session.terminal.grid.graphics.placements().len(), 1);
+    let p = &app.session.terminal.grid.graphics.placements()[0];
     assert_eq!(p.image_id, 42);
     assert_eq!(p.cols, 10);
     assert_eq!(p.rows, 4);
 
-    // Cursor must advance col by 10 and row by (4 - 1) = 3 -> row 5, col 10
-    assert_eq!(app.terminal.grid.cursor.col, 10);
-    assert_eq!(app.terminal.grid.cursor.row, 5);
+    // Cursor advance
+    if let Some((cols, rows, _)) = outcome.cursor_advance {
+        app.session.terminal.grid.cursor.col += cols;
+        app.session.terminal.grid.cursor.row += rows.saturating_sub(1);
+    }
+
+    assert_eq!(app.session.terminal.grid.cursor.col, 10);
+    assert_eq!(app.session.terminal.grid.cursor.row, 5);
 }

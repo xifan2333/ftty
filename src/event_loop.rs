@@ -1,14 +1,11 @@
 //! Unified calloop single-threaded event loop multiplexing Wayland, PTY I/O, and POSIX signals.
 
-use std::io::{self, Read, Write};
-use std::os::fd::AsFd;
 use std::path::PathBuf;
 
 use calloop::generic::Generic;
 use calloop::signals::{Signal, Signals};
 use calloop::{EventLoop, Interest, Mode};
 use calloop_wayland_source::WaylandSource;
-use nix::poll::{PollFd, PollFlags, poll};
 
 use wayland_client::protocol::wl_callback::WlCallback;
 use wayland_client::{Connection, QueueHandle};
@@ -19,31 +16,26 @@ use crate::error::{FttyError, WaylandError};
 use crate::font::{CellMetrics, FontManager, GlyphAtlas};
 use crate::input::ime::ImeState;
 use crate::input::{KeyAction, KeyboardHandler};
-use crate::kitty::{KittyEvent, KittyParser};
-use crate::parser::Terminal;
-use crate::pty::Pty;
 use crate::render::{ColorScheme, RenderOptions, Renderer};
+use crate::session::TerminalSession;
 use crate::wayland::WaylandState;
 
 /// Shared application state passed to all calloop sources and Wayland event dispatches.
 pub struct AppState {
+    pub session: TerminalSession,
     // Destroy the native EGL window before the Wayland surface handles.
     pub renderer: Option<Renderer>,
-    pub terminal: Terminal,
-    pub pty: Pty,
+    pub pointer: crate::input::PointerController,
     pub keyboard: KeyboardHandler,
     pub wayland: WaylandState,
     pub font_mgr: FontManager,
     pub atlas: GlyphAtlas,
     pub ime: ImeState,
-    pub kitty_parser: KittyParser,
-    pub vt_parser: crate::parser::VtParser,
     pub config: Config,
     pub config_path: Option<PathBuf>,
     pub palette: [Rgb; 256],
     pub default_fg: Rgb,
     pub default_bg: Rgb,
-    pub pointer: crate::input::PointerController,
     pub last_serial: u32,
     pub pointer_serial: u32,
     pub clipboard_text: Option<String>,
@@ -57,8 +49,6 @@ pub struct AppState {
     /// burst of configures collapses into a single, final size.
     pub(crate) configure_pending: bool,
     pub(crate) render_error: Option<FttyError>,
-    pub(crate) sync_output_start: Option<std::time::Instant>,
-    pub(crate) last_sync_gen: u64,
     #[doc(hidden)]
     pub pty_registered: bool,
     pub(crate) last_activity: std::time::Instant,
@@ -73,17 +63,16 @@ impl AppState {
     ///
     /// # Errors
     /// Returns [`FttyError`] if font discovery or configuration loading fails.
-    pub fn new(terminal: Terminal, pty: Pty) -> Result<Self, FttyError> {
-        Self::with_config(terminal, pty, None)
+    pub fn new(session: TerminalSession) -> Result<Self, FttyError> {
+        Self::with_config(session, None)
     }
 
-    /// Creates a new `AppState` with terminal, PTY, optional custom configuration path.
+    /// Creates a new `AppState` with terminal session and optional custom configuration path.
     ///
     /// # Errors
     /// Returns [`FttyError`] if font discovery or configuration loading fails.
     pub fn with_config(
-        terminal: Terminal,
-        pty: Pty,
+        session: TerminalSession,
         config_path: Option<PathBuf>,
     ) -> Result<Self, FttyError> {
         let config = if cfg!(test) && config_path.is_none() {
@@ -91,7 +80,7 @@ impl AppState {
         } else {
             Config::load_from_path_or_default(config_path.as_deref())?
         };
-        Self::with_loaded_config(terminal, pty, config, config_path)
+        Self::with_loaded_config(session, config, config_path)
     }
 
     /// Returns `true` if the reported Wayland output geometry supports horizontal LCD subpixel rendering.
@@ -120,28 +109,26 @@ impl AppState {
             == Some(wayland_client::protocol::wl_output::Subpixel::HorizontalBgr)
     }
 
-    /// Creates a new `AppState` with terminal, PTY, pre-loaded configuration, and optional configuration path.
+    /// Creates a new `AppState` with terminal session, pre-loaded configuration, and optional configuration path.
     ///
     /// # Errors
     /// Returns [`FttyError`] if font discovery fails.
     pub fn with_loaded_config(
-        terminal: Terminal,
-        pty: Pty,
+        session: TerminalSession,
         config: Config,
         config_path: Option<PathBuf>,
     ) -> Result<Self, FttyError> {
         let font_mgr =
             FontManager::load_with_families(&config.font_families(), config.font_size())?;
-        Self::with_font_and_config(terminal, pty, font_mgr, config, config_path)
+        Self::with_font_and_config(session, font_mgr, config, config_path)
     }
 
-    /// Creates a new `AppState` with terminal, PTY, pre-loaded font manager, configuration, and optional configuration path.
+    /// Creates a new `AppState` with terminal session, pre-loaded font manager, configuration, and optional configuration path.
     ///
     /// # Errors
     /// Returns [`FttyError`] if PTY resizing fails.
     pub fn with_font_and_config(
-        mut terminal: Terminal,
-        pty: Pty,
+        mut session: TerminalSession,
         font_mgr: FontManager,
         config: Config,
         config_path: Option<PathBuf>,
@@ -151,21 +138,21 @@ impl AppState {
         let palette = config.build_palette();
         let default_fg = config.foreground();
         let default_bg = config.background();
-        terminal.set_default_colors(default_fg, default_bg);
-        terminal.set_palette(palette);
-        terminal.allow_osc52_read = config.allow_osc52_read();
-        terminal.allow_osc52_write = config.allow_osc52_write();
-        terminal.grid.cursor.shape = config.cursor_shape();
-        terminal.grid.max_scrollback = config.scrollback_lines();
+        session.terminal.set_default_colors(default_fg, default_bg);
+        session.terminal.set_palette(palette);
+        session.terminal.allow_osc52_read = config.allow_osc52_read();
+        session.terminal.allow_osc52_write = config.allow_osc52_write();
+        session.terminal.grid.cursor.shape = config.cursor_shape();
+        session.terminal.grid.max_scrollback = config.scrollback_lines();
 
         let mut wayland = WaylandState::new();
         let pad_x = u32::from(config.padding_x());
         let pad_y = u32::from(config.padding_y());
-        wayland.width = (terminal.grid.cols as u32)
+        wayland.width = (session.terminal.grid.cols as u32)
             .saturating_mul(font_mgr.metrics.cell_width)
             .saturating_add(pad_x * 2)
             .clamp(100, i32::MAX as u32);
-        wayland.height = (terminal.grid.rows as u32)
+        wayland.height = (session.terminal.grid.rows as u32)
             .saturating_mul(font_mgr.metrics.cell_height)
             .saturating_add(pad_y * 2)
             .clamp(100, i32::MAX as u32);
@@ -180,34 +167,30 @@ impl AppState {
             saturating_u16(wayland.width.saturating_sub(pad_x * 2)),
             saturating_u16(wayland.height.saturating_sub(pad_y * 2)),
         ];
-        terminal.set_geometry(cell_pixels, viewport_pixels);
-        pty.resize(
-            terminal.grid.cols as u16,
-            terminal.grid.rows as u16,
-            viewport_pixels[0],
-            viewport_pixels[1],
+        session.resize(
+            session.terminal.grid.cols as u16,
+            session.terminal.grid.rows as u16,
+            cell_pixels,
+            viewport_pixels,
         )?;
 
         let mut keyboard = KeyboardHandler::new();
         keyboard.update_keybindings(&config.keybindings);
 
         Ok(Self {
-            terminal,
-            pty,
+            session,
+            renderer: None,
+            pointer: crate::input::PointerController::new(),
             keyboard,
             wayland,
             font_mgr,
             atlas,
             ime: ImeState::new(),
-            kitty_parser: KittyParser::new(),
-            vt_parser: crate::parser::VtParser::new(),
             config,
             config_path,
-            renderer: None,
             palette,
             default_fg,
             default_bg,
-            pointer: crate::input::PointerController::new(),
             last_serial: 0,
             pointer_serial: 0,
             clipboard_text: None,
@@ -218,8 +201,6 @@ impl AppState {
             pending_size: None,
             configure_pending: false,
             render_error: None,
-            sync_output_start: None,
-            last_sync_gen: 0,
             pty_registered: false,
             last_activity: std::time::Instant::now(),
             last_trim: std::time::Instant::now(),
@@ -295,7 +276,7 @@ pub fn run_event_loop_with_connection(
         .insert_source(signals, |event, _, state: &mut AppState| {
             match event.signal() {
                 Signal::SIGCHLD => {
-                    if !state.pty.is_alive() {
+                    if !state.session.pty.is_alive() {
                         state.running = false;
                     }
                 }
@@ -312,7 +293,7 @@ pub fn run_event_loop_with_connection(
 
     // 3. Main Event Loop Tick
     while app_state.running {
-        let dispatch_timeout = if app_state.terminal.synchronized_output {
+        let dispatch_timeout = if app_state.session.terminal.synchronized_output {
             Some(std::time::Duration::from_millis(50))
         } else {
             None
@@ -340,57 +321,64 @@ pub fn run_event_loop_with_connection(
         // final tiling dimensions and creates the renderer, preventing busy-looping and SIGWINCH restarts.
         if app_state.should_register_pty() {
             app_state.pty_registered = true;
-            let pty_master = app_state.pty.try_clone_master()?;
+            let pty_master = app_state.session.pty.try_clone_master()?;
             let pty_source = Generic::new(pty_master, Interest::READ, Mode::Level);
             let pty_qh = qh.clone();
             event_loop
                 .handle()
                 .insert_source(pty_source, move |_event, _fd, state: &mut AppState| {
-                    let mut buf = [0u8; 65536];
-                    let mut total_read = 0;
-                    loop {
-                        match state.pty.read(&mut buf) {
-                            Ok(n) if n > 0 => {
-                                total_read += n;
-                                let incoming = &buf[..n];
-                                if state.kitty_parser.is_fast_path(incoming) {
-                                    state.process_terminal_output(incoming, &pty_qh);
-                                } else {
-                                    let mut parser = std::mem::take(&mut state.kitty_parser);
-                                    parser.process_stream(incoming, |chunk| match chunk {
-                                        crate::kitty::KittyStreamChunk::Text(text) => {
-                                            state.process_terminal_output(text, &pty_qh);
-                                        }
-                                        crate::kitty::KittyStreamChunk::Event(event) => {
-                                            if let KittyEvent::Response(resp) = event.as_ref() {
-                                                state.write_pty_blocking(resp);
-                                            } else {
-                                                state.handle_kitty_event(*event);
-                                            }
-                                        }
-                                    });
-                                    state.kitty_parser = parser;
-                                }
+                    let cw = state.font_mgr.metrics.cell_width as f32;
+                    let ch = state.font_mgr.metrics.cell_height as f32;
+                    let auto_scroll = state.config.auto_scroll();
 
-                                state.keyboard.kitty_flags = state.terminal.kitty_keyboard_flags;
+                    let outcome = match state.session.read_and_process_pty(cw, ch, auto_scroll) {
+                        Ok(o) => o,
+                        Err(_) => {
+                            state.running = false;
+                            return Ok(calloop::PostAction::Reregister);
+                        }
+                    };
 
-                                if total_read >= 65536 {
-                                    break;
+                    if outcome.process_exited {
+                        state.running = false;
+                        return Ok(calloop::PostAction::Reregister);
+                    }
+
+                    state.keyboard.kitty_flags = outcome.kitty_keyboard_flags;
+
+                    if outcome.palette_changed {
+                        state.palette = state.session.terminal.palette;
+                        state.default_fg = state.session.terminal.default_fg;
+                        state.default_bg = state.session.terminal.default_bg;
+                        if let Some(renderer) = &mut state.renderer {
+                            renderer.clear_cache();
+                        }
+                        state.session.terminal.grid.mark_all_dirty();
+                        state.needs_redraw = true;
+                    }
+
+                    if let Some(title) = outcome.title_update {
+                        state.wayland.title = title.clone();
+                        if let Some(toplevel) = &state.wayland.xdg_toplevel {
+                            let display_title = if title.is_empty() { "ftty" } else { &title };
+                            toplevel.set_title(display_title.to_string());
+                        }
+                    }
+
+                    if let Some(clip) = outcome.clipboard_update {
+                        match clip {
+                            Some(text) => state.set_clipboard_text(text, Some(&pty_qh)),
+                            None => {
+                                state.clipboard_text = None;
+                                state.session.terminal.set_clipboard_content(None);
+                                if let Some(device) = &state.wayland.data_device {
+                                    device.set_selection(None, state.last_serial);
                                 }
-                            }
-                            Ok(_) => {
-                                state.running = false;
-                                return Ok(calloop::PostAction::Reregister);
-                            }
-                            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                            Err(_) => {
-                                state.running = false;
-                                return Ok(calloop::PostAction::Reregister);
                             }
                         }
                     }
 
-                    if total_read > 0 {
+                    if outcome.needs_redraw {
                         state.needs_redraw = true;
                         state.last_activity = std::time::Instant::now();
                         state.pending_trim = true;
@@ -401,24 +389,7 @@ pub fn run_event_loop_with_connection(
                 .map_err(|e| WaylandError::Dispatch(e.to_string()))?;
         }
 
-        if app_state.terminal.sync_output_gen != app_state.last_sync_gen {
-            app_state.last_sync_gen = app_state.terminal.sync_output_gen;
-            app_state.sync_output_start = Some(std::time::Instant::now());
-        }
-
-        let mut sync_active = app_state.terminal.synchronized_output;
-        if sync_active {
-            let start = *app_state
-                .sync_output_start
-                .get_or_insert_with(std::time::Instant::now);
-            if start.elapsed() > std::time::Duration::from_millis(150) {
-                app_state.terminal.synchronized_output = false;
-                sync_active = false;
-                app_state.sync_output_start = None;
-            }
-        } else {
-            app_state.sync_output_start = None;
-        }
+        let sync_active = app_state.session.is_synchronized_output_active();
 
         if app_state.needs_redraw && !sync_active && app_state.frame_callback.is_none() {
             app_state.update_hover_state();
@@ -453,7 +424,7 @@ pub fn run_event_loop_with_connection(
                 (app_state.wayland.height as f64 * factor).round().max(1.0) as u32,
             ];
             renderer.render_grid(
-                &mut app_state.terminal.grid,
+                &mut app_state.session.terminal.grid,
                 colors,
                 &app_state.font_mgr,
                 &mut app_state.atlas,
@@ -526,7 +497,7 @@ impl AppState {
     pub(crate) fn update_font_size(&mut self, new_size: f32) {
         if self.font_mgr.set_font_size(new_size) {
             self.atlas.clear();
-            self.terminal.grid.mark_all_dirty();
+            self.session.terminal.grid.mark_all_dirty();
             if let Some(renderer) = &mut self.renderer {
                 renderer.clear_cache();
             }
@@ -554,25 +525,16 @@ impl AppState {
             saturating_u16(phys_width.saturating_sub(u32::from(pad_x) * 2)),
             saturating_u16(phys_height.saturating_sub(u32::from(pad_y) * 2)),
         ];
-        if (self.terminal.grid.cols, self.terminal.grid.rows) != (cols as usize, rows as usize) {
-            self.pointer.clear_selection();
-            self.terminal.grid.resize(cols as usize, rows as usize);
-        }
-        self.terminal.set_geometry(
+        self.pointer.clear_selection();
+        self.session.resize(
+            cols,
+            rows,
             [
                 saturating_u16(self.font_mgr.metrics.cell_width),
                 saturating_u16(self.font_mgr.metrics.cell_height),
             ],
             viewport_pixels,
-        );
-        // The kernel only signals SIGWINCH on an actual change, so this is safe to repeat.
-        self.pty
-            .resize(cols, rows, viewport_pixels[0], viewport_pixels[1])?;
-        if !self.terminal.responses.is_empty() {
-            for response in self.terminal.take_responses() {
-                self.write_pty_blocking(&response);
-            }
-        }
+        )?;
         Ok(())
     }
 
@@ -618,8 +580,8 @@ impl AppState {
             viewport.set_destination(logical_size[0] as i32, logical_size[1] as i32);
         }
         self.resize_terminal()?;
-        self.terminal.synchronized_output = false;
-        self.terminal.grid.mark_all_dirty();
+        self.session.terminal.synchronized_output = false;
+        self.session.terminal.grid.mark_all_dirty();
         if let Some(renderer) = &mut self.renderer {
             renderer.clear_cache();
         }
@@ -676,23 +638,9 @@ impl Drop for PipelineGuard {
 }
 
 impl AppState {
-    /// Writes bytes to the non-blocking PTY master with a bounded readiness loop to prevent truncation.
-    pub fn write_pty_blocking(&mut self, mut bytes: &[u8]) {
-        let start = std::time::Instant::now();
-        while !bytes.is_empty() && start.elapsed() < std::time::Duration::from_millis(100) {
-            match self.pty.write(bytes) {
-                Ok(0) => break,
-                Ok(written) => bytes = &bytes[written..],
-                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                    let mut fds = [PollFd::new(self.pty.as_fd(), PollFlags::POLLOUT)];
-                    if !poll(&mut fds, 20u16).is_ok_and(|ready| ready > 0) {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
+    /// Writes bytes to the PTY master via the session.
+    pub fn write_pty_blocking(&mut self, bytes: &[u8]) {
+        self.session.write_input_bytes(bytes);
     }
 
     /// Reloads the configuration file and dynamically updates palette, fonts, cursor, and metrics.
@@ -740,13 +688,14 @@ impl AppState {
         };
 
         let max_sb = new_config.scrollback_lines();
-        self.terminal.grid.max_scrollback = max_sb;
-        if self.terminal.grid.scrollback.len() > max_sb {
-            let overflow = self.terminal.grid.scrollback.len() - max_sb;
+        self.session.terminal.grid.max_scrollback = max_sb;
+        if self.session.terminal.grid.scrollback.len() > max_sb {
+            let overflow = self.session.terminal.grid.scrollback.len() - max_sb;
             for _ in 0..overflow {
-                self.terminal.grid.scrollback.pop_front();
+                self.session.terminal.grid.scrollback.pop_front();
             }
-            self.terminal.grid.viewport_offset = self.terminal.grid.viewport_offset.min(max_sb);
+            self.session.terminal.grid.viewport_offset =
+                self.session.terminal.grid.viewport_offset.min(max_sb);
         }
 
         let padding_changed = self.config.padding_x() != new_config.padding_x()
@@ -755,16 +704,17 @@ impl AppState {
         self.palette = new_config.build_palette();
         self.default_fg = new_config.foreground();
         self.default_bg = new_config.background();
-        self.terminal
+        self.session
+            .terminal
             .set_default_colors(self.default_fg, self.default_bg);
-        self.terminal.set_palette(self.palette);
-        self.terminal.allow_osc52_read = new_config.allow_osc52_read();
-        self.terminal.allow_osc52_write = new_config.allow_osc52_write();
-        self.terminal.grid.cursor.shape = new_config.cursor_shape();
+        self.session.terminal.set_palette(self.palette);
+        self.session.terminal.allow_osc52_read = new_config.allow_osc52_read();
+        self.session.terminal.allow_osc52_write = new_config.allow_osc52_write();
+        self.session.terminal.grid.cursor.shape = new_config.cursor_shape();
         self.keyboard.update_keybindings(&new_config.keybindings);
         self.config = new_config;
 
-        self.terminal.grid.mark_all_dirty();
+        self.session.terminal.grid.mark_all_dirty();
         if let Some(renderer) = &mut self.renderer {
             renderer.clear_cache();
         }
@@ -804,39 +754,41 @@ impl AppState {
     ) {
         match action {
             KeyAction::ScrollbackUpPage => {
-                self.terminal
+                self.session
+                    .terminal
                     .grid
-                    .scroll_viewport_up(self.terminal.grid.rows);
+                    .scroll_viewport_up(self.session.terminal.grid.rows);
                 self.needs_redraw = true;
             }
             KeyAction::ScrollbackDownPage => {
-                self.terminal
+                self.session
+                    .terminal
                     .grid
-                    .scroll_viewport_down(self.terminal.grid.rows);
+                    .scroll_viewport_down(self.session.terminal.grid.rows);
                 self.needs_redraw = true;
             }
             KeyAction::ScrollbackUpLine => {
-                self.terminal.grid.scroll_viewport_up(1);
+                self.session.terminal.grid.scroll_viewport_up(1);
                 self.needs_redraw = true;
             }
             KeyAction::ScrollbackDownLine => {
-                self.terminal.grid.scroll_viewport_down(1);
+                self.session.terminal.grid.scroll_viewport_down(1);
                 self.needs_redraw = true;
             }
             KeyAction::ScrollbackHome => {
-                self.terminal.grid.scroll_viewport_top();
+                self.session.terminal.grid.scroll_viewport_top();
                 self.needs_redraw = true;
             }
             KeyAction::ScrollbackEnd => {
-                self.terminal.grid.scroll_viewport_bottom();
+                self.session.terminal.grid.scroll_viewport_bottom();
                 self.needs_redraw = true;
             }
             KeyAction::PromptPrev => {
-                self.terminal.grid.scroll_to_prompt_prev();
+                self.session.terminal.grid.scroll_to_prompt_prev();
                 self.needs_redraw = true;
             }
             KeyAction::PromptNext => {
-                self.terminal.grid.scroll_to_prompt_next();
+                self.session.terminal.grid.scroll_to_prompt_next();
                 self.needs_redraw = true;
             }
             KeyAction::FontIncrease => {
@@ -858,15 +810,18 @@ impl AppState {
                 self.paste_clipboard(conn);
             }
             KeyAction::PipeVisible(cmd) => {
-                let text = self.terminal.grid.extract_visible_text();
+                let text = self.session.terminal.grid.extract_visible_text();
                 Self::spawn_pipe_async(cmd, text);
             }
             KeyAction::PipeScrollback(cmd) => {
-                let text = self.terminal.grid.extract_scrollback_text();
+                let text = self.session.terminal.grid.extract_scrollback_text();
                 Self::spawn_pipe_async(cmd, text);
             }
             KeyAction::PipeSelection(cmd) => {
-                let text = self.pointer.selection.extract_text(&self.terminal.grid);
+                let text = self
+                    .pointer
+                    .selection
+                    .extract_text(&self.session.terminal.grid);
                 if !text.is_empty() {
                     Self::spawn_pipe_async(cmd, text);
                 }
@@ -931,133 +886,6 @@ impl AppState {
             crate::font::MAX_RASTER_FONT_SIZE,
         );
         self.update_font_size(scaled_size);
-    }
-}
-
-// --- Kitty Event Processing ---
-
-impl AppState {
-    pub(crate) fn process_terminal_output(&mut self, text: &[u8], qh: &QueueHandle<Self>) {
-        if text.is_empty() {
-            return;
-        }
-        self.terminal.advance_bytes(&mut self.vt_parser, text);
-        if !self.terminal.responses.is_empty() {
-            for response in self.terminal.take_responses() {
-                self.write_pty_blocking(&response);
-            }
-        }
-        if let Some(pending) = self.terminal.take_pending_clipboard() {
-            match pending {
-                Some(text) => self.set_clipboard_text(text, Some(qh)),
-                None => {
-                    self.clipboard_text = None;
-                    self.terminal.set_clipboard_content(None);
-                    if let Some(device) = &self.wayland.data_device {
-                        device.set_selection(None, self.last_serial);
-                    }
-                }
-            }
-        }
-        self.keyboard.kitty_flags = self.terminal.kitty_keyboard_flags;
-        if self.terminal.palette_dirty {
-            self.terminal.palette_dirty = false;
-            self.palette = self.terminal.palette;
-            self.default_fg = self.terminal.default_fg;
-            self.default_bg = self.terminal.default_bg;
-            if let Some(renderer) = &mut self.renderer {
-                renderer.clear_cache();
-            }
-            self.terminal.grid.mark_all_dirty();
-            self.needs_redraw = true;
-        }
-        if self.terminal.title_dirty {
-            self.terminal.title_dirty = false;
-            self.wayland.title = self.terminal.title.clone();
-            if let Some(toplevel) = &self.wayland.xdg_toplevel {
-                let title = if self.wayland.title.is_empty() {
-                    "ftty"
-                } else {
-                    &self.wayland.title
-                };
-                toplevel.set_title(title.to_string());
-            }
-        }
-        if self.config.auto_scroll() && !self.terminal.grid.is_alt_screen() {
-            self.terminal.grid.scroll_viewport_bottom();
-        }
-    }
-
-    pub fn handle_kitty_event(&mut self, event: KittyEvent) {
-        let active = crate::kitty::collect_placeholder_ids(
-            self.terminal
-                .grid
-                .lines
-                .iter()
-                .chain(self.terminal.grid.alt_lines.iter().flatten())
-                .chain(self.terminal.grid.scrollback.iter()),
-        );
-        let ctx = crate::kitty::GraphicContext {
-            cell_width: self.font_mgr.metrics.cell_width as f32,
-            cell_height: self.font_mgr.metrics.cell_height as f32,
-            cursor_row: self.terminal.grid.cursor.row,
-            cursor_col: self.terminal.grid.cursor.col,
-            scrollback_len: self.terminal.grid.scrollback.len(),
-        };
-        let outcome = self
-            .terminal
-            .grid
-            .graphics
-            .handle_event(event, ctx, &active);
-
-        if let Some((cols, rows, do_not_move)) = outcome.cursor_advance {
-            self.advance_cursor_for_image(cols, rows, do_not_move);
-        }
-        if let Some(resp) = outcome.pty_response {
-            self.write_pty_blocking(&resp);
-        }
-        if outcome.needs_redraw {
-            self.needs_redraw = true;
-        }
-    }
-
-    fn advance_cursor_for_image(&mut self, cols: usize, rows: usize, do_not_move: bool) {
-        if do_not_move {
-            return;
-        }
-        let grid_cols = self.terminal.grid.cols;
-        let grid_rows = self.terminal.grid.rows;
-        let scroll_top = self.terminal.grid.scroll_region_top;
-        let scroll_bottom = self.terminal.grid.scroll_region_bottom;
-        let cur_row = self.terminal.grid.cursor.row;
-        let in_margins = cur_row >= scroll_top && cur_row <= scroll_bottom;
-
-        let mut c_col = self.terminal.grid.cursor.col + cols;
-        let mut c_row = if rows > 0 {
-            cur_row + rows - 1
-        } else {
-            cur_row
-        };
-
-        if c_col >= grid_cols {
-            c_col = 0;
-            c_row += 1;
-        }
-
-        if in_margins {
-            if c_row > scroll_bottom {
-                let scroll_amount = c_row - scroll_bottom;
-                self.terminal
-                    .grid
-                    .scroll_up_with_bg(scroll_amount, self.terminal.active_bg);
-                c_row = scroll_bottom;
-            }
-        } else {
-            c_row = c_row.min(grid_rows.saturating_sub(1));
-        }
-
-        self.terminal.grid.cursor.col = c_col.min(grid_cols.saturating_sub(1));
-        self.terminal.grid.cursor.row = c_row;
     }
 }
 
