@@ -1043,3 +1043,288 @@ mod selection_tests {
         assert_eq!(shrunk.line_span(2, 80), Some((0, 20)));
     }
 }
+
+mod pointer_controller_tests {
+    use ftty::font::CellMetrics;
+    use ftty::grid::{CellFlags, Grid};
+    use ftty::input::Modifiers;
+    use ftty::input::mouse::{MouseEncoding, MouseState, MouseTracking};
+    use ftty::input::pointer::{PointerContext, PointerController, x11_button_index};
+    use ftty::input::selection::{SelectionPoint, SelectionType};
+    use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape;
+
+    fn test_metrics() -> CellMetrics {
+        CellMetrics {
+            cell_width: 10,
+            cell_height: 20,
+            ascent: 15,
+        }
+    }
+
+    #[test]
+    fn test_x11_button_index_mapping() {
+        assert_eq!(x11_button_index(0x110), Some(0)); // BTN_LEFT
+        assert_eq!(x11_button_index(0x111), Some(2)); // BTN_RIGHT
+        assert_eq!(x11_button_index(0x112), Some(1)); // BTN_MIDDLE
+        assert_eq!(x11_button_index(0x113), None);
+    }
+
+    #[test]
+    fn test_pointer_enter_motion_and_leave() {
+        let mut controller = PointerController::new();
+        let grid = Grid::new(80, 24, 100);
+        let mouse_mode = MouseState::default();
+        let ctx = PointerContext::new(
+            &grid,
+            test_metrics(),
+            1.0,
+            [0, 0],
+            Modifiers::default(),
+            &mouse_mode,
+            1.0,
+            false,
+            None,
+        );
+
+        let outcome = controller.handle_enter(25.0, 45.0, 1, &ctx);
+        assert!(controller.is_in_surface());
+        assert_eq!(controller.mouse_pos(), [25.0, 45.0]);
+        assert_eq!(outcome.cursor_shape, Some(Shape::Text));
+
+        let motion_outcome = controller.handle_motion(55.0, 65.0, &ctx);
+        assert_eq!(controller.mouse_pos(), [55.0, 65.0]);
+        assert_eq!(motion_outcome.cursor_shape, None); // Unchanged
+
+        let leave_outcome = controller.handle_leave();
+        assert!(!controller.is_in_surface());
+        assert_eq!(leave_outcome.cursor_shape, None);
+    }
+
+    #[test]
+    fn test_pointer_single_click_and_drag_selection() {
+        let mut controller = PointerController::new();
+        let grid = Grid::new(80, 24, 100);
+        let mouse_mode = MouseState::default();
+        let ctx = PointerContext::new(
+            &grid,
+            test_metrics(),
+            1.0,
+            [0, 0],
+            Modifiers::default(),
+            &mouse_mode,
+            1.0,
+            false,
+            None,
+        );
+
+        controller.handle_enter(25.0, 45.0, 1, &ctx);
+
+        // Click at col 2, row 2 (x = 25.0, y = 45.0 -> col 2, row 2)
+        let click_outcome = controller.handle_button(0x110, true, 100, 2, &ctx);
+        assert!(click_outcome.needs_redraw);
+        assert!(controller.is_pressed());
+        assert_eq!(controller.selection().start, SelectionPoint::new(2, 2));
+        assert_eq!(controller.selection().end, SelectionPoint::new(2, 2));
+
+        // Drag to col 5, row 4 (x = 55.0, y = 85.0 -> col 5, row 4)
+        let drag_outcome = controller.handle_motion(55.0, 85.0, &ctx);
+        assert!(drag_outcome.needs_redraw);
+        assert_eq!(controller.selection().start, SelectionPoint::new(2, 2));
+        assert_eq!(controller.selection().end, SelectionPoint::new(4, 5));
+
+        // Release button
+        let release_outcome = controller.handle_button(0x110, false, 200, 3, &ctx);
+        assert!(release_outcome.needs_redraw);
+        assert!(!controller.is_pressed());
+        assert_eq!(controller.selection().end, SelectionPoint::new(4, 5));
+    }
+
+    #[test]
+    fn test_pointer_multi_click_word_and_line_selection() {
+        let mut controller = PointerController::new();
+        let mut grid = Grid::new(80, 24, 100);
+        // Write "hello world" on line 0
+        for (i, c) in "hello world".chars().enumerate() {
+            grid.lines[0].cells[i].c = c;
+        }
+
+        let mouse_mode = MouseState::default();
+        let ctx = PointerContext::new(
+            &grid,
+            test_metrics(),
+            1.0,
+            [0, 0],
+            Modifiers::default(),
+            &mouse_mode,
+            1.0,
+            false,
+            None,
+        );
+
+        controller.handle_enter(75.0, 5.0, 1, &ctx); // col 7 ('o' in world), row 0
+
+        // Click 1: Simple
+        controller.handle_button(0x110, true, 100, 1, &ctx);
+        assert_eq!(controller.selection().kind, SelectionType::Simple);
+        controller.handle_button(0x110, false, 150, 2, &ctx);
+
+        // Click 2 (within 350ms): Word selection on "world" [col 6..=10]
+        controller.handle_button(0x110, true, 200, 3, &ctx);
+        assert_eq!(controller.selection().kind, SelectionType::Word);
+        assert_eq!(controller.selection().start, SelectionPoint::new(0, 6));
+        assert_eq!(controller.selection().end, SelectionPoint::new(0, 10));
+        controller.handle_button(0x110, false, 250, 4, &ctx);
+
+        // Click 3 (within 350ms): Line selection [col 0..=79]
+        controller.handle_button(0x110, true, 300, 5, &ctx);
+        assert_eq!(controller.selection().kind, SelectionType::Line);
+        assert_eq!(controller.selection().start, SelectionPoint::new(0, 0));
+        assert_eq!(controller.selection().end, SelectionPoint::new(0, 79));
+    }
+
+    #[test]
+    fn test_pointer_mouse_tracking_and_shift_override() {
+        let mut controller = PointerController::new();
+        let grid = Grid::new(80, 24, 100);
+        let mouse_mode = MouseState {
+            tracking: MouseTracking::Drag,
+            encoding: MouseEncoding::Sgr,
+            ..Default::default()
+        };
+
+        let ctx = PointerContext::new(
+            &grid,
+            test_metrics(),
+            1.0,
+            [0, 0],
+            Modifiers::default(),
+            &mouse_mode,
+            1.0,
+            false,
+            None,
+        );
+
+        controller.handle_enter(25.0, 45.0, 1, &ctx);
+
+        // Press BTN_LEFT at col 2, row 2 -> 1-based is (3, 3)
+        let press = controller.handle_button(0x110, true, 100, 2, &ctx);
+        assert_eq!(press.pty_write, Some(b"\x1b[<0;3;3M".to_vec()));
+
+        // Drag motion -> code 32 (button 0 + motion)
+        let motion = controller.handle_motion(35.0, 65.0, &ctx); // col 3, row 3 -> 1-based (4, 4)
+        assert_eq!(motion.pty_write, Some(b"\x1b[<32;4;4M".to_vec()));
+
+        // Release BTN_LEFT
+        let release = controller.handle_button(0x110, false, 200, 3, &ctx);
+        assert_eq!(release.pty_write, Some(b"\x1b[<0;4;4m".to_vec()));
+
+        // Now test Shift override: hands the event back to local selection
+        let shift_mod = Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+        let shift_ctx = PointerContext::new(
+            &grid,
+            test_metrics(),
+            1.0,
+            [0, 0],
+            shift_mod,
+            &mouse_mode,
+            1.0,
+            false,
+            None,
+        );
+
+        let shift_press = controller.handle_button(0x110, true, 300, 4, &shift_ctx);
+        assert_eq!(shift_press.pty_write, None);
+        assert!(controller.is_pressed()); // Local selection initiated!
+    }
+
+    #[test]
+    fn test_pointer_axis_scrolling() {
+        let mut controller = PointerController::new();
+        let grid = Grid::new(80, 24, 100);
+        let mouse_mode = MouseState::default();
+
+        // 1. Regular scrollback mode
+        let ctx = PointerContext::new(
+            &grid,
+            test_metrics(),
+            1.0,
+            [0, 0],
+            Modifiers::default(),
+            &mouse_mode,
+            1.0,
+            false,
+            None,
+        );
+
+        let axis_up = controller.handle_axis(-15.0, &ctx);
+        assert_eq!(axis_up.scroll_lines, Some(-1));
+        assert!(axis_up.needs_redraw);
+
+        let axis_down = controller.handle_axis(30.0, &ctx);
+        assert_eq!(axis_down.scroll_lines, Some(2));
+        assert!(axis_down.needs_redraw);
+
+        // 2. Alt screen mode: sends VT arrow escapes
+        let alt_ctx = PointerContext::new(
+            &grid,
+            test_metrics(),
+            1.0,
+            [0, 0],
+            Modifiers::default(),
+            &mouse_mode,
+            1.0,
+            true,
+            None,
+        );
+
+        let alt_up = controller.handle_axis(-15.0, &alt_ctx);
+        assert_eq!(alt_up.pty_write, Some(b"\x1b[A".to_vec()));
+
+        let alt_down = controller.handle_axis(15.0, &alt_ctx);
+        assert_eq!(alt_down.pty_write, Some(b"\x1b[B".to_vec()));
+    }
+
+    #[test]
+    fn test_pointer_hyperlink_hover_and_ctrl_click() {
+        let mut controller = PointerController::new();
+        let mut grid = Grid::new(80, 24, 100);
+        for (i, c) in "visit https://ftty.org today".chars().enumerate() {
+            grid.lines[0].cells[i].c = c;
+            grid.lines[0].cells[i].flags = CellFlags::empty();
+        }
+
+        let mouse_mode = MouseState::default();
+        let ctrl_mod = Modifiers {
+            ctrl: true,
+            ..Default::default()
+        };
+
+        let ctx = PointerContext::new(
+            &grid,
+            test_metrics(),
+            1.0,
+            [0, 0],
+            ctrl_mod,
+            &mouse_mode,
+            1.0,
+            false,
+            None,
+        );
+
+        // Move over col 10 ("https://ftty.org" starts at 6)
+        controller.handle_enter(105.0, 5.0, 1, &ctx);
+        assert_eq!(controller.expected_cursor_shape(&ctx), Shape::Pointer);
+        assert!(controller.hovered_span().is_some());
+
+        // Ctrl + Click opens the URL
+        let click = controller.handle_button(0x110, true, 100, 2, &ctx);
+        assert_eq!(click.open_url, Some("https://ftty.org".to_string()));
+
+        // Middle click triggers primary paste
+        let middle = controller.handle_button(0x112, true, 200, 3, &ctx);
+        assert!(middle.paste_primary);
+    }
+}
