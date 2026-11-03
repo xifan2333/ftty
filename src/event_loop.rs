@@ -19,7 +19,7 @@ use crate::error::{FttyError, WaylandError};
 use crate::font::{CellMetrics, FontManager, GlyphAtlas};
 use crate::input::ime::ImeState;
 use crate::input::{KeyAction, KeyboardHandler};
-use crate::kitty::{ImagePlacement, KittyAction, KittyEvent, KittyParser, kitty_response_full};
+use crate::kitty::{KittyEvent, KittyParser};
 use crate::parser::Terminal;
 use crate::pty::Pty;
 use crate::render::{ColorScheme, RenderOptions, Renderer};
@@ -989,182 +989,35 @@ impl AppState {
     }
 
     pub fn handle_kitty_event(&mut self, event: KittyEvent) {
-        match event {
-            KittyEvent::Transmit { command, image } => {
-                let image_id = image.id;
-                let placement_id = command.placement_id.unwrap_or(0);
-                let ack_id = command.placement_id.filter(|id| *id != 0);
-                let src_w = command
-                    .src_w
-                    .unwrap_or(image.width.saturating_sub(command.src_x.unwrap_or(0)));
-                let src_h = command
-                    .src_h
-                    .unwrap_or(image.height.saturating_sub(command.src_y.unwrap_or(0)));
-                let img_w = (src_w as f32).max(1.0);
-                let img_h = (src_h as f32).max(1.0);
-                self.terminal.grid.add_image(image);
+        let active = crate::kitty::collect_placeholder_ids(
+            self.terminal
+                .grid
+                .lines
+                .iter()
+                .chain(self.terminal.grid.alt_lines.iter().flatten())
+                .chain(self.terminal.grid.scrollback.iter()),
+        );
+        let ctx = crate::kitty::GraphicContext {
+            cell_width: self.font_mgr.metrics.cell_width as f32,
+            cell_height: self.font_mgr.metrics.cell_height as f32,
+            cursor_row: self.terminal.grid.cursor.row,
+            cursor_col: self.terminal.grid.cursor.col,
+            scrollback_len: self.terminal.grid.scrollback.len(),
+        };
+        let outcome = self
+            .terminal
+            .grid
+            .graphics
+            .handle_event(event, ctx, &active);
 
-                let cw = self.font_mgr.metrics.cell_width as f32;
-                let ch = self.font_mgr.metrics.cell_height as f32;
-
-                let (cols, rows) = match (command.cols, command.rows) {
-                    (Some(c), Some(r)) => (c as usize, r as usize),
-                    (Some(c), None) => {
-                        let pixel_w = c as f32 * cw;
-                        let pixel_h = pixel_w * (img_h / img_w);
-                        let r = (pixel_h / ch).ceil().max(1.0) as usize;
-                        (c as usize, r)
-                    }
-                    (None, Some(r)) => {
-                        let pixel_h = r as f32 * ch;
-                        let pixel_w = pixel_h * (img_w / img_h);
-                        let c = (pixel_w / cw).ceil().max(1.0) as usize;
-                        (c, r as usize)
-                    }
-                    (None, None) => {
-                        let c = (img_w / cw).ceil().max(1.0) as usize;
-                        let r = (img_h / ch).ceil().max(1.0) as usize;
-                        (c, r)
-                    }
-                };
-
-                let should_place = command.action == KittyAction::TransmitAndDisplay
-                    || command.action == KittyAction::TransmitAndDisplayWithResponse;
-
-                if command.is_virtual {
-                    self.terminal
-                        .grid
-                        .virtual_placements
-                        .insert(image_id, (cols, rows));
-                } else if should_place {
-                    let abs_line =
-                        self.terminal.grid.scrollback.len() + self.terminal.grid.cursor.row;
-                    self.terminal.grid.add_placement(ImagePlacement {
-                        image_id,
-                        placement_id,
-                        line: abs_line,
-                        col: self.terminal.grid.cursor.col,
-                        cols,
-                        rows,
-                        src_x: command.src_x.unwrap_or(0),
-                        src_y: command.src_y.unwrap_or(0),
-                        src_w: command.src_w,
-                        src_h: command.src_h,
-                        offset_x: command.offset_x,
-                        offset_y: command.offset_y,
-                        z_index: command.z_index,
-                    });
-
-                    self.advance_cursor_for_image(
-                        cols,
-                        rows,
-                        command.do_not_move_cursor || command.is_virtual,
-                    );
-                }
-
-                let wants_ack = command.action == KittyAction::TransmitAndDisplayWithResponse
-                    || command.id_explicit
-                    || command.number_explicit;
-                if wants_ack && command.quiet == 0 {
-                    let resp = kitty_response_full(image_id, command.image_number, ack_id, "OK");
-                    self.write_pty_blocking(&resp);
-                }
-            }
-            KittyEvent::Place { command } => {
-                let Some(image_id) = command.image_id else {
-                    return;
-                };
-                let placement_id = command.placement_id.unwrap_or(0);
-                let ack_id = command.placement_id.filter(|id| *id != 0);
-                let Some(image) = self.terminal.grid.images.get(&image_id) else {
-                    if command.quiet < 2 {
-                        let resp = kitty_response_full(
-                            image_id,
-                            command.image_number,
-                            ack_id,
-                            "ENOENT:image not found",
-                        );
-                        self.write_pty_blocking(&resp);
-                    }
-                    return;
-                };
-
-                let src_w = command
-                    .src_w
-                    .unwrap_or(image.width.saturating_sub(command.src_x.unwrap_or(0)));
-                let src_h = command
-                    .src_h
-                    .unwrap_or(image.height.saturating_sub(command.src_y.unwrap_or(0)));
-                let img_w = (src_w as f32).max(1.0);
-                let img_h = (src_h as f32).max(1.0);
-                let cw = self.font_mgr.metrics.cell_width as f32;
-                let ch = self.font_mgr.metrics.cell_height as f32;
-
-                let (cols, rows) = match (command.cols, command.rows) {
-                    (Some(c), Some(r)) => (c as usize, r as usize),
-                    (Some(c), None) => {
-                        let pixel_w = c as f32 * cw;
-                        let pixel_h = pixel_w * (img_h / img_w);
-                        let r = (pixel_h / ch).ceil().max(1.0) as usize;
-                        (c as usize, r)
-                    }
-                    (None, Some(r)) => {
-                        let pixel_h = r as f32 * ch;
-                        let pixel_w = pixel_h * (img_w / img_h);
-                        let c = (pixel_w / cw).ceil().max(1.0) as usize;
-                        (c, r as usize)
-                    }
-                    (None, None) => {
-                        let c = (img_w / cw).ceil().max(1.0) as usize;
-                        let r = (img_h / ch).ceil().max(1.0) as usize;
-                        (c, r)
-                    }
-                };
-
-                if command.is_virtual {
-                    self.terminal
-                        .grid
-                        .virtual_placements
-                        .insert(image_id, (cols, rows));
-                } else {
-                    let abs_line =
-                        self.terminal.grid.scrollback.len() + self.terminal.grid.cursor.row;
-                    self.terminal.grid.add_placement(ImagePlacement {
-                        image_id,
-                        placement_id,
-                        line: abs_line,
-                        col: self.terminal.grid.cursor.col,
-                        cols,
-                        rows,
-                        src_x: command.src_x.unwrap_or(0),
-                        src_y: command.src_y.unwrap_or(0),
-                        src_w: command.src_w,
-                        src_h: command.src_h,
-                        offset_x: command.offset_x,
-                        offset_y: command.offset_y,
-                        z_index: command.z_index,
-                    });
-
-                    self.advance_cursor_for_image(
-                        cols,
-                        rows,
-                        command.do_not_move_cursor || command.is_virtual,
-                    );
-                }
-                let wants_ack = command.action == KittyAction::TransmitAndDisplayWithResponse
-                    || command.id_explicit
-                    || command.number_explicit;
-                if wants_ack && command.quiet == 0 {
-                    let resp = kitty_response_full(image_id, command.image_number, ack_id, "OK");
-                    self.write_pty_blocking(&resp);
-                }
-            }
-            KittyEvent::Delete { target } => {
-                self.terminal.grid.delete_images(target);
-            }
-            KittyEvent::Response(resp) => {
-                self.write_pty_blocking(&resp);
-            }
+        if let Some((cols, rows, do_not_move)) = outcome.cursor_advance {
+            self.advance_cursor_for_image(cols, rows, do_not_move);
+        }
+        if let Some(resp) = outcome.pty_response {
+            self.write_pty_blocking(&resp);
+        }
+        if outcome.needs_redraw {
+            self.needs_redraw = true;
         }
     }
 

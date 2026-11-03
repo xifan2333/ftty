@@ -621,13 +621,13 @@ fn test_image_remains_valid_for_placements_after_cpu_buffer_unload() {
     grid.add_image(image);
 
     // Simulate Renderer unloading CPU pixel buffer after OpenGL upload
-    if let Some(img) = grid.images.get_mut(&42) {
-        assert!(img.rgba.is_some());
-        img.rgba = None;
-    }
+    grid.graphics.sync_gpu_textures(|id, _, _, _, _| {
+        assert_eq!(id, 42);
+        true
+    });
 
     // Grid tracking, size calculation and placement remain fully intact
-    let img = grid.images.get(&42).unwrap();
+    let img = grid.images().get(&42).unwrap();
     assert!(img.rgba.is_none());
     assert_eq!(img.byte_size(), 64 * 64 * 4);
 
@@ -643,11 +643,11 @@ fn test_image_remains_valid_for_placements_after_cpu_buffer_unload() {
         z_index: 0,
         ..Default::default()
     });
-    assert_eq!(grid.placements.len(), 1);
-    assert_eq!(grid.placements[0].image_id, 42);
+    assert_eq!(grid.graphics.placements().len(), 1);
+    assert_eq!(grid.graphics.placements()[0].image_id, 42);
 
     // Eviction budget accurately counts unloaded images
-    let total_stored: usize = grid.images.values().map(ImageData::byte_size).sum();
+    let total_stored: usize = grid.images().values().map(ImageData::byte_size).sum();
     assert_eq!(total_stored, 64 * 64 * 4);
 }
 
@@ -744,12 +744,12 @@ fn test_delete_preserves_image_data_on_lowercase() {
         rows: 5,
         ..Default::default()
     });
-    assert_eq!(grid.placements.len(), 1);
+    assert_eq!(grid.graphics.placements().len(), 1);
     assert!(grid.contains_image(1));
 
     // Lowercase d=i deletes placement but retains image data in memory
     grid.delete_images(DeleteTarget::ById(1));
-    assert_eq!(grid.placements.len(), 0);
+    assert_eq!(grid.graphics.placements().len(), 0);
     assert!(grid.contains_image(1));
 
     // Lowercase d=a (DeleteTarget::All) deletes all placements but retains image data
@@ -763,10 +763,238 @@ fn test_delete_preserves_image_data_on_lowercase() {
         ..Default::default()
     });
     grid.delete_images(DeleteTarget::All);
-    assert_eq!(grid.placements.len(), 0);
+    assert_eq!(grid.graphics.placements().len(), 0);
     assert!(grid.contains_image(1));
 
     // Uppercase d=I (DeleteTarget::ByIdAndFree) frees image data
     grid.delete_images(DeleteTarget::ByIdAndFree(1));
     assert!(!grid.contains_image(1));
+}
+
+mod graphic_store_tests {
+    use std::collections::HashSet;
+
+    use ftty::kitty::model::{ImageData, ImagePlacement, KittyAction, KittyCommand, KittyEvent};
+    use ftty::kitty::{DeleteTarget, GraphicContext, GraphicStore, MAX_STORED_IMAGE_BYTES};
+
+    #[test]
+    fn test_graphic_store_gpu_sync_seam_releases_cpu_buffer() {
+        let mut store = GraphicStore::new();
+        let image = ImageData::new(10, 32, 32, vec![255; 32 * 32 * 4]);
+        store.add_image(image, &HashSet::new());
+
+        let mut uploaded_ids = Vec::new();
+        store.sync_gpu_textures(|id, width, height, ver, slice| {
+            uploaded_ids.push(id);
+            assert_eq!(width, 32);
+            assert_eq!(height, 32);
+            assert_eq!(ver, 1);
+            assert_eq!(slice.len(), 32 * 32 * 4);
+            true
+        });
+
+        assert_eq!(uploaded_ids, vec![10]);
+        let img = store.image(10).unwrap();
+        assert!(
+            img.rgba.is_none(),
+            "CPU buffer must be released after GPU upload"
+        );
+        assert_eq!(img.byte_size(), 32 * 32 * 4);
+
+        // A second sync must not re-yield already uploaded images
+        let mut re_uploaded = Vec::new();
+        store.sync_gpu_textures(|id, _, _, _, _| {
+            re_uploaded.push(id);
+            true
+        });
+        assert!(re_uploaded.is_empty());
+    }
+
+    #[test]
+    fn test_graphic_store_placement_deduplication() {
+        let mut store = GraphicStore::new();
+        store.add_placement(ImagePlacement {
+            image_id: 1,
+            placement_id: 5,
+            line: 10,
+            col: 2,
+            cols: 8,
+            rows: 4,
+            offset_x: 0,
+            offset_y: 0,
+            z_index: 0,
+            ..Default::default()
+        });
+        assert_eq!(store.placements().len(), 1);
+
+        // Same image_id and placement_id updates in-place per Kitty protocol
+        store.add_placement(ImagePlacement {
+            image_id: 1,
+            placement_id: 5,
+            line: 12,
+            col: 4,
+            cols: 16,
+            rows: 8,
+            offset_x: 0,
+            offset_y: 0,
+            z_index: 1,
+            ..Default::default()
+        });
+        assert_eq!(store.placements().len(), 1);
+        assert_eq!(store.placements()[0].line, 12);
+        assert_eq!(store.placements()[0].cols, 16);
+        assert_eq!(store.placements()[0].z_index, 1);
+    }
+
+    #[test]
+    fn test_graphic_store_handle_event_transmit_and_place() {
+        let mut store = GraphicStore::new();
+        let image = ImageData::new(100, 100, 50, vec![0; 100 * 50 * 4]);
+        let command = KittyCommand {
+            action: KittyAction::TransmitAndDisplayWithResponse,
+            image_id: Some(100),
+            id_explicit: true,
+            placement_id: Some(1),
+            ..Default::default()
+        };
+        let ctx = GraphicContext {
+            cell_width: 10.0,
+            cell_height: 20.0,
+            cursor_row: 2,
+            cursor_col: 5,
+            scrollback_len: 10,
+        };
+
+        let outcome = store.handle_event(
+            KittyEvent::Transmit { command, image },
+            ctx,
+            &HashSet::new(),
+        );
+
+        assert!(outcome.needs_redraw);
+        assert_eq!(outcome.cursor_advance, Some((10, 3, false)));
+        assert!(outcome.pty_response.is_some());
+        assert_eq!(store.placements().len(), 1);
+        assert_eq!(store.placements()[0].line, 12);
+        assert_eq!(store.placements()[0].col, 5);
+    }
+
+    #[test]
+    fn test_graphic_store_scroll_and_region_shifts() {
+        let mut store = GraphicStore::new();
+        store.add_placement(ImagePlacement {
+            image_id: 1,
+            placement_id: 0,
+            line: 5,
+            col: 0,
+            cols: 2,
+            rows: 2,
+            offset_x: 0,
+            offset_y: 0,
+            z_index: 0,
+            ..Default::default()
+        });
+        store.add_placement(ImagePlacement {
+            image_id: 2,
+            placement_id: 0,
+            line: 15,
+            col: 0,
+            cols: 2,
+            rows: 2,
+            offset_x: 0,
+            offset_y: 0,
+            z_index: 0,
+            ..Default::default()
+        });
+
+        // Shift up on scroll
+        store.shift_on_scroll_up(2);
+        assert_eq!(store.placements()[0].line, 3);
+        assert_eq!(store.placements()[1].line, 13);
+
+        // Shift region within bounds
+        store.shift_region_down(10, 20, 3);
+        assert_eq!(store.placements()[0].line, 3); // Untouched (outside region)
+        assert_eq!(store.placements()[1].line, 16); // Shifted
+    }
+
+    #[test]
+    fn test_graphic_store_alt_screen_isolation() {
+        let mut store = GraphicStore::new();
+        store.add_placement(ImagePlacement {
+            image_id: 1,
+            placement_id: 0,
+            line: 5,
+            col: 0,
+            cols: 1,
+            rows: 1,
+            offset_x: 0,
+            offset_y: 0,
+            z_index: 0,
+            ..Default::default()
+        });
+        assert_eq!(store.placements().len(), 1);
+
+        store.switch_to_alt_screen();
+        assert!(store.placements().is_empty());
+
+        store.add_placement(ImagePlacement {
+            image_id: 2,
+            placement_id: 0,
+            line: 1,
+            col: 0,
+            cols: 1,
+            rows: 1,
+            offset_x: 0,
+            offset_y: 0,
+            z_index: 0,
+            ..Default::default()
+        });
+        assert_eq!(store.placements().len(), 1);
+        assert_eq!(store.placements()[0].image_id, 2);
+
+        store.restore_from_alt_screen();
+        assert_eq!(store.placements().len(), 1);
+        assert_eq!(store.placements()[0].image_id, 1);
+    }
+
+    #[test]
+    fn test_graphic_store_delete_targets() {
+        let mut store = GraphicStore::new();
+        store.add_image(ImageData::new(1, 10, 10, vec![0; 400]), &HashSet::new());
+        store.add_placement(ImagePlacement {
+            image_id: 1,
+            placement_id: 0,
+            line: 5,
+            col: 2,
+            cols: 4,
+            rows: 4,
+            offset_x: 0,
+            offset_y: 0,
+            z_index: 0,
+            ..Default::default()
+        });
+
+        // Delete at cursor intersecting placement
+        store.delete_images(DeleteTarget::AtCursor, 6, 3);
+        assert!(store.placements().is_empty());
+        assert!(store.contains_image(1)); // Unplaced, but not freed
+
+        // ByIdAndFree frees the image
+        store.delete_images(DeleteTarget::ByIdAndFree(1), 0, 0);
+        assert!(!store.contains_image(1));
+    }
+
+    #[test]
+    fn test_graphic_store_byte_budget_eviction() {
+        let mut store = GraphicStore::new();
+        for id in 1..=6 {
+            store.add_image(ImageData::new(id, 2048, 2048, vec![]), &HashSet::new());
+        }
+        assert!(store.total_image_bytes() <= MAX_STORED_IMAGE_BYTES);
+        assert!(!store.contains_image(1));
+        assert!(!store.contains_image(2));
+        assert!(store.contains_image(5));
+        assert!(store.contains_image(6));
+    }
 }
