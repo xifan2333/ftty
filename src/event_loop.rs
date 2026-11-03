@@ -12,19 +12,17 @@ use nix::poll::{PollFd, PollFlags, poll};
 
 use wayland_client::protocol::wl_callback::WlCallback;
 use wayland_client::{Connection, QueueHandle};
-use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape;
 
 use crate::color::Rgb;
 use crate::config::Config;
 use crate::error::{FttyError, WaylandError};
 use crate::font::{CellMetrics, FontManager, GlyphAtlas};
 use crate::input::ime::ImeState;
-use crate::input::selection::{Selection, SelectionPoint, SelectionType};
 use crate::input::{KeyAction, KeyboardHandler};
 use crate::kitty::{ImagePlacement, KittyAction, KittyEvent, KittyParser, kitty_response_full};
 use crate::parser::Terminal;
 use crate::pty::Pty;
-use crate::render::{ColorScheme, HoveredHyperlinkSpan, RenderOptions, Renderer};
+use crate::render::{ColorScheme, RenderOptions, Renderer};
 use crate::wayland::WaylandState;
 
 /// Shared application state passed to all calloop sources and Wayland event dispatches.
@@ -45,24 +43,9 @@ pub struct AppState {
     pub palette: [Rgb; 256],
     pub default_fg: Rgb,
     pub default_bg: Rgb,
-    pub scroll_accumulator: f64,
-    pub selection: Selection,
-    pub mouse_pos: [f64; 2],
-    pub mouse_pressed: bool,
-    /// Bitmask of X11 button indexes currently held down and reported to the application.
-    pub mouse_buttons_held: u8,
-    /// Set while a button press was forwarded to a mouse-tracking application.
-    pub mouse_reported: bool,
-    /// X11 button index most recently forwarded to the PTY, used for drag motion.
-    pub mouse_button: u8,
-    pub last_click_time: u32,
-    pub click_count: u8,
-    pub last_click_cell: Option<(usize, usize)>,
+    pub pointer: crate::input::PointerController,
     pub last_serial: u32,
     pub pointer_serial: u32,
-    pub pointer_in_surface: bool,
-    pub hovered_span: Option<HoveredHyperlinkSpan>,
-    pub current_cursor_shape: Option<Shape>,
     pub clipboard_text: Option<String>,
     pub pending_offers: Vec<crate::wayland::OfferData>,
     pub running: bool,
@@ -224,25 +207,9 @@ impl AppState {
             palette,
             default_fg,
             default_bg,
-            scroll_accumulator: 0.0,
-            selection: Selection::new(
-                SelectionPoint::new(0, 0),
-                SelectionPoint::new(0, 0),
-                SelectionType::Simple,
-            ),
-            mouse_pos: [0.0, 0.0],
-            mouse_pressed: false,
-            mouse_buttons_held: 0,
-            mouse_reported: false,
-            mouse_button: 0,
-            last_click_time: 0,
-            click_count: 0,
-            last_click_cell: None,
+            pointer: crate::input::PointerController::new(),
             last_serial: 0,
             pointer_serial: 0,
-            pointer_in_surface: false,
-            hovered_span: None,
-            current_cursor_shape: None,
             clipboard_text: None,
             pending_offers: Vec::new(),
             running: true,
@@ -478,9 +445,9 @@ pub fn run_event_loop_with_connection(
             let options = RenderOptions::new(
                 [pad_x, pad_y],
                 app_state.ime.preedit.as_ref(),
-                Some(&app_state.selection),
+                Some(&app_state.pointer.selection),
             )
-            .with_hovered_span(app_state.hovered_span);
+            .with_hovered_span(app_state.pointer.hovered_span);
             let physical_size = [
                 (app_state.wayland.width as f64 * factor).round().max(1.0) as u32,
                 (app_state.wayland.height as f64 * factor).round().max(1.0) as u32,
@@ -588,7 +555,7 @@ impl AppState {
             saturating_u16(phys_height.saturating_sub(u32::from(pad_y) * 2)),
         ];
         if (self.terminal.grid.cols, self.terminal.grid.rows) != (cols as usize, rows as usize) {
-            self.selection.clear();
+            self.pointer.clear_selection();
             self.terminal.grid.resize(cols as usize, rows as usize);
         }
         self.terminal.set_geometry(
@@ -899,7 +866,7 @@ impl AppState {
                 Self::spawn_pipe_async(cmd, text);
             }
             KeyAction::PipeSelection(cmd) => {
-                let text = self.selection.extract_text(&self.terminal.grid);
+                let text = self.pointer.selection.extract_text(&self.terminal.grid);
                 if !text.is_empty() {
                     Self::spawn_pipe_async(cmd, text);
                 }

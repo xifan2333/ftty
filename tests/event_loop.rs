@@ -341,7 +341,7 @@ fn test_copy_and_paste_clipboard() {
         );
     }
 
-    app.selection = Selection::new(
+    app.pointer.selection = Selection::new(
         SelectionPoint::new(0, 0),
         SelectionPoint::new(0, 10),
         SelectionType::Simple,
@@ -414,7 +414,7 @@ fn mouse_reports_are_forwarded_only_when_tracking_is_enabled() {
     let mut app = new_test_app(term, pty).expect("AppState new");
     let cw = f64::from(app.font_mgr.metrics.cell_width);
     let ch = f64::from(app.font_mgr.metrics.cell_height);
-    app.mouse_pos = [cw * 2.5, ch * 1.5];
+    app.pointer.mouse_pos = [cw * 2.5, ch * 1.5];
 
     // Tracking disabled: the pointer stays available for local text selection.
     assert!(app.mouse_report_bytes(0, true, false).is_none());
@@ -556,25 +556,25 @@ fn test_update_hover_state_and_pointer_shape() {
     let ch = f64::from(app.font_mgr.metrics.cell_height);
 
     // If pointer is not in surface, hover must be None
-    app.pointer_in_surface = false;
-    app.mouse_pos = [cw * 5.5, ch * 0.5];
+    app.pointer.pointer_in_surface = false;
+    app.pointer.mouse_pos = [cw * 5.5, ch * 0.5];
     app.update_hover_state();
-    assert_eq!(app.hovered_span, None);
+    assert_eq!(app.pointer.hovered_span, None);
 
     // Enter surface
-    app.pointer_in_surface = true;
+    app.pointer.pointer_in_surface = true;
 
     // Pointer over cell (row 0, col 0) has no hyperlink
-    app.mouse_pos = [cw * 0.5, ch * 0.5];
+    app.pointer.mouse_pos = [cw * 0.5, ch * 0.5];
     app.update_hover_state();
-    assert_eq!(app.hovered_span, None);
+    assert_eq!(app.pointer.hovered_span, None);
 
     // Move pointer over cell (row 0, col 5): detects contiguous span [4..=6]
-    app.mouse_pos = [cw * 5.5, ch * 0.5];
+    app.pointer.mouse_pos = [cw * 5.5, ch * 0.5];
     app.needs_redraw = false;
     app.update_hover_state();
     assert_eq!(
-        app.hovered_span,
+        app.pointer.hovered_span,
         Some(HoveredHyperlinkSpan {
             line: 0,
             start_col: 4,
@@ -584,29 +584,29 @@ fn test_update_hover_state_and_pointer_shape() {
     assert!(app.needs_redraw);
 
     // Pointer over cell with sentinel id 0 (pool exhaustion) must produce no hover
-    app.mouse_pos = [cw * 8.5, ch * 0.5];
+    app.pointer.mouse_pos = [cw * 8.5, ch * 0.5];
     app.needs_redraw = false;
     app.update_hover_state();
-    assert_eq!(app.hovered_span, None);
+    assert_eq!(app.pointer.hovered_span, None);
     assert!(app.needs_redraw);
 
     // Back to col 5
-    app.mouse_pos = [cw * 5.5, ch * 0.5];
+    app.pointer.mouse_pos = [cw * 5.5, ch * 0.5];
     app.update_hover_state();
-    assert!(app.hovered_span.is_some());
+    assert!(app.pointer.hovered_span.is_some());
 
     // If mouse is pressed (dragging selection), hover is suppressed
-    app.mouse_pressed = true;
+    app.pointer.mouse_pressed = true;
     app.needs_redraw = false;
     app.update_hover_state();
-    assert_eq!(app.hovered_span, None);
+    assert_eq!(app.pointer.hovered_span, None);
     assert!(app.needs_redraw);
 
     // When mouse is released, hover is restored
-    app.mouse_pressed = false;
+    app.pointer.mouse_pressed = false;
     app.update_hover_state();
     assert_eq!(
-        app.hovered_span,
+        app.pointer.hovered_span,
         Some(HoveredHyperlinkSpan {
             line: 0,
             start_col: 4,
@@ -764,20 +764,20 @@ fn test_plaintext_url_hover_with_ctrl() {
     let cw = f64::from(app.font_mgr.metrics.cell_width);
     let ch = f64::from(app.font_mgr.metrics.cell_height);
 
-    app.pointer_in_surface = true;
+    app.pointer.pointer_in_surface = true;
     // Over the URL (col 10)
-    app.mouse_pos = [cw * 10.5, ch * 0.5];
+    app.pointer.mouse_pos = [cw * 10.5, ch * 0.5];
 
     // Without Ctrl: no hover span
     app.update_hover_state();
-    assert_eq!(app.hovered_span, None);
+    assert_eq!(app.pointer.hovered_span, None);
 
     // With Ctrl held: hover span detected!
     app.keyboard.update_modifiers(4, 0, 0, 0);
     assert!(app.keyboard.modifiers().ctrl);
     app.update_hover_state();
     assert_eq!(
-        app.hovered_span,
+        app.pointer.hovered_span,
         Some(HoveredHyperlinkSpan {
             line: 0,
             start_col: 5,
@@ -789,7 +789,7 @@ fn test_plaintext_url_hover_with_ctrl() {
     app.keyboard.update_modifiers(0, 0, 0, 0);
     assert!(!app.keyboard.modifiers().ctrl);
     app.update_hover_state();
-    assert_eq!(app.hovered_span, None);
+    assert_eq!(app.pointer.hovered_span, None);
 }
 
 #[test]
