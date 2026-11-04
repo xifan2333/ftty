@@ -32,6 +32,10 @@ _Avoid_: RenderService, DrawingContext, FrameRenderer
 The procedural geometric generation subsystem synthesizing Unicode Box Drawing and Block Element quads and polygons without font rasterization.
 _Avoid_: BoxDrawer, ProceduralRenderer, VectorGlyphs
 
+**GridReflow**:
+The column-resizing subsystem extracting logical lines and rewrapping cell matrices across terminal width changes.
+_Avoid_: LineRewrapper, GridResizer, TextReflow
+
 **TerminalSession**:
 The orchestrator coordinating the pseudo-terminal (PTY) communication channel, escape sequence parsing, and terminal emulation state.
 _Avoid_: SessionManager, TermSession, PtyBridge

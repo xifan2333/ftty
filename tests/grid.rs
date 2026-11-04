@@ -1803,3 +1803,56 @@ fn test_row_resize_truncating_wide_char_preserves_background_color() {
     assert_eq!(row.cells[8].bg, bg);
     assert_eq!(row.cells[8].flags, CellFlags::empty());
 }
+
+mod reflow_module_tests {
+    use ftty::color::Color;
+    use ftty::grid::reflow::{reflow_primary_screen, shrink_rows};
+    use ftty::grid::{CellFlags, Grid, Row};
+
+    #[test]
+    fn test_shrink_rows_preserves_cursor_line() {
+        let mut lines = vec![
+            Row::new(10), // Row 0
+            Row::new(10), // Row 1 (Cursor)
+            Row::new(10), // Row 2
+            Row::new(10), // Row 3
+        ];
+
+        // Cursor at row 1. Remove 2 rows.
+        // Below cursor = 3 - 1 = 2 rows (Row 2 and Row 3).
+        // Since from_bottom = min(2, 2) = 2, from_top = 0.
+        let removed = shrink_rows(&mut lines, 2, 1, 2);
+        assert!(removed.is_empty(), "bottom rows discarded first");
+        assert_eq!(lines.len(), 2);
+
+        // Now with cursor at row 0, remove 2 rows.
+        // Below cursor = 1 - 0 = 1 row (Row 1).
+        // from_bottom = min(2, 1) = 1, from_top = 1.
+        let mut lines2 = vec![Row::new(10), Row::new(10)];
+        let removed_top = shrink_rows(&mut lines2, 1, 0, 1);
+        assert!(removed_top.is_empty());
+        assert_eq!(lines2.len(), 1);
+    }
+
+    #[test]
+    fn test_reflow_primary_screen_direct_invocation() {
+        let mut grid = Grid::new(20, 4, 100);
+        // Write long line that will wrap when width shrinks
+        for c in "first line of text that wraps nicely".chars() {
+            grid.write_char(
+                c,
+                Color::DefaultForeground,
+                Color::DefaultBackground,
+                CellFlags::empty(),
+            );
+        }
+
+        // Direct reflow to width 10
+        reflow_primary_screen(&mut grid, 10, 8);
+
+        assert_eq!(grid.cols, 10);
+        assert_eq!(grid.rows, 8);
+        assert_eq!(grid.lines[0].cells.len(), 10);
+        assert!(grid.lines[0].wrapped);
+    }
+}
