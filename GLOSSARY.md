@@ -28,6 +28,10 @@ _Avoid_: ImageManager, KittyCache, TextureRegistry
 The unified rendering system translating terminal cell grids and overlay states into displayable visual output.
 _Avoid_: RenderService, DrawingContext, FrameRenderer
 
+**ProceduralGlyphs**:
+The procedural geometric generation subsystem synthesizing Unicode Box Drawing and Block Element quads and polygons without font rasterization.
+_Avoid_: BoxDrawer, ProceduralRenderer, VectorGlyphs
+
 **TerminalSession**:
 The orchestrator coordinating the pseudo-terminal (PTY) communication channel, escape sequence parsing, and terminal emulation state.
 _Avoid_: SessionManager, TermSession, PtyBridge
