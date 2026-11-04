@@ -48,7 +48,9 @@ pub use kitty::{
 };
 pub use parser::{Terminal, VtParser};
 pub use pty::Pty;
-pub use render::{ColorScheme, HoveredHyperlinkSpan, RenderOptions, Renderer};
+pub use render::{
+    ColorScheme, HoveredHyperlinkSpan, RenderBatch, RenderOptions, RenderPipeline, Renderer,
+};
 pub use session::{SessionOutcome, TerminalSession};
 pub use wayland::{OfferData, WaylandState, WindowState};
 pub use width::{continues_grapheme, grapheme_display_width, wcswidth, wcwidth};
