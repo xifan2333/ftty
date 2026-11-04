@@ -429,8 +429,11 @@ fn surface_enter_forces_redraw_immediately() {
         registry.bind::<wayland_client::protocol::wl_output::WlOutput, _, _>(3, 4, &qh, ());
 
     // Simulate the settled post-frame state: the last frame was presented before the
-    // surface became hidden, so the redraw flag has settled to false.
+    // surface became hidden, so the redraw flag has settled to false and a frame callback
+    // is still in flight (the compositor may have stopped dispatching Done while hidden).
     app.needs_redraw = false;
+    let pending_cb = surface.frame(&qh, ());
+    app.frame_callback = Some(pending_cb);
     conn.flush().expect("flush");
 
     // Unlock: the compositor reports the surface re-entering a visible output.
@@ -443,8 +446,9 @@ fn surface_enter_forces_redraw_immediately() {
         &qh,
     );
 
-    // A full repaint must be scheduled immediately so the frame loop repaints
-    // without waiting for user input.
+    // A full repaint must be scheduled immediately: the stale frame callback is cleared
+    // (so the frame loop is unblocked) and a redraw flag is set, without waiting for input.
+    assert!(app.frame_callback.is_none());
     assert!(app.needs_redraw);
     drop(server);
 }

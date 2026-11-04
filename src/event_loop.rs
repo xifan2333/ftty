@@ -42,7 +42,8 @@ pub struct AppState {
     pub pending_offers: Vec<crate::wayland::OfferData>,
     pub running: bool,
     pub needs_redraw: bool,
-    pub(crate) frame_callback: Option<WlCallback>,
+    #[doc(hidden)]
+    pub frame_callback: Option<WlCallback>,
     #[doc(hidden)]
     pub pending_size: Option<[u32; 2]>,
     /// Set by an `xdg_surface.configure`; the resize is applied once the queue is drained so a
