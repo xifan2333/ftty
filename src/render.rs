@@ -2547,11 +2547,15 @@ pub const DEFAULT_BG: Rgb = Rgb::new(24, 24, 24);
 // Retained capacity cap for the image vertex staging buffer. A single dense placeholder frame can
 // grow the buffer to tens of thousands of floats; without a cap that peak allocation would stay
 // resident forever. Anything above the cap is dropped at the end of the draw instead of recycled.
+pub mod pipeline;
+pub use pipeline::{RenderBatch, RenderPipeline, row_cache_needs_reset};
+
 #[doc(hidden)]
 pub const MAX_RETAINED_IMAGE_VERTEX_FLOATS: usize = 16 * 1024;
 
 /// Owns GL objects together with their EGL context, including on initialization failure.
 pub struct Renderer {
+    pub(crate) pipeline: RenderPipeline,
     pub(crate) gl: glow::Context,
     pub(crate) program: Option<glow::Program>,
     pub(crate) vbo: Option<glow::Buffer>,
@@ -2567,46 +2571,13 @@ pub struct Renderer {
     pub(crate) image_textures: HashMap<u32, (glow::Texture, u32, u32, u64)>,
     /// Scratch vertex staging buffer reused across image draws within a frame.
     pub(crate) image_vertices: Vec<f32>,
-    pub(crate) vertices: Vec<f32>,
-    pub(crate) static_vertices_len: usize,
-    pub(crate) vbo_full_upload: bool,
-    pub(crate) row_bg: Vec<Vec<f32>>,
-    pub(crate) row_fg: Vec<Vec<f32>>,
-    pub(crate) row_valid: Vec<bool>,
-    pub(crate) last_cursor: Option<(usize, usize, usize)>,
-    pub(crate) last_cursor_shape: Option<CursorShape>,
-    pub(crate) last_selection: Option<Selection>,
-    pub(crate) last_viewport_offset: usize,
-    pub(crate) last_hovered_span: Option<HoveredHyperlinkSpan>,
-    pub(crate) last_padding: [u16; 2],
-    pub(crate) last_cols: usize,
-    pub(crate) last_preedit: Option<crate::input::ime::Preedit>,
     pub(crate) egl: EglContext,
-}
-
-#[must_use]
-#[doc(hidden)]
-pub fn row_cache_needs_reset(
-    cached_rows: usize,
-    current_rows: usize,
-    last_cols: usize,
-    current_cols: usize,
-    padding_changed: bool,
-) -> bool {
-    cached_rows != current_rows || last_cols != current_cols || padding_changed
 }
 
 impl Renderer {
     /// Clears cached per-row vertex geometry across all screens and styles.
     pub fn clear_cache(&mut self) {
-        self.row_bg.clear();
-        self.row_fg.clear();
-        self.row_valid.clear();
-        self.last_cols = 0;
-        self.vertices = Vec::new();
-        self.static_vertices_len = 0;
-        self.vbo_full_upload = true;
-        self.last_preedit = None;
+        self.pipeline.clear_cache();
     }
 
     /// Creates a renderer after the first XDG surface configure has been acknowledged.
@@ -2634,6 +2605,7 @@ impl Renderer {
             || exts.contains("GL_ARB_blend_func_extended");
 
         let mut renderer = Self {
+            pipeline: RenderPipeline::new(),
             gl,
             program: None,
             vbo: None,
@@ -2647,21 +2619,7 @@ impl Renderer {
             subpixel_mode: None,
             has_dual_source,
             image_textures: HashMap::new(),
-            vertices: Vec::with_capacity(8192),
             image_vertices: Vec::with_capacity(64),
-            static_vertices_len: 0,
-            vbo_full_upload: true,
-            row_bg: Vec::new(),
-            row_fg: Vec::new(),
-            row_valid: Vec::new(),
-            last_cursor: None,
-            last_cursor_shape: None,
-            last_selection: None,
-            last_viewport_offset: 0,
-            last_hovered_span: None,
-            last_padding: [0, 0],
-            last_cols: 0,
-            last_preedit: None,
             egl,
         };
         // SAFETY: the owned EGL context is current for all initialization calls.
@@ -2742,19 +2700,22 @@ impl Renderer {
     ) -> Result<(), RenderError> {
         let [width, height] = native_size(size)?;
         self.egl.make_current()?;
-        let repacked = prepare_atlas(grid, fonts, atlas, options.preedit);
+        self.sync_image_textures(&mut grid.graphics);
+        let repacked = self
+            .pipeline
+            .prepare_frame(grid, colors, fonts, atlas, size, options)?
+            .atlas_repacked;
         if repacked {
-            self.clear_cache();
             grid.mark_all_dirty();
         }
-        self.build_incremental_vertices(grid, colors, fonts.metrics, fonts, atlas, options);
-        self.sync_image_textures(&mut grid.graphics);
+
+        let clear_color = self.pipeline.clear_color();
 
         // SAFETY: this renderer owns the current context and all referenced GL objects.
         unsafe {
             let gl = &self.gl;
             gl.viewport(0, 0, width, height);
-            let [r, g, b, a] = rgba(colors.background);
+            let [r, g, b, a] = clear_color;
             gl.clear_color(r, g, b, a);
             gl.clear(glow::COLOR_BUFFER_BIT);
         }
@@ -2827,9 +2788,10 @@ impl Renderer {
                 atlas.height as f32,
             );
             // f32 has no padding, and the slice covers exactly the initialized vertex data.
+            let verts = self.pipeline.vertices();
             let bytes = std::slice::from_raw_parts(
-                self.vertices.as_ptr().cast::<u8>(),
-                std::mem::size_of_val(self.vertices.as_slice()),
+                verts.as_ptr().cast::<u8>(),
+                std::mem::size_of_val(verts),
             );
             Self::upload_vbo(gl, self.vbo, &mut self.vbo_capacity, bytes);
             let stride = 8 * std::mem::size_of::<f32>() as i32;
@@ -2837,7 +2799,7 @@ impl Renderer {
                 gl.enable_vertex_attrib_array(index);
                 gl.vertex_attrib_pointer_f32(index, count, glow::FLOAT, false, stride, offset);
             }
-            gl.draw_arrays(glow::TRIANGLES, 0, (self.vertices.len() / 8) as i32);
+            gl.draw_arrays(glow::TRIANGLES, 0, (verts.len() / 8) as i32);
         }
 
         // Pass 3: z >= 0 images (above text)
@@ -2874,139 +2836,6 @@ impl Renderer {
             .egl
             .swap_buffers(self.egl.display, surface)
             .map_err(|e| RenderError::Gl(format!("{e:?}")))
-    }
-
-    pub(crate) fn build_incremental_vertices(
-        &mut self,
-        grid: &Grid,
-        colors: ColorScheme<'_>,
-        metrics: CellMetrics,
-        fonts: &FontManager,
-        atlas: &GlyphAtlas,
-        options: RenderOptions<'_>,
-    ) {
-        let cursor = cursor_cell(grid);
-        let viewport_offset = grid.viewport_offset();
-        let viewport_changed = self.last_viewport_offset != viewport_offset;
-        self.last_viewport_offset = viewport_offset;
-
-        let padding_changed = self.last_padding != options.padding;
-        self.last_padding = options.padding;
-
-        let cursor_shape = Some(grid.cursor.shape);
-        let shape_changed = self.last_cursor_shape != cursor_shape;
-        self.last_cursor_shape = cursor_shape;
-
-        let cursor_changed = self.last_cursor != cursor;
-        let selection_changed = self.last_selection.as_ref() != options.selection;
-        let hover_changed = self.last_hovered_span != options.hovered_span;
-
-        let cols_changed = self.last_cols != grid.cols;
-        let rows = grid.rows.min(MAX_RENDER_CACHE_ROWS);
-        if row_cache_needs_reset(
-            self.row_valid.len(),
-            rows,
-            self.last_cols,
-            grid.cols,
-            padding_changed,
-        ) {
-            self.row_bg = vec![Vec::new(); rows];
-            self.row_fg = vec![Vec::new(); rows];
-            self.row_valid = vec![false; rows];
-            self.static_vertices_len = 0;
-            self.vbo_full_upload = true;
-        }
-        self.last_cols = grid.cols;
-
-        let ctx = RenderContext {
-            grid,
-            colors,
-            metrics,
-            fonts,
-            atlas,
-            options,
-            cursor,
-        };
-
-        let mut any_row_regenerated = false;
-        for r in 0..rows {
-            let line = grid.visible_line(r);
-            let abs_line = grid.scrollback.len() + r - viewport_offset;
-
-            let row_has_cursor = cursor.is_some_and(|(cr, _, _)| cr == r);
-            let row_had_cursor = self.last_cursor.is_some_and(|(cr, _, _)| cr == r);
-            let row_has_sel = options.selection.is_some_and(|s| s.spans_line(abs_line));
-            let row_had_sel = self
-                .last_selection
-                .as_ref()
-                .is_some_and(|s| s.spans_line(abs_line));
-            let row_has_hover = options
-                .hovered_span
-                .is_some_and(|span| span.line == abs_line);
-            let row_had_hover = self
-                .last_hovered_span
-                .is_some_and(|span| span.line == abs_line);
-
-            let cursor_affects_row =
-                grid.cursor.shape == CursorShape::Block && (row_has_cursor || row_had_cursor);
-
-            let needs_regen = !self.row_valid[r]
-                || line.dirty.get()
-                || viewport_changed
-                || shape_changed
-                || cols_changed
-                || (cursor_changed && cursor_affects_row)
-                || (selection_changed && (row_has_sel || row_had_sel))
-                || (hover_changed && (row_has_hover || row_had_hover));
-
-            if needs_regen {
-                build_row_backgrounds(&mut self.row_bg[r], r, &ctx);
-                build_row_foregrounds(&mut self.row_fg[r], r, &ctx);
-                self.row_valid[r] = true;
-                line.dirty.set(false);
-                any_row_regenerated = true;
-            }
-        }
-
-        let preedit_changed = self.last_preedit.as_ref() != options.preedit;
-
-        let overlays_changed = cursor_changed
-            || selection_changed
-            || hover_changed
-            || preedit_changed
-            || viewport_changed
-            || shape_changed
-            || cols_changed
-            || padding_changed;
-
-        if any_row_regenerated || self.static_vertices_len == 0 {
-            let total_floats: usize = self.row_bg[..rows].iter().map(Vec::len).sum::<usize>()
-                + self.row_fg[..rows].iter().map(Vec::len).sum::<usize>()
-                + 192;
-            self.vertices.clear();
-            self.vertices.reserve(total_floats);
-            // 1. All row backgrounds first (prevents lower row background from covering upper row descenders)
-            for r in 0..rows {
-                self.vertices.extend_from_slice(&self.row_bg[r]);
-            }
-            // 2. All row foregrounds (glyphs, underlines, borders)
-            for r in 0..rows {
-                self.vertices.extend_from_slice(&self.row_fg[r]);
-            }
-            self.static_vertices_len = self.vertices.len();
-            // 3. Dynamic overlays (cursor, preedit)
-            build_dynamic_overlays(&mut self.vertices, &ctx);
-            self.vbo_full_upload = true;
-        } else if overlays_changed {
-            self.vertices.truncate(self.static_vertices_len);
-            build_dynamic_overlays(&mut self.vertices, &ctx);
-            self.vbo_full_upload = false;
-        }
-
-        self.last_cursor = cursor;
-        self.last_selection = options.selection.cloned();
-        self.last_hovered_span = options.hovered_span;
-        self.last_preedit = options.preedit.cloned();
     }
 }
 

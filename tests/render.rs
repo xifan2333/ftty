@@ -933,3 +933,148 @@ fn color_emoji_vertices_have_negative_alpha_in_render_pipeline() {
     assert!(gy0 >= 0.0, "emoji must start inside or at top of cell");
     assert!(gy0 < ch, "emoji must start within cell height");
 }
+
+mod render_pipeline_tests {
+    use ftty::color::default_256_palette;
+    use ftty::font::{FontManager, GlyphAtlas};
+    use ftty::grid::Grid;
+    use ftty::input::selection::{Selection, SelectionPoint, SelectionType};
+    use ftty::render::{ColorScheme, DEFAULT_BG, DEFAULT_FG, RenderOptions, RenderPipeline};
+
+    #[test]
+    fn test_render_pipeline_prepare_frame_generates_batch() {
+        let mut pipeline = RenderPipeline::new();
+        let mut grid = Grid::new(80, 24, 100);
+        let fonts = FontManager::load(14.0).expect("system monospace font");
+        let mut atlas = GlyphAtlas::new(16, 16);
+        let palette = default_256_palette();
+        let colors = ColorScheme::new(&palette, DEFAULT_FG, DEFAULT_BG);
+        let options = RenderOptions::default();
+
+        let batch = pipeline
+            .prepare_frame(&mut grid, colors, &fonts, &mut atlas, [800, 600], options)
+            .expect("prepare frame");
+
+        assert_eq!(batch.viewport_size, [800, 600]);
+        assert_eq!(
+            batch.clear_color,
+            [
+                f32::from(DEFAULT_BG.r) / 255.0,
+                f32::from(DEFAULT_BG.g) / 255.0,
+                f32::from(DEFAULT_BG.b) / 255.0,
+                1.0,
+            ]
+        );
+        assert!(batch.vbo_full_upload);
+        assert!(batch.quad_count > 0);
+        assert!(batch.static_vertices_len > 0);
+    }
+
+    #[test]
+    fn test_render_pipeline_incremental_dirty_row_caching() {
+        let mut pipeline = RenderPipeline::new();
+        let mut grid = Grid::new(80, 24, 100);
+        let fonts = FontManager::load(14.0).expect("system monospace font");
+        let mut atlas = GlyphAtlas::new(16, 16);
+        let palette = default_256_palette();
+        let colors = ColorScheme::new(&palette, DEFAULT_FG, DEFAULT_BG);
+        let options = RenderOptions::default();
+
+        // Frame 1: initial generation
+        let batch1 = pipeline
+            .prepare_frame(&mut grid, colors, &fonts, &mut atlas, [800, 600], options)
+            .expect("frame 1")
+            .clone();
+        assert!(batch1.vbo_full_upload);
+
+        // Frame 2 without changes: static vertices stay identical
+        let batch2 = pipeline
+            .prepare_frame(&mut grid, colors, &fonts, &mut atlas, [800, 600], options)
+            .expect("frame 2")
+            .clone();
+        assert_eq!(batch2.static_vertices_len, batch1.static_vertices_len);
+        assert_eq!(batch2.quad_count, batch1.quad_count);
+
+        // Frame 3 with modified row: write char on row 1
+        grid.lines[1].cells[0].c = 'Z';
+        grid.lines[1].dirty.set(true);
+
+        let batch3 = pipeline
+            .prepare_frame(&mut grid, colors, &fonts, &mut atlas, [800, 600], options)
+            .expect("frame 3")
+            .clone();
+        assert!(batch3.quad_count >= batch1.quad_count);
+    }
+
+    #[test]
+    fn test_render_pipeline_selection_overlay_batch() {
+        let mut pipeline = RenderPipeline::new();
+        let mut grid = Grid::new(80, 24, 100);
+        let fonts = FontManager::load(14.0).expect("system monospace font");
+        let mut atlas = GlyphAtlas::new(16, 16);
+        let palette = default_256_palette();
+        let colors = ColorScheme::new(&palette, DEFAULT_FG, DEFAULT_BG);
+
+        // Frame without selection
+        let batch_no_sel = pipeline
+            .prepare_frame(
+                &mut grid,
+                colors,
+                &fonts,
+                &mut atlas,
+                [800, 600],
+                RenderOptions::default(),
+            )
+            .expect("no sel")
+            .clone();
+
+        // Frame with active selection spanning lines 0..=2
+        let sel = Selection::new(
+            SelectionPoint::new(0, 0),
+            SelectionPoint::new(2, 40),
+            SelectionType::Simple,
+        );
+        let options_with_sel = RenderOptions::new([0, 0], None, Some(&sel));
+
+        let batch_sel = pipeline
+            .prepare_frame(
+                &mut grid,
+                colors,
+                &fonts,
+                &mut atlas,
+                [800, 600],
+                options_with_sel,
+            )
+            .expect("with sel")
+            .clone();
+
+        assert!(
+            batch_sel.quad_count > batch_no_sel.quad_count,
+            "selection quads must be added to batch"
+        );
+    }
+
+    #[test]
+    fn test_render_pipeline_clear_cache() {
+        let mut pipeline = RenderPipeline::new();
+        let mut grid = Grid::new(80, 24, 100);
+        let fonts = FontManager::load(14.0).expect("system monospace font");
+        let mut atlas = GlyphAtlas::new(16, 16);
+        let palette = default_256_palette();
+        let colors = ColorScheme::new(&palette, DEFAULT_FG, DEFAULT_BG);
+
+        let _ = pipeline.prepare_frame(
+            &mut grid,
+            colors,
+            &fonts,
+            &mut atlas,
+            [800, 600],
+            RenderOptions::default(),
+        );
+        assert!(pipeline.static_vertices_len() > 0);
+
+        pipeline.clear_cache();
+        assert_eq!(pipeline.static_vertices_len(), 0);
+        assert!(pipeline.vbo_full_upload());
+    }
+}
