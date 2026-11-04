@@ -9,4 +9,4 @@ We extract all Box Drawing, Block Elements, and segmented arc calculations into 
 ## Consequences
 - `src/render.rs` immediately sheds 1070+ lines of non-GL code, refocusing on GPU state management and frame rendering.
 - Procedural glyph math and line joint continuity tests reside directly within `procedural.rs` under test-locality principles.
-- Future procedural glyph extensions (e.g. Braille patterns, Powerline glyphs) can be developed in isolation without recompiling or modifying the main rendering engine.
+- Future procedural glyph extensions (e.g. Braille patterns, Powerline glyphs) can be developed in isolation without modifying the main GPU rendering engine.
