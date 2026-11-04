@@ -399,3 +399,56 @@ fn test_find_url_hidden_and_wide_char() {
     }
     assert_eq!(find_url_in_grid(&grid_hidden, 0, 0, 2), None);
 }
+
+#[test]
+fn surface_enter_forces_redraw_immediately() {
+    let (client, server) = UnixStream::pair().expect("socketpair");
+    let conn = Connection::from_socket(client).expect("conn");
+    let queue = conn.new_event_queue::<AppState>();
+    let qh = queue.handle();
+    let registry = conn.display().get_registry(&qh, ());
+
+    let term = Terminal::new(80, 24, 100);
+    let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
+    let mut app = AppState::new(TerminalSession::new(term, pty)).expect("app");
+
+    let comp =
+        registry.bind::<wayland_client::protocol::wl_compositor::WlCompositor, _, _>(1, 4, &qh, ());
+    app.wayland.compositor = Some(comp);
+    let xdg = registry.bind::<wayland_protocols::xdg::shell::client::xdg_wm_base::XdgWmBase, _, _>(
+        2,
+        1,
+        &qh,
+        (),
+    );
+    app.wayland.xdg_wm_base = Some(xdg);
+    app.wayland.init_window(&qh);
+
+    let surface = app.wayland.surface.clone().expect("wl_surface bound");
+    let output =
+        registry.bind::<wayland_client::protocol::wl_output::WlOutput, _, _>(3, 4, &qh, ());
+
+    // Simulate the settled post-frame state: the last frame was presented before the
+    // surface became hidden, so the redraw flag has settled to false and a frame callback
+    // is still in flight (the compositor may have stopped dispatching Done while hidden).
+    app.needs_redraw = false;
+    let pending_cb = surface.frame(&qh, ());
+    app.frame_callback = Some(pending_cb);
+    conn.flush().expect("flush");
+
+    // Unlock: the compositor reports the surface re-entering a visible output.
+    <AppState as wayland_client::Dispatch<wayland_client::protocol::wl_surface::WlSurface, ()>>::event(
+        &mut app,
+        &surface,
+        wayland_client::protocol::wl_surface::Event::Enter { output },
+        &(),
+        &conn,
+        &qh,
+    );
+
+    // A full repaint must be scheduled immediately: the stale frame callback is cleared
+    // (so the frame loop is unblocked) and a redraw flag is set, without waiting for input.
+    assert!(app.frame_callback.is_none());
+    assert!(app.needs_redraw);
+    drop(server);
+}

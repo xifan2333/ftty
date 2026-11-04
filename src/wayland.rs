@@ -19,7 +19,7 @@ use wayland_client::protocol::{
     wl_pointer::{self, Axis, ButtonState, WlPointer},
     wl_registry::{self, WlRegistry},
     wl_seat::{self, Capability, WlSeat},
-    wl_surface::WlSurface,
+    wl_surface::{self, WlSurface},
 };
 use wayland_client::{Connection, Dispatch, QueueHandle, WEnum};
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::{
@@ -454,13 +454,30 @@ impl Dispatch<WlOutput, ()> for AppState {
 
 impl Dispatch<WlSurface, ()> for AppState {
     fn event(
-        _state: &mut Self,
+        state: &mut Self,
         _proxy: &WlSurface,
-        _event: <WlSurface as wayland_client::Proxy>::Event,
+        event: wl_surface::Event,
         _data: &(),
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
+        match event {
+            // The surface re-entered a visible output (e.g. after screen lock/unlock).
+            // The compositor may have discarded or suspended our previously presented
+            // buffer, and may have stopped issuing frame callbacks while hidden. Clear
+            // the stale frame callback and force a redraw so the frame loop immediately
+            // repaints and re-commits a fresh buffer without waiting for user input.
+            wl_surface::Event::Enter { .. } => {
+                state.frame_callback = None;
+                state.needs_redraw = true;
+            }
+            wl_surface::Event::Leave { .. } => {
+                // Surface left a visible output (e.g. lock screen engaged). Keep the
+                // rendered content intact; the corresponding Enter will trigger a
+                // forced repaint on visibility restoration.
+            }
+            _ => {}
+        }
     }
 }
 
