@@ -14,6 +14,7 @@ pub mod input;
 pub mod kitty;
 pub mod parser;
 pub mod session;
+pub mod theme;
 // Audited FFI boundaries: EGL/OpenGL, POSIX PTY, and GNU allocator tuning.
 #[allow(unsafe_code)]
 pub mod alloc;
@@ -52,5 +53,6 @@ pub use render::{
     ColorScheme, HoveredHyperlinkSpan, RenderBatch, RenderOptions, RenderPipeline, Renderer,
 };
 pub use session::{SessionOutcome, TerminalSession};
+pub use theme::Theme;
 pub use wayland::{OfferData, WaylandState, WindowState};
 pub use width::{continues_grapheme, grapheme_display_width, wcswidth, wcwidth};

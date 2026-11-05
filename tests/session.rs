@@ -69,11 +69,52 @@ fn test_session_title_update_via_osc() {
 #[test]
 fn test_session_palette_update_via_osc() {
     let mut session = create_test_session(80, 24);
+    let before = session.terminal().theme.revision();
 
     // Set palette color 1 to red via OSC 4
     let outcome = session.process_incoming_bytes(b"\x1b]4;1;rgb:ff/00/00\x07", 10.0, 20.0, false);
-    assert!(outcome.palette_changed);
+    assert!(outcome.theme_changed);
     assert!(outcome.needs_redraw);
+    assert_eq!(
+        session.terminal().theme.palette_color(1),
+        Some(ftty::color::Rgb::new(255, 0, 0))
+    );
+    assert!(session.terminal().theme.revision() > before);
+
+    // A second batch with no theme mutation reports no change.
+    let quiet = session.process_incoming_bytes(b"x", 10.0, 20.0, false);
+    assert!(!quiet.theme_changed);
+}
+
+#[test]
+fn test_theme_resets_restore_configured_colors() {
+    let mut session = create_test_session(80, 24);
+    let configured = ftty::color::Rgb::new(0x11, 0x22, 0x33);
+    session
+        .terminal_mut()
+        .theme
+        .apply(ftty::color::default_256_palette(), configured, configured);
+
+    // OSC 10 overrides the foreground; OSC 110 restores the configured value.
+    let _ = session.process_incoming_bytes(b"\x1b]10;rgb:ff/ff/ff\x07", 10.0, 20.0, false);
+    assert_eq!(
+        session.terminal().theme.default_fg(),
+        ftty::color::Rgb::new(255, 255, 255)
+    );
+    let _ = session.process_incoming_bytes(b"\x1b]110\x07", 10.0, 20.0, false);
+    assert_eq!(session.terminal().theme.default_fg(), configured);
+
+    // OSC 4 mutates one entry; OSC 104 with an index restores just that entry.
+    let _ = session.process_incoming_bytes(b"\x1b]4;3;rgb:00/ff/00\x07", 10.0, 20.0, false);
+    assert_ne!(
+        session.terminal().theme.palette_color(3),
+        session.terminal().theme.configured_palette_color(3)
+    );
+    let _ = session.process_incoming_bytes(b"\x1b]104;3\x07", 10.0, 20.0, false);
+    assert_eq!(
+        session.terminal().theme.palette_color(3),
+        session.terminal().theme.configured_palette_color(3)
+    );
 }
 
 #[test]

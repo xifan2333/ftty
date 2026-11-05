@@ -10,7 +10,6 @@ use calloop_wayland_source::WaylandSource;
 use wayland_client::protocol::wl_callback::WlCallback;
 use wayland_client::{Connection, QueueHandle};
 
-use crate::color::Rgb;
 use crate::config::Config;
 use crate::error::{FttyError, WaylandError};
 use crate::font::{CellMetrics, FontManager, GlyphAtlas};
@@ -33,9 +32,6 @@ pub struct AppState {
     pub ime: ImeState,
     pub config: Config,
     pub config_path: Option<PathBuf>,
-    pub palette: [Rgb; 256],
-    pub default_fg: Rgb,
-    pub default_bg: Rgb,
     pub last_serial: u32,
     pub pointer_serial: u32,
     pub clipboard_text: Option<String>,
@@ -136,11 +132,10 @@ impl AppState {
     ) -> Result<Self, FttyError> {
         let atlas = GlyphAtlas::default();
         let initial_font_size = config.font_size();
-        let palette = config.build_palette();
-        let default_fg = config.foreground();
-        let default_bg = config.background();
-        session.terminal.set_default_colors(default_fg, default_bg);
-        session.terminal.set_palette(palette);
+        session
+            .terminal
+            .set_default_colors(config.foreground(), config.background());
+        session.terminal.set_palette(config.build_palette());
         session.terminal.allow_osc52_read = config.allow_osc52_read();
         session.terminal.allow_osc52_write = config.allow_osc52_write();
         session.terminal.grid.cursor.shape = config.cursor_shape();
@@ -189,9 +184,6 @@ impl AppState {
             ime: ImeState::new(),
             config,
             config_path,
-            palette,
-            default_fg,
-            default_bg,
             last_serial: 0,
             pointer_serial: 0,
             clipboard_text: None,
@@ -347,10 +339,7 @@ pub fn run_event_loop_with_connection(
 
                     state.keyboard.kitty_flags = outcome.kitty_keyboard_flags;
 
-                    if outcome.palette_changed {
-                        state.palette = state.session.terminal.palette;
-                        state.default_fg = state.session.terminal.default_fg;
-                        state.default_bg = state.session.terminal.default_bg;
+                    if outcome.theme_changed {
                         if let Some(renderer) = &mut state.renderer {
                             renderer.clear_cache();
                         }
@@ -402,11 +391,7 @@ pub fn run_event_loop_with_connection(
             && app_state.frame_callback.is_none()
             && let Some(renderer) = &mut app_state.renderer
         {
-            let colors = ColorScheme::new(
-                &app_state.palette,
-                app_state.default_fg,
-                app_state.default_bg,
-            );
+            let colors = ColorScheme::from(&app_state.session.terminal.theme);
             let factor = if app_state.wayland.is_fractional_scale_active() {
                 app_state.wayland.scale_factor
             } else {
@@ -708,13 +693,12 @@ impl AppState {
         let padding_changed = self.config.padding_x() != new_config.padding_x()
             || self.config.padding_y() != new_config.padding_y();
 
-        self.palette = new_config.build_palette();
-        self.default_fg = new_config.foreground();
-        self.default_bg = new_config.background();
         self.session
             .terminal
-            .set_default_colors(self.default_fg, self.default_bg);
-        self.session.terminal.set_palette(self.palette);
+            .set_default_colors(new_config.foreground(), new_config.background());
+        self.session
+            .terminal
+            .set_palette(new_config.build_palette());
         self.session.terminal.allow_osc52_read = new_config.allow_osc52_read();
         self.session.terminal.allow_osc52_write = new_config.allow_osc52_write();
         self.session.terminal.grid.cursor.shape = new_config.cursor_shape();
