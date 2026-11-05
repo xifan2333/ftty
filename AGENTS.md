@@ -105,59 +105,60 @@ For each sub-task in the issue checklist (in strict sequential order, maintainin
 
 Once all checklist items are completed, checked off, and pushed:
 
-1. Mark PR ready for review (this activates review bots: Qodo, CodeRabbit, Greptile):
+1. Mark PR ready for review:
    ```bash
    gh pr ready
    ```
 
-### Phase 4: Automated Review Triage & Fix Loop (Post-Ready)
+2. Note which review bots this repository actually has. Verified across PRs #282-#288:
 
-> ⚠️ **CRITICAL MERGE PREVENTION RULE**:
-> `gh pr checks` ONLY reflects GitHub Actions CI and CodeRabbit status. **Qodo DOES NOT create a Check Run — Qodo reports ONLY via PR comments.**
-> A green `gh pr checks` is **NOT** sufficient to merge! You MUST wait for Qodo to complete and verify `Bugs (0)`.
+   | Bot | State on this repo |
+   | --- | --- |
+   | Qodo | **not installed** — zero reviews or comments, ever |
+   | Greptile | **not installed** — zero reviews or comments, ever |
+   | CodeRabbit | intermittent — it reviews some PRs and on others replies "this repository does not receive automatic reviews because it has fewer than 10 stars" and skips |
 
-1. **Watch CI with Native Interval**:
-   - Do NOT use manual `sleep` scripts. Use the native `--watch` flag:
-     ```bash
-     gh pr checks <pr_id> --watch --interval 10
-     ```
-   - Let GitHub Actions CI execute the full 170+ test suite and compilation in the cloud.
+   Do not wait for a bot that has never posted on this repository. Polling for Qodo is waiting for an event that cannot happen.
 
-2. **Poll Review Bot Comments (Single-PR Resolution & Head Match)**:
-   - Fetch the current pull-request HEAD commit SHA:
+### Phase 4: Review Triage
+
+The only reliable gate is GitHub Actions. Handle bot reviews when they exist, and detect their absence instead of waiting it out.
+
+1. **Watch CI natively** — no hand-rolled `sleep` loop:
+   ```bash
+   gh pr checks <pr_id> --watch --interval 10
+   ```
+
+2. **Check whether a bot actually reviewed this PR** rather than assuming one did:
+   ```bash
+   gh pr view <pr_id> --json reviews,comments \
+     --jq '[.reviews[].author.login, .comments[].author.login] | unique | map(select(test("bot|coderabbit|qodo|greptile")))'
+   ```
+   An empty array means no bot engaged. Proceed to Phase 5; do not poll.
+
+3. **If a bot did review**, triage against the current `HEAD_SHA`:
+   - Confirm the review covers the current head, otherwise it is stale:
      ```bash
      HEAD_SHA=$(git rev-parse HEAD)
+     gh pr view <pr_id> --json reviews --jq '.reviews[] | .body' | grep -F "$HEAD_SHA"
      ```
-   - Check Qodo review status and ensure it evaluates the current `HEAD_SHA`:
-     ```bash
-     gh pr view <pr_id> --json comments --jq '.comments[] | select(.author.login=="qodo-code-review") | .body' | grep -F "$HEAD_SHA"
-     ```
-   - If Qodo has not evaluated `HEAD_SHA` yet or shows `Qodo is busy working`: **MERGING IS STRICTLY FORBIDDEN**. Wait and poll again.
-   - Once the review for `HEAD_SHA` is complete, inspect `Bugs (N)`:
-     - If `Bugs > 0`:
-       - Inspect the comment cards in detail (`gh pr view <pr_id> --comments`).
-       - **ALL bugs MUST be resolved within the SAME PR before merging.** Never merge a buggy PR to fix in a subsequent PR.
+   - Fix blocking findings in the same PR, with a regression test. Never merge a known-buggy PR to fix it in a follow-up.
+   - Rebut false positives in a reply on the thread instead of silently ignoring them, so the next reader sees why.
 
-3. **Defensive Fix & Verification**:
-   - Implement targeted fix and add unit regression tests.
-   - Run local fast-gates: `mise run fix && mise run check:changed && cargo test <module>::tests`.
-   - Commit atomic fix:
-     ```bash
-     git commit -m "fix(review): address review feedback (#<issue_id>)"
-     git push origin <branch_name>
-     ```
-   - Loop back to Step 1: watch CI, wait for Qodo re-review, and verify it updates to **`Bugs (0)`** and **`✓ Resolved`**.
+4. **Run local fast gates before every push**:
+   ```bash
+   mise run fix && mise run check:changed
+   ```
 
-### Phase 5: Final Squash-Merge
+### Phase 5: Squash-Merge
 
-**Pre-Merge Hard Checklist** (All 5 conditions MUST be satisfied):
-1. [x] `gh pr checks <pr_id>` is 100% green (`pass`).
-2. [x] Qodo has evaluated the current PR `HEAD_SHA` (`gh pr view <pr_id> --json comments ... | grep "$HEAD_SHA"`).
-3. [x] Qodo status is `Code Review by Qodo` (no `Qodo is busy working`).
-4. [x] Qodo reports **`Bugs (0)`** on the current HEAD commit and all previously flagged items show `[✓ Resolved]`.
-5. [x] CodeRabbit and Greptile have no unresolved blocking feedback.
+**Pre-merge checklist:**
+1. [ ] `gh pr checks <pr_id>` is 100% `pass` (CodeRabbit showing `skipping` is not a failure).
+2. [ ] Every bot review that exists on this PR has its blocking findings fixed, or explicitly rebutted on the thread.
+3. [ ] The branch is pushed and matches local `HEAD`.
 
-Once all 4 conditions are met, perform squash-merge and branch cleanup:
+Then squash-merge and delete the branch:
 ```bash
 gh pr merge <pr_id> --squash --delete-branch
 ```
+
