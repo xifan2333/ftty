@@ -452,3 +452,21 @@ fn surface_enter_forces_redraw_immediately() {
     assert!(app.needs_redraw);
     drop(server);
 }
+
+#[test]
+fn adapter_module_paths_stay_reachable() {
+    use ftty::wayland::clipboard::best_text_mime;
+    use ftty::wayland::seat::{find_url_at_col, find_url_in_grid, x11_button_index};
+    use ftty::wayland::window::WindowState as WindowModuleState;
+
+    // The window adapter must expose the lifecycle enum under its own module path.
+    assert_eq!(WindowModuleState::default(), WindowState::Unmapped);
+    // The clipboard adapter owns MIME negotiation.
+    assert_eq!(
+        best_text_mime(&["text/plain".to_string()]),
+        Some("text/plain")
+    );
+    // The seat shim keeps re-exporting the pointer grid helpers.
+    let helpers = (find_url_at_col, find_url_in_grid, x11_button_index);
+    let _ = helpers;
+}

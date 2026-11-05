@@ -33,7 +33,7 @@ mod ime;
 mod input;
 mod pointer;
 mod registry;
-mod window;
+pub mod window;
 
 // --- Window Lifecycle State Machine ---
 
