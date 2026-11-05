@@ -25,35 +25,15 @@ pub mod render;
 pub mod wayland;
 pub mod width;
 
+// Crate prelude: only names the binary or the test suite reaches for at the root.
+// Everything else is addressed through its module (`grid::Grid`, `error::FttyError`), so
+// each item keeps exactly one path. Adding a name here for convenience gives it a second
+// one; add it where it is defined instead.
 pub use alloc::trim_memory;
-pub use color::{Color, Rgb, default_256_palette};
 pub use config::Config;
-pub use error::{
-    ConfigError, FontError, FttyError, KittyError, PtyError, RenderError, WaylandError,
-};
-pub use event_loop::{AppState, run_event_loop, run_event_loop_with_connection};
-pub use font::{CellMetrics, FontManager, GlyphAtlas};
-pub use grid::{Cell, CellFlags, ClearMode, Cursor, CursorShape, Grid, Row};
-pub use input::ime::{ImeState, Preedit, calculate_cursor_rect};
-pub use input::mouse::{
-    MouseEncoding, MouseModifiers, MouseState, MouseTracking, encode_mouse_event,
-};
-pub use input::selection::{Selection, SelectionPoint, SelectionType, find_word_boundaries};
-pub use input::{
-    KeyAction, KeyboardHandler, PointerContext, PointerController, PointerOutcome, find_url_at_col,
-    find_url_in_grid, parse_key_combo, x11_button_index,
-};
-pub use kitty::model::{
-    DeleteTarget, ImageData, ImagePlacement, KittyAction, KittyCommand, KittyEvent, KittyFormat,
-    KittyMedium,
-};
-pub use kitty::{GraphicContext, GraphicOutcome, GraphicStore, KittyParser, kitty_response};
-pub use parser::{Terminal, VtParser};
+pub use event_loop::{AppState, run_event_loop_with_connection};
+pub use font::FontManager;
+pub use parser::Terminal;
 pub use pty::Pty;
-pub use render::{
-    ColorScheme, HoveredHyperlinkSpan, RenderBatch, RenderOptions, RenderPipeline, Renderer,
-};
-pub use session::{SessionOutcome, TerminalSession};
+pub use session::TerminalSession;
 pub use theme::Theme;
-pub use wayland::{OfferData, WaylandState, WindowState};
-pub use width::{continues_grapheme, grapheme_display_width, wcswidth, wcwidth};
