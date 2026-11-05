@@ -1,6 +1,17 @@
 //! Deep module managing vertex geometry generation, incremental row caching, and atlas preparation.
 
-use super::*;
+use super::MAX_RENDER_CACHE_ROWS;
+use super::colors::{ColorScheme, HoveredHyperlinkSpan, RenderOptions};
+use super::egl::native_size;
+use super::text::{
+    RenderContext, build_dynamic_overlays, build_row_backgrounds, build_row_foregrounds,
+    cursor_cell, prepare_atlas, rgba,
+};
+use crate::error::RenderError;
+use crate::font::{CellMetrics, FontManager, GlyphAtlas};
+use crate::grid::{CursorShape, Grid};
+use crate::input::ime::Preedit;
+use crate::input::selection::Selection;
 
 /// Returns `true` if the incremental row cache should be invalidated and reallocated.
 #[must_use]

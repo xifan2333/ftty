@@ -1,0 +1,488 @@
+//! Kitty graphics texture ownership, image vertex staging, and placement compositing.
+
+use std::collections::HashMap;
+
+use glow::HasContext;
+
+use crate::color::Color;
+use crate::font::CellMetrics;
+use crate::grid::Grid;
+
+use super::colors::RenderOptions;
+use super::text::push_quad;
+use super::{MAX_RETAINED_IMAGE_VERTEX_FLOATS, Renderer};
+use crate::width::KITTY_PLACEHOLDER;
+
+// --- Image ---
+
+#[must_use]
+pub fn placeholder_image_id(color: Color) -> u32 {
+    match color {
+        Color::Rgb(r, g, b) => ((r as u32) << 16) | ((g as u32) << 8) | (b as u32),
+        Color::Indexed(idx) => idx as u32,
+        _ => 0,
+    }
+}
+
+/// Resolves each 24-bit placeholder id to a full texture id.
+///
+/// An id that already equals its own low 24 bits takes precedence over any aliasing id that
+/// only shares the same low 24 bits, matching the Kitty unicode-placeholder lookup rules.
+#[must_use]
+#[doc(hidden)]
+pub fn build_low24_index(texture_ids: impl Iterator<Item = u32>) -> HashMap<u32, u32> {
+    let mut index: HashMap<u32, u32> = HashMap::new();
+    for texture_id in texture_ids {
+        let low24 = texture_id & 0x00FF_FFFF;
+        if texture_id == low24 {
+            // An exact id always takes precedence over a 24-bit alias.
+            index.insert(low24, texture_id);
+        } else {
+            index.entry(low24).or_insert(texture_id);
+        }
+    }
+    index
+}
+
+/// Returns `buffer` unchanged when its capacity is within the retention cap, otherwise a fresh
+/// small vector so oversized transient allocations are deterministically released.
+#[must_use]
+#[doc(hidden)]
+pub fn bounded_image_vertex_buffer(buffer: Vec<f32>) -> Vec<f32> {
+    if buffer.capacity() <= MAX_RETAINED_IMAGE_VERTEX_FLOATS {
+        buffer
+    } else {
+        Vec::with_capacity(64)
+    }
+}
+
+impl Renderer {
+    /// Returns the image staging buffer to the renderer for reuse, dropping it when its capacity
+    /// exceeds [`MAX_RETAINED_IMAGE_VERTEX_FLOATS`] so oversized transient frames cannot pin memory.
+    fn recycle_image_vertices(&mut self, image_vertices: Vec<f32>) {
+        self.image_vertices = bounded_image_vertex_buffer(image_vertices);
+    }
+
+    pub(crate) fn sync_image_textures(&mut self, graphics: &mut crate::kitty::GraphicStore) {
+        let gl = &self.gl;
+        let mut to_delete = Vec::new();
+        self.image_textures.retain(|id, (tex, _, _, ver)| {
+            if let Some(current_ver) = graphics.image_version(*id) {
+                if *ver == current_ver {
+                    true
+                } else {
+                    to_delete.push(*tex);
+                    false
+                }
+            } else {
+                to_delete.push(*tex);
+                false
+            }
+        });
+
+        // SAFETY: called only by draw with this renderer's EGL context current;
+        // every texture in to_delete was removed from this renderer's texture map.
+        unsafe {
+            for tex in to_delete {
+                gl.delete_texture(tex);
+            }
+        }
+
+        // Upload newly decoded images through GraphicStore's sync seam.
+        graphics.sync_gpu_textures(|id, width, height, ver, rgba| {
+            if self.image_textures.contains_key(&id) {
+                return false;
+            }
+            // SAFETY: draw holds this renderer's current EGL context. New textures
+            // belong to it, and decoded RGBA pixels remain borrowed for the upload.
+            unsafe {
+                if let Ok(tex) = gl.create_texture() {
+                    gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                    gl.tex_parameter_i32(
+                        glow::TEXTURE_2D,
+                        glow::TEXTURE_MIN_FILTER,
+                        glow::LINEAR as i32,
+                    );
+                    gl.tex_parameter_i32(
+                        glow::TEXTURE_2D,
+                        glow::TEXTURE_MAG_FILTER,
+                        glow::LINEAR as i32,
+                    );
+                    gl.tex_parameter_i32(
+                        glow::TEXTURE_2D,
+                        glow::TEXTURE_WRAP_S,
+                        glow::CLAMP_TO_EDGE as i32,
+                    );
+                    gl.tex_parameter_i32(
+                        glow::TEXTURE_2D,
+                        glow::TEXTURE_WRAP_T,
+                        glow::CLAMP_TO_EDGE as i32,
+                    );
+                    gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+                    gl.tex_image_2d(
+                        glow::TEXTURE_2D,
+                        0,
+                        glow::RGBA as i32,
+                        width as i32,
+                        height as i32,
+                        0,
+                        glow::RGBA,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::Slice(Some(rgba)),
+                    );
+                    self.image_textures.insert(id, (tex, width, height, ver));
+                    true
+                } else {
+                    false
+                }
+            }
+        });
+    }
+
+    pub(crate) fn render_image_placements(
+        &mut self,
+        grid: &Grid,
+        z_negative: bool,
+        metrics: CellMetrics,
+        options: RenderOptions<'_>,
+    ) {
+        let cw = metrics.cell_width as f32;
+        let ch = metrics.cell_height as f32;
+        let pad_x = f32::from(options.padding[0]);
+        let pad_y = f32::from(options.padding[1]);
+        let h = grid.scrollback.len();
+        let viewport_start = h.saturating_sub(grid.viewport_offset);
+        let viewport_end = viewport_start + grid.rows;
+
+        for placement in grid.graphics.placements() {
+            let is_match = if z_negative {
+                placement.z_index < 0
+            } else {
+                placement.z_index >= 0
+            };
+            if !is_match {
+                continue;
+            }
+
+            let end_line = placement.line + placement.rows;
+            if end_line <= viewport_start || placement.line >= viewport_end {
+                continue;
+            }
+
+            let Some(&(tex, img_w, img_h, _)) = self.image_textures.get(&placement.image_id) else {
+                continue;
+            };
+
+            let screen_row_f = placement.line as f32 - viewport_start as f32;
+
+            // Pixel-based clipping: compute the placement's destination rectangle on screen.
+            let orig_x0 = pad_x + placement.col as f32 * cw + placement.offset_x as f32;
+            let orig_y0 = pad_y + screen_row_f * ch + placement.offset_y as f32;
+            let orig_w = (placement.cols as f32 * cw).max(1.0);
+            let orig_h = (placement.rows as f32 * ch).max(1.0);
+            let orig_x1 = orig_x0 + orig_w;
+            let orig_y1 = orig_y0 + orig_h;
+
+            // Determine vertical clipping range:
+            // When at the bottom of scrollback (live screen), clip against active scroll margins (DECSTBM)
+            // so images never overflow into fixed status footers. When viewing historical scrollback,
+            // clip against the visible viewport.
+            let (clip_min_y, clip_max_y) = if grid.viewport_offset == 0
+                && (grid.scroll_region_top > 0
+                    || grid.scroll_region_bottom < grid.rows.saturating_sub(1))
+            {
+                (
+                    pad_y + grid.scroll_region_top as f32 * ch,
+                    pad_y + (grid.scroll_region_bottom + 1) as f32 * ch,
+                )
+            } else {
+                (pad_y, pad_y + grid.rows as f32 * ch)
+            };
+            let clip_min_x = pad_x;
+            let clip_max_x = pad_x + grid.cols as f32 * cw;
+
+            // Intersect destination rectangle with clipping bounds
+            let x0 = orig_x0.clamp(clip_min_x, clip_max_x);
+            let x1 = orig_x1.clamp(clip_min_x, clip_max_x);
+            let y0 = orig_y0.clamp(clip_min_y, clip_max_y);
+            let y1 = orig_y1.clamp(clip_min_y, clip_max_y);
+
+            if x1 <= x0 || y1 <= y0 {
+                continue;
+            }
+
+            let sx0 = placement.src_x as f32;
+            let sy0 = placement.src_y as f32;
+            let full_src_w = placement
+                .src_w
+                .map_or(img_w as f32 - sx0, |w| (w as f32).min(img_w as f32 - sx0));
+            let full_src_h = placement
+                .src_h
+                .map_or(img_h as f32 - sy0, |h| (h as f32).min(img_h as f32 - sy0));
+
+            // Derive UV crop coordinates precisely from the clipped pixel fractions
+            let left_ratio = (x0 - orig_x0) / orig_w;
+            let right_ratio = (x1 - orig_x0) / orig_w;
+            let top_ratio = (y0 - orig_y0) / orig_h;
+            let bottom_ratio = (y1 - orig_y0) / orig_h;
+
+            let crop_sx0 = sx0 + full_src_w * left_ratio;
+            let crop_sx1 = sx0 + full_src_w * right_ratio;
+            let crop_sy0 = sy0 + full_src_h * top_ratio;
+            let crop_sy1 = sy0 + full_src_h * bottom_ratio;
+
+            self.render_single_cropped_image(
+                tex,
+                img_w as f32,
+                img_h as f32,
+                [x0, y0, x1, y1],
+                [[crop_sx0, crop_sy0], [crop_sx1, crop_sy1]],
+            );
+        }
+    }
+
+    pub(crate) fn render_single_cropped_image(
+        &mut self,
+        tex: glow::Texture,
+        img_w: f32,
+        img_h: f32,
+        [x0, y0, x1, y1]: [f32; 4],
+        src_coords: [[f32; 2]; 2],
+    ) {
+        let mut img_vertices = std::mem::take(&mut self.image_vertices);
+        img_vertices.clear();
+        push_quad(
+            &mut img_vertices,
+            [x0, y0, x1, y1],
+            src_coords,
+            [1.0, 1.0, 1.0, 1.0],
+        );
+        self.render_image_quads(tex, img_w, img_h, &img_vertices);
+        self.recycle_image_vertices(img_vertices);
+    }
+
+    pub(crate) fn render_single_image(
+        &mut self,
+        tex: glow::Texture,
+        img_w: f32,
+        img_h: f32,
+        [x0, y0, x1, y1]: [f32; 4],
+    ) {
+        // Move the shared staging buffer out so it can be borrowed while `self` is mutated,
+        // then hand it back to retain its capacity for the next image.
+        let mut img_vertices = std::mem::take(&mut self.image_vertices);
+        img_vertices.clear();
+        push_quad(
+            &mut img_vertices,
+            [x0, y0, x1, y1],
+            [[0.0, 0.0], [img_w, img_h]],
+            [1.0, 1.0, 1.0, 1.0],
+        );
+        self.render_image_quads(tex, img_w, img_h, &img_vertices);
+        self.recycle_image_vertices(img_vertices);
+    }
+
+    pub(crate) fn render_image_quads(
+        &mut self,
+        tex: glow::Texture,
+        img_w: f32,
+        img_h: f32,
+        vertices: &[f32],
+    ) {
+        let gl = &self.gl;
+        // SAFETY: draw holds this renderer's current EGL context; tex and the VBO
+        // belong to it. vertices contains initialized f32 values with no padding,
+        // and remains live throughout the byte upload.
+        unsafe {
+            gl.use_program(self.program);
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            gl.uniform_1_i32(self.image_mode.as_ref(), 1);
+            gl.uniform_1_i32(self.subpixel_mode.as_ref(), 0);
+            gl.uniform_2_f32(self.atlas_size.as_ref(), img_w, img_h);
+
+            let bytes = std::slice::from_raw_parts(
+                vertices.as_ptr().cast::<u8>(),
+                std::mem::size_of_val(vertices),
+            );
+            crate::render::Renderer::upload_vbo(
+                gl,
+                self.image_vbo,
+                &mut self.image_vbo_capacity,
+                bytes,
+            );
+
+            let stride = 8 * std::mem::size_of::<f32>() as i32;
+            for (index, count, offset) in [(0, 2, 0), (1, 2, 8), (2, 4, 16)] {
+                gl.enable_vertex_attrib_array(index);
+                gl.vertex_attrib_pointer_f32(index, count, glow::FLOAT, false, stride, offset);
+            }
+            gl.draw_arrays(glow::TRIANGLES, 0, (vertices.len() / 8) as i32);
+        }
+    }
+
+    pub(crate) fn render_unicode_placeholders(
+        &mut self,
+        grid: &Grid,
+        metrics: CellMetrics,
+        options: RenderOptions<'_>,
+    ) {
+        if self.image_textures.is_empty() {
+            return;
+        }
+
+        let cw = metrics.cell_width as f32;
+        let ch = metrics.cell_height as f32;
+        let pad_x = f32::from(options.padding[0]);
+        let pad_y = f32::from(options.padding[1]);
+
+        struct RectBox {
+            id: u32,
+            col_start: usize,
+            col_end: usize,
+            row_start: usize,
+            row_end: usize,
+        }
+
+        let mut completed_boxes: Vec<RectBox> = Vec::new();
+        let mut active_boxes: Vec<RectBox> = Vec::new();
+
+        // Built lazily on the first placeholder-bearing row so placement-only frames pay nothing.
+        // Once built it maps each 24-bit placeholder id to its full texture id in O(1) per cell.
+        let mut low24_index: Option<HashMap<u32, u32>> = None;
+
+        for row in 0..grid.rows {
+            let line = grid.visible_line(row);
+            let mut row_segments: Vec<(u32, usize, usize)> = Vec::new();
+
+            if line.placeholders.is_some() {
+                let low24_index = low24_index
+                    .get_or_insert_with(|| build_low24_index(self.image_textures.keys().copied()));
+                let mut current_run: Option<(u32, usize, usize)> = None;
+
+                for (col, cell) in line.cells.iter().enumerate() {
+                    if cell.c == KITTY_PLACEHOLDER {
+                        let id_low24 = placeholder_image_id(cell.fg) & 0x00FF_FFFF;
+                        if id_low24 != 0 {
+                            let real_id = low24_index.get(&id_low24).copied();
+
+                            if let Some(matched_id) = real_id {
+                                match current_run {
+                                    Some((cur_id, start, end))
+                                        if cur_id == matched_id && end + 1 == col =>
+                                    {
+                                        current_run = Some((cur_id, start, col));
+                                    }
+                                    Some(prev) => {
+                                        row_segments.push(prev);
+                                        current_run = Some((matched_id, col, col));
+                                    }
+                                    None => {
+                                        current_run = Some((matched_id, col, col));
+                                    }
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                    if let Some(prev) = current_run.take() {
+                        row_segments.push(prev);
+                    }
+                }
+                if let Some(prev) = current_run {
+                    row_segments.push(prev);
+                }
+            }
+
+            // Merge matching row segments with active boxes from the previous row
+            let mut next_active: Vec<RectBox> = Vec::new();
+            for (id, col_start, col_end) in row_segments {
+                if let Some(pos) = active_boxes.iter().position(|b| {
+                    b.id == id
+                        && b.col_start == col_start
+                        && b.col_end == col_end
+                        && b.row_end + 1 == row
+                }) {
+                    let mut b = active_boxes.swap_remove(pos);
+                    b.row_end = row;
+                    next_active.push(b);
+                } else {
+                    next_active.push(RectBox {
+                        id,
+                        col_start,
+                        col_end,
+                        row_start: row,
+                        row_end: row,
+                    });
+                }
+            }
+            completed_boxes.append(&mut active_boxes);
+            active_boxes = next_active;
+        }
+        completed_boxes.extend(active_boxes);
+
+        for b in completed_boxes {
+            let Some(&(tex, img_w, img_h, _)) = self.image_textures.get(&b.id) else {
+                continue;
+            };
+
+            let box_w = b.col_end - b.col_start + 1;
+            let box_h = b.row_end - b.row_start + 1;
+            let (virt_cols, virt_rows) = grid
+                .graphics
+                .virtual_placements()
+                .get(&b.id)
+                .copied()
+                .unwrap_or((box_w, box_h));
+
+            if virt_cols == box_w && virt_rows == box_h {
+                let x0 = pad_x + b.col_start as f32 * cw;
+                let y0 = pad_y + b.row_start as f32 * ch;
+                let x1 = pad_x + (b.col_end + 1) as f32 * cw;
+                let y1 = pad_y + (b.row_end + 1) as f32 * ch;
+
+                self.render_single_image(tex, img_w as f32, img_h as f32, [x0, y0, x1, y1]);
+            } else {
+                let total_c = virt_cols.max(1) as f32;
+                let total_r = virt_rows.max(1) as f32;
+                let mut img_vertices = std::mem::take(&mut self.image_vertices);
+                img_vertices.clear();
+
+                for row in b.row_start..=b.row_end {
+                    let line = grid.visible_line(row);
+                    for col in b.col_start..=b.col_end {
+                        let (img_row, img_col) = if let Some(coords) = &line.placeholders
+                            && let Some(&(ir, ic, _)) = coords.get(&col)
+                        {
+                            (ir as usize, ic as usize)
+                        } else {
+                            (row - b.row_start, col - b.col_start)
+                        };
+
+                        let x0 = pad_x + col as f32 * cw;
+                        let y0 = pad_y + row as f32 * ch;
+                        let x1 = x0 + cw;
+                        let y1 = y0 + ch;
+
+                        let u0 = (img_col as f32 / total_c) * img_w as f32;
+                        let u1 = ((img_col + 1) as f32 / total_c) * img_w as f32;
+                        let v0 = (img_row as f32 / total_r) * img_h as f32;
+                        let v1 = ((img_row + 1) as f32 / total_r) * img_h as f32;
+
+                        push_quad(
+                            &mut img_vertices,
+                            [x0, y0, x1, y1],
+                            [[u0, v0], [u1, v1]],
+                            [1.0, 1.0, 1.0, 1.0],
+                        );
+                    }
+                }
+
+                if !img_vertices.is_empty() {
+                    self.render_image_quads(tex, img_w as f32, img_h as f32, &img_vertices);
+                }
+                self.recycle_image_vertices(img_vertices);
+            }
+        }
+    }
+}
