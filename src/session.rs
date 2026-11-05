@@ -86,8 +86,8 @@ pub struct SessionOutcome {
     pub title_update: Option<String>,
     /// Clipboard update requested via OSC 52: `Some(Some(text))` for set, `Some(None)` for clear.
     pub clipboard_update: Option<Option<String>>,
-    /// Whether the terminal color palette or default colors were modified.
-    pub palette_changed: bool,
+    /// Whether the thread palette or default colors changed since the last report.
+    pub theme_changed: bool,
     /// Updated Kitty keyboard protocol flags (for keyboard input translation).
     pub kitty_keyboard_flags: u8,
     /// Whether the session process has terminated (EOF on PTY read).
@@ -102,6 +102,7 @@ pub struct TerminalSession {
     kitty_parser: KittyParser,
     sync_output_start: Option<Instant>,
     last_sync_gen: u64,
+    last_theme_revision: u64,
 }
 
 impl TerminalSession {
@@ -115,6 +116,7 @@ impl TerminalSession {
             kitty_parser: KittyParser::new(),
             sync_output_start: None,
             last_sync_gen: 0,
+            last_theme_revision: 0,
         }
     }
 
@@ -353,8 +355,8 @@ impl TerminalSession {
                     if let Some(clip) = step_outcome.clipboard_update {
                         aggregated.clipboard_update = Some(clip);
                     }
-                    if step_outcome.palette_changed {
-                        aggregated.palette_changed = true;
+                    if step_outcome.theme_changed {
+                        aggregated.theme_changed = true;
                     }
                     aggregated.kitty_keyboard_flags = step_outcome.kitty_keyboard_flags;
 
@@ -402,9 +404,10 @@ impl TerminalSession {
             outcome.clipboard_update = Some(pending);
         }
 
-        if self.terminal.palette_dirty {
-            self.terminal.palette_dirty = false;
-            outcome.palette_changed = true;
+        let theme_revision = self.terminal.theme.revision();
+        if theme_revision != self.last_theme_revision {
+            self.last_theme_revision = theme_revision;
+            outcome.theme_changed = true;
             outcome.needs_redraw = true;
         }
 

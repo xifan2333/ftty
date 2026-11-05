@@ -112,8 +112,11 @@ fn test_app_state_reload_config() {
     let mut app =
         AppState::with_config(session, Some(config_path.clone())).expect("AppState with_config");
 
-    assert_eq!(app.default_bg, Rgb::new(0, 0, 0));
-    assert_eq!(app.default_fg, Rgb::new(255, 255, 255));
+    assert_eq!(app.session.terminal.theme.default_bg(), Rgb::new(0, 0, 0));
+    assert_eq!(
+        app.session.terminal.theme.default_fg(),
+        Rgb::new(255, 255, 255)
+    );
     assert_eq!(app.session.terminal.grid.cursor.shape, CursorShape::Block);
 
     // Update config file with new colors, cursor, and padding
@@ -136,8 +139,11 @@ fn test_app_state_reload_config() {
     app.needs_redraw = false;
     app.reload_config();
 
-    assert_eq!(app.default_bg, Rgb::new(18, 52, 86));
-    assert_eq!(app.default_fg, Rgb::new(255, 0, 0));
+    assert_eq!(
+        app.session.terminal.theme.default_bg(),
+        Rgb::new(18, 52, 86)
+    );
+    assert_eq!(app.session.terminal.theme.default_fg(), Rgb::new(255, 0, 0));
     assert_eq!(
         app.session.terminal.grid.cursor.shape,
         CursorShape::Underline
@@ -268,8 +274,11 @@ fn test_failed_reload_preserves_state() {
     // Ensure state was NOT partially committed (scrollback must not be truncated!)
     assert_eq!(app.session.terminal.grid.scrollback.len(), 10);
     assert_eq!(app.session.terminal.grid.max_scrollback, 100);
-    assert_eq!(app.default_bg, Rgb::new(0, 0, 0));
-    assert_eq!(app.default_fg, Rgb::new(255, 255, 255));
+    assert_eq!(app.session.terminal.theme.default_bg(), Rgb::new(0, 0, 0));
+    assert_eq!(
+        app.session.terminal.theme.default_fg(),
+        Rgb::new(255, 255, 255)
+    );
     assert_eq!(app.session.terminal.grid.cursor.shape, CursorShape::Block);
     assert_eq!(app.font_mgr.font_size(), 14.0);
     assert!(!app.needs_redraw);

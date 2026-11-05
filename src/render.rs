@@ -1435,6 +1435,12 @@ impl<'a> ColorScheme<'a> {
     }
 }
 
+impl<'a> From<&'a crate::theme::Theme> for ColorScheme<'a> {
+    fn from(theme: &'a crate::theme::Theme) -> Self {
+        Self::new(theme.palette(), theme.default_fg(), theme.default_bg())
+    }
+}
+
 /// Represents the contiguous grid span of a hovered hyperlink.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct HoveredHyperlinkSpan {

@@ -44,6 +44,10 @@ _Avoid_: SessionManager, TermSession, PtyBridge
 The composite set of platform notifications produced by evaluating terminal PTY input and escape sequences.
 _Avoid_: TerminalEvent, SessionUpdate, ProcessResult
 
+**Theme**:
+The single owner of the active palette, default colors, and the configured snapshot that reset sequences restore.
+_Avoid_: Palette, ColorScheme, ColorConfig
+
 **PastePayload**:
 Clipboard text encoded for the PTY, wrapped in bracketed-paste markers when DEC mode 2004 is active.
 _Avoid_: ClipboardBuffer, PasteText, InputBlob

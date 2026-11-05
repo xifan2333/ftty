@@ -1,0 +1,95 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use ftty::Theme;
+use ftty::color::{Rgb, default_256_palette};
+
+const FG: Rgb = Rgb::new(0x20, 0x21, 0x22);
+const BG: Rgb = Rgb::new(0x10, 0x11, 0x12);
+
+fn theme() -> Theme {
+    Theme::new(default_256_palette(), FG, BG)
+}
+
+#[test]
+fn test_theme_starts_at_configured_colors() {
+    let theme = theme();
+    assert_eq!(theme.default_fg(), FG);
+    assert_eq!(theme.default_bg(), BG);
+    assert_eq!(theme.configured_default_fg(), FG);
+    assert_eq!(theme.configured_default_bg(), BG);
+    assert_eq!(theme.palette_color(1), Some(default_256_palette()[1]));
+    assert_eq!(theme.revision(), 0);
+}
+
+#[test]
+fn test_theme_mutations_bump_revision() {
+    let mut theme = theme();
+
+    theme.set_default_fg(Rgb::new(1, 2, 3));
+    assert_eq!(theme.revision(), 1);
+    assert_eq!(theme.default_fg(), Rgb::new(1, 2, 3));
+
+    theme.set_default_bg(Rgb::new(4, 5, 6));
+    assert_eq!(theme.revision(), 2);
+
+    theme.set_indexed(7, Rgb::new(9, 9, 9));
+    assert_eq!(theme.revision(), 3);
+    assert_eq!(theme.palette_color(7), Some(Rgb::new(9, 9, 9)));
+
+    // Out-of-range indices are ignored and must not bump the revision.
+    theme.set_indexed(999, Rgb::new(1, 1, 1));
+    assert_eq!(theme.revision(), 3);
+    assert_eq!(theme.palette_color(999), None);
+}
+
+#[test]
+fn test_theme_resets_restore_configured_snapshot_only() {
+    let mut theme = theme();
+    theme.set_default_fg(Rgb::new(0xff, 0xff, 0xff));
+    theme.set_default_bg(Rgb::new(0, 0, 0));
+    theme.set_indexed(3, Rgb::new(0xaa, 0xbb, 0xcc));
+
+    // Resets restore the configured colors without adopting the overrides.
+    theme.reset_default_fg();
+    theme.reset_default_bg();
+    theme.reset_palette(Some(3));
+    assert_eq!(theme.default_fg(), FG);
+    assert_eq!(theme.default_bg(), BG);
+    assert_eq!(theme.palette_color(3), theme.configured_palette_color(3));
+
+    // A whole-palette reset restores every entry.
+    for idx in 0..256 {
+        theme.set_indexed(idx, Rgb::new(1, 1, 1));
+    }
+    theme.reset_palette(None);
+    assert_eq!(theme.palette(), &default_256_palette());
+}
+
+#[test]
+fn test_theme_apply_replaces_snapshot() {
+    let mut theme = theme();
+    let new_palette = [Rgb::new(0x40, 0x50, 0x60); 256];
+    let new_fg = Rgb::new(0xaa, 0xaa, 0xaa);
+    let new_bg = Rgb::new(0x0a, 0x0b, 0x0c);
+
+    theme.apply(new_palette, new_fg, new_bg);
+
+    assert_eq!(theme.default_fg(), new_fg);
+    assert_eq!(theme.default_bg(), new_bg);
+    assert_eq!(theme.configured_default_fg(), new_fg);
+    assert_eq!(theme.configured_default_bg(), new_bg);
+    assert_eq!(theme.configured_palette_color(0), Some(new_palette[0]));
+
+    // Resets now return to the newly configured theme, not the original one.
+    theme.set_default_fg(Rgb::new(0, 0, 0));
+    theme.reset_default_fg();
+    assert_eq!(theme.default_fg(), new_fg);
+}
+
+#[test]
+fn test_theme_default_matches_terminal_defaults() {
+    let theme = Theme::default();
+    assert_eq!(theme.default_fg(), Rgb::new(220, 220, 220));
+    assert_eq!(theme.default_bg(), Rgb::new(24, 24, 24));
+    assert_eq!(theme.palette(), &default_256_palette());
+}

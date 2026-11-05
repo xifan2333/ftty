@@ -48,13 +48,8 @@ pub struct Terminal {
     pub cell_pixels: [u16; 2],
     /// Text-area size in physical pixels, reported back through `CSI 14 t`.
     pub viewport_pixels: [u16; 2],
-    pub default_fg: Rgb,
-    pub default_bg: Rgb,
-    pub initial_default_fg: Rgb,
-    pub initial_default_bg: Rgb,
-    pub palette: [Rgb; 256],
-    pub initial_palette: [Rgb; 256],
-    pub palette_dirty: bool,
+    /// Palette, default colors, and their configured reset snapshot.
+    pub theme: crate::theme::Theme,
     /// Whether bracketed paste mode (DECSET 2004) is currently enabled.
     pub bracketed_paste: bool,
     /// Whether focus reporting (DECSET 1004) is currently enabled.
@@ -165,13 +160,7 @@ impl Terminal {
             title_dirty: false,
             cell_pixels: [1, 1],
             viewport_pixels: [1, 1],
-            default_fg,
-            default_bg,
-            initial_default_fg: default_fg,
-            initial_default_bg: default_bg,
-            palette,
-            initial_palette: palette,
-            palette_dirty: false,
+            theme: crate::theme::Theme::new(palette, default_fg, default_bg),
             bracketed_paste: false,
             focus_reporting: false,
             synchronized_output: false,
@@ -200,11 +189,8 @@ impl Terminal {
 
     /// Updates the configured default foreground and background colors for OSC queries.
     pub fn set_default_colors(&mut self, fg: Rgb, bg: Rgb) {
-        let old_bg = self.default_bg;
-        self.default_fg = fg;
-        self.default_bg = bg;
-        self.initial_default_fg = fg;
-        self.initial_default_bg = bg;
+        let old_bg = self.theme.default_bg();
+        self.theme.apply(self.theme.palette().to_owned(), fg, bg);
         if self.report_color_scheme
             && Self::is_dark_background(old_bg) != Self::is_dark_background(bg)
         {
@@ -214,16 +200,27 @@ impl Terminal {
 
     /// Sets the base 256-color palette and saves it as initial defaults for OSC 104 reset.
     pub fn set_palette(&mut self, palette: [Rgb; 256]) {
-        self.palette = palette;
-        self.initial_palette = palette;
+        let default_fg = self.theme.default_fg();
+        let default_bg = self.theme.default_bg();
+        self.theme.apply(palette, default_fg, default_bg);
     }
 
     pub(crate) fn update_dynamic_background(&mut self, new_bg: Rgb) {
-        let old_bg = self.default_bg;
-        self.default_bg = new_bg;
-        self.palette_dirty = true;
+        let old_bg = self.theme.default_bg();
+        self.theme.set_default_bg(new_bg);
+        self.report_color_scheme_if_darkness_changed(old_bg);
+    }
+
+    /// Restores the configured default background (OSC 111) and reports a scheme change.
+    pub(crate) fn reset_default_background(&mut self) {
+        let old_bg = self.theme.default_bg();
+        self.theme.reset_default_bg();
+        self.report_color_scheme_if_darkness_changed(old_bg);
+    }
+
+    fn report_color_scheme_if_darkness_changed(&mut self, old_bg: Rgb) {
         if self.report_color_scheme
-            && Self::is_dark_background(old_bg) != Self::is_dark_background(new_bg)
+            && Self::is_dark_background(old_bg) != Self::is_dark_background(self.theme.default_bg())
         {
             self.send_color_scheme_report();
         }
@@ -234,7 +231,7 @@ impl Terminal {
     }
 
     pub(crate) fn send_color_scheme_report(&mut self) {
-        let code = if Self::is_dark_background(self.default_bg) {
+        let code = if Self::is_dark_background(self.theme.default_bg()) {
             1
         } else {
             2
@@ -617,10 +614,9 @@ impl Perform for Terminal {
                 self.hyperlink_order.clear();
                 self.title.clear();
                 self.title_dirty = true;
-                self.default_fg = self.initial_default_fg;
-                self.default_bg = self.initial_default_bg;
-                self.palette = self.initial_palette;
-                self.palette_dirty = true;
+                self.theme.reset_palette(None);
+                self.theme.reset_default_fg();
+                self.theme.reset_default_bg();
                 self.next_hyperlink_id = 1;
                 self.kitty_keyboard_flags = 0;
                 self.kitty_keyboard_stack.clear();
@@ -1065,7 +1061,7 @@ impl Terminal {
         } else if !params.is_empty() {
             if params[0] == b"10" && params.len() >= 2 {
                 if params[1] == b"?" {
-                    let fg = self.default_fg;
+                    let fg = self.theme.default_fg();
                     let resp = format!(
                         "\x1b]10;rgb:{:02x}{:02x}/{:02x}{:02x}/{:02x}{:02x}{RESPONSE_TERMINATOR}",
                         fg.r, fg.r, fg.g, fg.g, fg.b, fg.b
@@ -1074,12 +1070,11 @@ impl Terminal {
                 } else if let Ok(s) = std::str::from_utf8(params[1])
                     && let Some(color) = crate::color::parse_color_spec(s)
                 {
-                    self.default_fg = color;
-                    self.palette_dirty = true;
+                    self.theme.set_default_fg(color);
                 }
             } else if params[0] == b"11" && params.len() >= 2 {
                 if params[1] == b"?" {
-                    let bg = self.default_bg;
+                    let bg = self.theme.default_bg();
                     let resp = format!(
                         "\x1b]11;rgb:{:02x}{:02x}/{:02x}{:02x}/{:02x}{:02x}{RESPONSE_TERMINATOR}",
                         bg.r, bg.r, bg.g, bg.g, bg.b, bg.b
@@ -1091,10 +1086,9 @@ impl Terminal {
                     self.update_dynamic_background(color);
                 }
             } else if params[0] == b"110" {
-                self.default_fg = self.initial_default_fg;
-                self.palette_dirty = true;
+                self.theme.reset_default_fg();
             } else if params[0] == b"111" {
-                self.update_dynamic_background(self.initial_default_bg);
+                self.reset_default_background();
             } else if params[0] == b"4" && params.len() >= 3 {
                 for chunk in params[1..].as_chunks::<2>().0 {
                     if let Ok(idx_str) = std::str::from_utf8(chunk[0])
@@ -1102,7 +1096,7 @@ impl Terminal {
                         && idx < 256
                     {
                         if chunk[1] == b"?" {
-                            let col = self.palette[idx];
+                            let col = self.theme.palette_color(idx).unwrap_or(Rgb::new(0, 0, 0));
                             let resp = format!(
                                 "\x1b]4;{idx};rgb:{:02x}{:02x}/{:02x}{:02x}/{:02x}{:02x}{RESPONSE_TERMINATOR}",
                                 col.r, col.r, col.g, col.g, col.b, col.b
@@ -1111,23 +1105,20 @@ impl Terminal {
                         } else if let Ok(s) = std::str::from_utf8(chunk[1])
                             && let Some(color) = crate::color::parse_color_spec(s)
                         {
-                            self.palette[idx] = color;
-                            self.palette_dirty = true;
+                            self.theme.set_indexed(idx, color);
                         }
                     }
                 }
             } else if params[0] == b"104" {
                 if params.len() == 1 {
-                    self.palette = self.initial_palette;
-                    self.palette_dirty = true;
+                    self.theme.reset_palette(None);
                 } else {
                     for param in &params[1..] {
                         if let Ok(s) = std::str::from_utf8(param)
                             && let Ok(idx) = s.parse::<usize>()
                             && idx < 256
                         {
-                            self.palette[idx] = self.initial_palette[idx];
-                            self.palette_dirty = true;
+                            self.theme.reset_palette(Some(idx));
                         }
                     }
                 }
