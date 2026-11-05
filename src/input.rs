@@ -834,6 +834,47 @@ impl ImeState {
     }
 }
 
+/// Backspace escape emitted when erasing text before the cursor for an IME commit.
+///
+/// DEL (0x7f) matches what the Backspace key sends, which is the byte the kernel's default
+/// `VERASE` expects; BS (0x08) would be kept as an ordinary byte by line-editing programs.
+const IME_ERASE_BEFORE: &[u8] = b"\x7f";
+
+/// Forward-delete escape emitted when erasing text after the cursor for an IME commit.
+const IME_ERASE_AFTER: &[u8] = b"\x1b[3~";
+
+/// Upper bound on characters erased per IME commit, so a hostile `DeleteSurroundingText` length
+/// cannot force a multi-gigabyte allocation.
+pub const MAX_IME_ERASE_CHARS: u32 = 4096;
+
+/// Encodes an IME completion batch as the PTY input a shell expects: one backspace per erased
+/// character before the cursor, one forward delete per erased character after, then the text.
+#[must_use]
+pub fn encode_ime_edits(delete: Option<(u32, u32)>, commit: Option<&str>) -> Vec<u8> {
+    let (before, after) = delete.map_or((0, 0), |(before, after)| {
+        (
+            before.min(MAX_IME_ERASE_CHARS),
+            after.min(MAX_IME_ERASE_CHARS),
+        )
+    });
+    let commit_len = commit.map_or(0, str::len);
+    let mut bytes = Vec::with_capacity(
+        before as usize * IME_ERASE_BEFORE.len()
+            + after as usize * IME_ERASE_AFTER.len()
+            + commit_len,
+    );
+    for _ in 0..before {
+        bytes.extend_from_slice(IME_ERASE_BEFORE);
+    }
+    for _ in 0..after {
+        bytes.extend_from_slice(IME_ERASE_AFTER);
+    }
+    if let Some(text) = commit {
+        bytes.extend_from_slice(text.as_bytes());
+    }
+    bytes
+}
+
 /// Computes the pixel-accurate bounding rectangle of the terminal cursor for IME popup positioning.
 ///
 /// Returns `(x, y, width, height)` in surface-local pixels.
@@ -1337,7 +1378,9 @@ pub use pointer::{
 };
 
 pub mod ime {
-    pub use super::{ImeState, Preedit, calculate_cursor_rect};
+    pub use super::{
+        ImeState, MAX_IME_ERASE_CHARS, Preedit, calculate_cursor_rect, encode_ime_edits,
+    };
 }
 
 pub mod mouse {
