@@ -1,9 +1,12 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use ftty::color::Color;
-use ftty::grid::diacritics::KITTY_PLACEHOLDER;
-use ftty::grid::{Cell, CellFlags, ClearMode, Grid, MAX_ROW_POOL_CAPACITY, Row};
-use ftty::kitty::{ImageData, ImagePlacement};
+use ftty::grid::{
+    Cell, CellFlags, ClearMode, Cursor, CursorShape, Grid, MAX_ROW_POOL_CAPACITY, PlaceholderMap,
+    Row,
+};
+use ftty::kitty::model::{DeleteTarget, ImageData, ImagePlacement};
+use ftty::width::KITTY_PLACEHOLDER;
 
 #[test]
 fn test_grid_initialization() {
@@ -1353,10 +1356,10 @@ fn test_image_bytes_counter_tracks_add_replace_and_remove() {
     grid.graphics.sync_gpu_textures(|id, _, _, _, _| id == 2);
     assert_eq!(grid.total_image_bytes(), size(30, 5) + size(20, 20));
 
-    grid.delete_images(ftty::kitty::DeleteTarget::ByIdAndFree(1));
+    grid.delete_images(DeleteTarget::ByIdAndFree(1));
     assert_eq!(grid.total_image_bytes(), size(20, 20));
 
-    grid.delete_images(ftty::kitty::DeleteTarget::AllAndFree);
+    grid.delete_images(DeleteTarget::AllAndFree);
     assert_eq!(grid.total_image_bytes(), 0);
     assert!(grid.images().is_empty());
 }
@@ -1464,8 +1467,7 @@ fn test_image_accessors_expose_read_only_view_with_consistent_accounting() {
 }
 
 #[test]
-fn test_grid_row_compatibility_submodule() {
-    use ftty::grid::row::{Cell, CellFlags, ClearMode, Cursor, CursorShape, PlaceholderMap, Row};
+fn test_grid_cell_and_row_constructors() {
     let _map: PlaceholderMap = std::collections::HashMap::new();
     let row = Row::new(80);
     assert_eq!(row.cells.len(), 80);

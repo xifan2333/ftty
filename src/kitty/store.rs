@@ -4,12 +4,9 @@ use std::collections::{HashMap, HashSet};
 
 use crate::color::Color;
 use crate::grid::Row;
-use crate::kitty::{
-    DeleteTarget, ImageData, ImagePlacement, KittyAction, KittyEvent, kitty_response_full,
-};
-
-/// Sentinel Unicode character identifying Kitty virtual image placeholders.
-pub const KITTY_PLACEHOLDER: char = '\u{10EEEE}';
+use crate::kitty::model::{DeleteTarget, ImageData, ImagePlacement, KittyAction, KittyEvent};
+use crate::kitty::stream::kitty_response_full;
+use crate::width::KITTY_PLACEHOLDER;
 
 /// Maximum number of active image placements tracked in the grid.
 pub const MAX_PLACEMENTS: usize = 1024;

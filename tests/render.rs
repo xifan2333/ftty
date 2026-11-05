@@ -4,14 +4,14 @@ use ftty::color::{Color, default_256_palette};
 use ftty::font::{FontManager, GlyphAtlas};
 use ftty::grid::{Cell, CellFlags, Grid};
 use ftty::input::ime::Preedit;
+use ftty::render::egl::native_size;
 use ftty::render::shader::FRAGMENT_SHADER;
 use ftty::render::text::{
-    KITTY_PLACEHOLDER, SELECTION_BG, build_dynamic_overlays, build_row_backgrounds,
-    build_row_foregrounds, build_vertices, cell_colors, cursor_cell, prepare_atlas,
+    SELECTION_BG, build_dynamic_overlays, build_row_backgrounds, build_row_foregrounds,
+    build_vertices, cell_colors, cursor_cell, prepare_atlas,
 };
-use ftty::render::{
-    ColorScheme, DEFAULT_BG, DEFAULT_FG, HoveredHyperlinkSpan, RenderOptions, native_size,
-};
+use ftty::render::{ColorScheme, DEFAULT_BG, DEFAULT_FG, HoveredHyperlinkSpan, RenderOptions};
+use ftty::width::KITTY_PLACEHOLDER;
 
 #[test]
 fn test_selection_background_color_constant() {
@@ -837,14 +837,14 @@ fn test_image_vertex_buffer_is_released_when_it_exceeds_retention_cap() {
 }
 
 #[test]
-fn test_render_compatibility_submodules() {
+fn test_render_submodule_exports() {
     use ftty::color::Color;
-    use ftty::render::box_drawing::{
-        Stroke, is_procedural_glyph, render_block_element, render_box_drawing,
-        render_procedural_glyph,
-    };
     use ftty::render::image::{
         bounded_image_vertex_buffer, build_low24_index, placeholder_image_id,
+    };
+    use ftty::render::procedural::{
+        Stroke, is_procedural_glyph, render_block_element, render_box_drawing,
+        render_procedural_glyph,
     };
     use ftty::render::shader::{FRAGMENT_SHADER, VERTEX_SHADER};
 

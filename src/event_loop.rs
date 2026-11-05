@@ -879,9 +879,3 @@ impl AppState {
         self.update_font_size(scaled_size);
     }
 }
-
-pub mod geometry {
-    pub use super::{saturating_u16, terminal_size};
-}
-pub mod actions {}
-pub mod kitty {}

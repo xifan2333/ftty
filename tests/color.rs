@@ -1,7 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use ftty::color::palette::default_256_palette;
-use ftty::color::{Color, Rgb};
+use ftty::color::{Color, Rgb, default_256_palette};
 
 #[test]
 fn test_default_palette_values() {
