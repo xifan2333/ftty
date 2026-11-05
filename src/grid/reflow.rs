@@ -1,7 +1,7 @@
 //! Column reflow and line rewrapping algorithms for terminal width transitions.
 
 use crate::grid::{Cell, CellFlags, Grid, MAX_ROW_POOL_CAPACITY, Row};
-use crate::kitty::ImagePlacement;
+use crate::kitty::model::ImagePlacement;
 
 pub fn shrink_rows(
     lines: &mut Vec<Row>,

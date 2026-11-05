@@ -5,7 +5,7 @@ use ftty::grid::{
     Cell, CellFlags, ClearMode, Cursor, CursorShape, Grid, MAX_ROW_POOL_CAPACITY, PlaceholderMap,
     Row,
 };
-use ftty::kitty::{ImageData, ImagePlacement};
+use ftty::kitty::model::{DeleteTarget, ImageData, ImagePlacement};
 use ftty::width::KITTY_PLACEHOLDER;
 
 #[test]
@@ -1356,10 +1356,10 @@ fn test_image_bytes_counter_tracks_add_replace_and_remove() {
     grid.graphics.sync_gpu_textures(|id, _, _, _, _| id == 2);
     assert_eq!(grid.total_image_bytes(), size(30, 5) + size(20, 20));
 
-    grid.delete_images(ftty::kitty::DeleteTarget::ByIdAndFree(1));
+    grid.delete_images(DeleteTarget::ByIdAndFree(1));
     assert_eq!(grid.total_image_bytes(), size(20, 20));
 
-    grid.delete_images(ftty::kitty::DeleteTarget::AllAndFree);
+    grid.delete_images(DeleteTarget::AllAndFree);
     assert_eq!(grid.total_image_bytes(), 0);
     assert!(grid.images().is_empty());
 }

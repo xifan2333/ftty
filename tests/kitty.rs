@@ -774,8 +774,10 @@ fn test_delete_preserves_image_data_on_lowercase() {
 mod graphic_store_tests {
     use std::collections::HashSet;
 
-    use ftty::kitty::model::{ImageData, ImagePlacement, KittyAction, KittyCommand, KittyEvent};
-    use ftty::kitty::{DeleteTarget, GraphicContext, GraphicStore, MAX_STORED_IMAGE_BYTES};
+    use ftty::kitty::model::{
+        DeleteTarget, ImageData, ImagePlacement, KittyAction, KittyCommand, KittyEvent,
+    };
+    use ftty::kitty::{GraphicContext, GraphicStore, MAX_STORED_IMAGE_BYTES};
 
     #[test]
     fn test_graphic_store_gpu_sync_seam_releases_cpu_buffer() {

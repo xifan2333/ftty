@@ -3,7 +3,7 @@
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use crate::color::Color;
-use crate::kitty::{DeleteTarget, ImageData, ImagePlacement};
+use crate::kitty::model::{DeleteTarget, ImageData, ImagePlacement};
 use crate::width::{
     AMBIGUOUS_NARROW, AMBIGUOUS_WIDE, KITTY_PLACEHOLDER, continues_grapheme,
     grapheme_display_width, wcwidth,
