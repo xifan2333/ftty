@@ -44,6 +44,14 @@ _Avoid_: SessionManager, TermSession, PtyBridge
 The composite set of platform notifications produced by evaluating terminal PTY input and escape sequences.
 _Avoid_: TerminalEvent, SessionUpdate, ProcessResult
 
+**GlyphAtlas**:
+The bounded-growth shelf packing surface that stores rasterized glyph bitmaps for GPU upload.
+_Avoid_: TextureCache, GlyphStore, BitmapPool
+
+**FontCache**:
+The persistent on-disk record of resolved font files and cell metrics, validated by directory fingerprint and per-file mtime.
+_Avoid_: FontIndex, DiskCache, FontRegistry
+
 **Theme**:
 The single owner of the active palette, default colors, and the configured snapshot that reset sequences restore.
 _Avoid_: Palette, ColorScheme, ColorConfig
