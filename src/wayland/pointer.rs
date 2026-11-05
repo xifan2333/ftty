@@ -63,7 +63,7 @@ impl AppState {
         }
         if let Some(url) = outcome.open_url {
             std::thread::spawn(move || {
-                let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+                let _ = std::process::Command::new("xdg-open").arg(&url).status();
             });
         }
         if outcome.paste_primary {
