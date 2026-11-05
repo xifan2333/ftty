@@ -837,7 +837,7 @@ fn test_image_vertex_buffer_is_released_when_it_exceeds_retention_cap() {
 }
 
 #[test]
-fn test_render_compatibility_submodules() {
+fn test_render_submodule_exports() {
     use ftty::color::Color;
     use ftty::render::image::{
         bounded_image_vertex_buffer, build_low24_index, placeholder_image_id,
