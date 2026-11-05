@@ -787,7 +787,3 @@ pub fn default_config_path() -> Option<PathBuf> {
     }
     None
 }
-
-pub mod include {
-    pub use super::{Include, default_config_path, resolve_path};
-}

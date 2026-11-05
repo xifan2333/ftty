@@ -2072,7 +2072,3 @@ pub mod diacritics {
 pub mod row {
     pub use super::{Cell, CellFlags, ClearMode, Cursor, CursorShape, PlaceholderMap, Row};
 }
-
-pub mod resize {
-    pub use super::reflow::*;
-}
