@@ -12,6 +12,9 @@ use std::time::SystemTime;
 use super::{CellMetrics, MAX_FONT_SIZE, MIN_FONT_SIZE};
 
 const CACHE_MAGIC: &[u8; 8] = b"FTTYFONT";
+
+/// Monotonic suffix so concurrent saves never collide on the temporary file name.
+static SAVE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 const CACHE_VERSION: u32 = 7;
 
 /// Maximum number of font family names supported in a single cache entry.
@@ -167,6 +170,12 @@ pub fn try_load_cache(
         return None;
     }
 
+    // Slots are positionally aligned with `families[1..]`; a mismatch means a corrupted or
+    // hand-edited cache and would silently drop or reorder configured fallbacks.
+    if data.fallbacks.len() != families.len().saturating_sub(1) {
+        return None;
+    }
+
     if !data.primary.is_valid() {
         return None;
     }
@@ -228,7 +237,12 @@ pub fn save_cache(
         fallbacks,
     });
 
-    let tmp_path = parent.join(format!("font_cache.bin.tmp.{}", std::process::id()));
+    // Unique per call: two concurrent saves in one process must not share a temp file.
+    let tmp_path = parent.join(format!(
+        "font_cache.bin.tmp.{}.{}",
+        std::process::id(),
+        SAVE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     if std::fs::write(&tmp_path, payload).is_ok() {
         let _ = std::fs::rename(&tmp_path, &cache_path);
     }
@@ -468,6 +482,13 @@ mod tests {
         assert!(deserialize_cache(b"FTTYFONT\x04\x00\x00\x00").is_none()); // Version 4 mismatch
         assert!(deserialize_cache(b"FTTYFONT\x05\x00\x00\x00").is_none()); // Version 5 mismatch
         assert!(deserialize_cache(b"FTTYFONT\x06\x00\x00\x00").is_none()); // Version 6 mismatch
+
+        // Current version but an over-limit family count must be rejected before allocation.
+        let mut over_limit = Vec::new();
+        over_limit.extend_from_slice(CACHE_MAGIC);
+        over_limit.extend_from_slice(&CACHE_VERSION.to_le_bytes());
+        over_limit.extend_from_slice(&((MAX_CACHED_FAMILIES as u32) + 1).to_le_bytes());
+        assert!(deserialize_cache(&over_limit).is_none());
     }
 
     #[test]

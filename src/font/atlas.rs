@@ -37,15 +37,17 @@ impl Shelf {
         if padded_width > bounds[0] || padded_height > bounds[1] {
             return None;
         }
-        let (x, y, shelf_height) = if self.x + padded_width > bounds[0] {
-            (0, self.y + self.height, 0)
-        } else {
-            (self.x, self.y, self.height)
+        // Every offset is checked: `Shelf` and its fields are public, so a caller can install
+        // coordinates that would otherwise overflow and wrap into bogus glyph positions.
+        let next_x = self.x.checked_add(padded_width);
+        let (x, y, shelf_height) = match next_x {
+            Some(next_x) if next_x <= bounds[0] => (self.x, self.y, self.height),
+            _ => (0, self.y.checked_add(self.height)?, 0),
         };
-        if y + padded_height > bounds[1] {
+        if y.checked_add(padded_height)? > bounds[1] {
             return None;
         }
-        self.x = x + padded_width;
+        self.x = x.checked_add(padded_width)?;
         self.y = y;
         self.height = shelf_height.max(padded_height);
         Some([x + 1, y + 1])
