@@ -10,7 +10,7 @@ This reference documents the terminal escape sequences and protocols supported b
 | :--- | :--- | :--- | :--- |
 | **Kitty Graphics** | Core | APC `\x1b_G ... \x1b\` | `kitty.rs`, `render.rs`, `grid.rs` |
 | **Kitty Keyboard** | Keyboard | `CSI ? u`, `CSI =/>/< flags u` | `input.rs`, `parser.rs`, `event_loop.rs` |
-| **text-input-v3** | Input | Wayland `zwp_text_input_v3` | `wayland.rs`, `ime.rs`, `render.rs` |
+| **text-input-v3** | Input | Wayland `zwp_text_input_v3` | `wayland/ime.rs`, `input/ime.rs`, `render.rs` |
 | **SGR Mouse** | Pointer | DECSET `1006` (`\x1b[<btn;col;rowM/m`) | `mouse.rs`, `parser.rs`, `event_loop.rs` |
 | **Bracketed Paste** | Input | DECSET `2004` (`\x1b[200~` ... `\x1b[201~`) | `parser.rs`, `event_loop.rs` |
 | **Focus Reporting** | Window | DECSET `1004` (`\x1b[I` / `\x1b[O`) | `parser.rs`, `event_loop.rs` |

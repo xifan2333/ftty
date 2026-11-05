@@ -25,7 +25,7 @@
 | Module | Purpose | Key Responsibilities |
 | :--- | :--- | :--- |
 | `src/event_loop.rs` | Main event loop & orchestration | Calloop event loop, Wayland dispatch, PTY master reading, paste handling, clipboard synchronization. |
-| `src/wayland.rs` | Wayland protocol wrappers | Surface creation, XDG toplevel negotiation, clipboard `wl_data_device`, IME `zwp_text_input_v3`. |
+| `src/wayland/` | Wayland protocol adapters | `mod.rs` holds `WaylandState`/`WindowState`; `registry` binds globals, `window` owns surface + XDG + scaling, `input` the seat devices, `pointer` the controller bridges, `ime` `zwp_text_input_v3`, `clipboard` `wl_data_device`. |
 | `src/render.rs` | OpenGL & EGL rendering engine | EGL context initialization, GL shaders, vertex batching (`push_quad`), styled underlines, image placements, procedural box drawing. |
 | `src/parser.rs` | VT/ANSI escape sequence parser | VTE state machine, SGR attributes, private modes (DECSET/DECRST), OSC commands (8, 52, 7, 133, 9;4). |
 | `src/grid.rs` | Cell grid & scrollback buffer | Terminal screen matrix, alternate screen buffer, cell flags, wide chars, Kitty diacritic placeholders, scrollback ring buffer. |

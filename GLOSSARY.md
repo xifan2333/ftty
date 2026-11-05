@@ -59,3 +59,7 @@ _Avoid_: Palette, ColorScheme, ColorConfig
 **PastePayload**:
 Clipboard text encoded for the PTY, wrapped in bracketed-paste markers when DEC mode 2004 is active.
 _Avoid_: ClipboardBuffer, PasteText, InputBlob
+
+**ProtocolAdapter**:
+A module owning one Wayland protocol extension's dispatch surface for `AppState`, translating wire events into session, pointer, or compositor actions.
+_Avoid_: ProtocolHandler, WaylandService, ExtensionManager
