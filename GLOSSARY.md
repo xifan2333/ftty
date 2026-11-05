@@ -24,6 +24,10 @@ _Avoid_: MouseProtocol, XtermMouse, PointerReporting
 The subsystem managing Kitty graphics protocol image decodes, memory budgets, and on-screen placements.
 _Avoid_: ImageManager, KittyCache, TextureRegistry
 
+**UnicodePlaceholder**:
+The sentinel code point U+10EEEE that marks a cell covered by a Kitty virtual image; the diacritics stacked on it encode the placement index. Owned by `width` as a single constant.
+_Avoid_: KittyChar, PlaceholderGlyph, ImageMarker
+
 **RenderPipeline**:
 The unified rendering system translating terminal cell grids and overlay states into displayable visual output.
 _Avoid_: RenderService, DrawingContext, FrameRenderer
