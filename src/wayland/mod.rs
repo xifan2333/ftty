@@ -13,9 +13,8 @@ use wayland_client::protocol::{
     wl_data_offer::{self, WlDataOffer},
     wl_data_source::{self, WlDataSource},
     wl_keyboard::{self, KeyState, WlKeyboard},
-    wl_output::{self, Subpixel, WlOutput},
+    wl_output::{Subpixel, WlOutput},
     wl_pointer::{self, Axis, ButtonState, WlPointer},
-    wl_registry::{self, WlRegistry},
     wl_seat::{self, Capability, WlSeat},
     wl_surface::{self, WlSurface},
 };
@@ -46,6 +45,8 @@ use crate::event_loop::AppState;
 use crate::input::mouse::{MouseModifiers, encode_mouse_event};
 use crate::input::pointer::{PointerContext, PointerController, PointerOutcome};
 pub use crate::input::pointer::{find_url_at_col, find_url_in_grid, x11_button_index};
+
+mod registry;
 
 // --- Window Lifecycle State Machine ---
 
@@ -335,118 +336,6 @@ impl WaylandState {
 
         let vp = viewporter.get_viewport(surface, qh, ());
         self.viewport = Some(vp);
-    }
-}
-
-// --- Init & Registry ---
-
-impl Dispatch<WlRegistry, ()> for AppState {
-    fn event(
-        state: &mut Self,
-        registry: &WlRegistry,
-        event: wl_registry::Event,
-        _data: &(),
-        _conn: &Connection,
-        qh: &QueueHandle<Self>,
-    ) {
-        if let wl_registry::Event::Global {
-            name,
-            interface,
-            version,
-        } = event
-        {
-            match interface.as_str() {
-                "wl_compositor" => {
-                    let comp = registry.bind::<WlCompositor, _, _>(name, version.min(4), qh, ());
-                    state.wayland.compositor = Some(comp);
-                    state.wayland.init_window(qh);
-                    state.try_init_fractional_scale(qh);
-                    state.try_init_viewport(qh);
-                }
-                "xdg_wm_base" => {
-                    let xdg = registry.bind::<XdgWmBase, _, _>(name, 1, qh, ());
-                    state.wayland.xdg_wm_base = Some(xdg);
-                    state.wayland.init_window(qh);
-                    state.try_init_fractional_scale(qh);
-                    state.try_init_viewport(qh);
-                }
-                "wl_seat" => {
-                    let seat = registry.bind::<WlSeat, _, _>(name, version.min(5), qh, ());
-                    state.wayland.seat = Some(seat);
-                    state.wayland.init_text_input(qh);
-                    state.wayland.init_data_device(qh);
-                }
-                "zwp_text_input_manager_v3" => {
-                    let manager = registry.bind::<ZwpTextInputManagerV3, _, _>(name, 1, qh, ());
-                    state.wayland.text_input_manager = Some(manager);
-                    state.wayland.init_text_input(qh);
-                }
-                "wl_data_device_manager" => {
-                    let manager = registry.bind::<WlDataDeviceManager, _, _>(name, 3, qh, ());
-                    state.wayland.data_device_manager = Some(manager);
-                    state.wayland.init_data_device(qh);
-                }
-                "wp_cursor_shape_manager_v1" => {
-                    let manager = registry.bind::<WpCursorShapeManagerV1, _, _>(name, 1, qh, ());
-                    state.wayland.cursor_shape_manager = Some(manager);
-                    state.try_init_cursor_shape(qh);
-                }
-                "wp_fractional_scale_manager_v1" => {
-                    let manager =
-                        registry.bind::<WpFractionalScaleManagerV1, _, _>(name, 1, qh, ());
-                    state.wayland.fractional_scale_manager = Some(manager);
-                    state.try_init_fractional_scale(qh);
-                }
-                "wp_viewporter" => {
-                    let viewporter = registry.bind::<WpViewporter, _, _>(name, 1, qh, ());
-                    state.wayland.viewporter = Some(viewporter);
-                    state.try_init_viewport(qh);
-                }
-                "wl_output" => {
-                    let output = registry.bind::<WlOutput, _, _>(name, version.min(4), qh, ());
-                    state.wayland.outputs.push(output);
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
-impl Dispatch<WlCompositor, ()> for AppState {
-    fn event(
-        _state: &mut Self,
-        _proxy: &WlCompositor,
-        _event: <WlCompositor as wayland_client::Proxy>::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-    ) {
-    }
-}
-
-impl Dispatch<WlOutput, ()> for AppState {
-    fn event(
-        state: &mut Self,
-        _proxy: &WlOutput,
-        event: wl_output::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-    ) {
-        if let wl_output::Event::Geometry { subpixel, .. } = event
-            && let wayland_client::WEnum::Value(sub) = subpixel
-        {
-            state.wayland.output_subpixel = Some(sub);
-            let enable_subpixel = state.is_subpixel_preferred()
-                && state.renderer.as_ref().is_some_and(|r| r.has_dual_source);
-            let bgr = state.is_bgr_subpixel();
-            if state.font_mgr.subpixel != enable_subpixel || state.font_mgr.bgr != bgr {
-                state.font_mgr.subpixel = enable_subpixel;
-                state.font_mgr.bgr = bgr;
-                state.atlas.clear();
-                state.needs_redraw = true;
-            }
-        }
     }
 }
 
