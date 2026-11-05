@@ -186,10 +186,7 @@ impl WaylandState {
     }
 }
 
+/// Compatibility path for the pointer grid helpers, which live in [`crate::input::pointer`].
 pub mod seat {
     pub use super::{find_url_at_col, find_url_in_grid, x11_button_index};
 }
-
-pub mod init {}
-pub mod text_input {}
-pub mod xdg {}
