@@ -60,12 +60,16 @@ pub fn write_all_to_pty(fd: impl AsFd, mut bytes: &[u8], budget: Duration) {
             Ok(written) => bytes = &bytes[written..],
             Err(Errno::EINTR) => continue,
             Err(Errno::EAGAIN) => {
+                // No capacity yet: wait for readiness and retry. Only `budget` ends the loop,
+                // otherwise a momentarily full PTY would silently truncate the payload.
                 let mut fds = [nix::poll::PollFd::new(
                     borrowed,
                     nix::poll::PollFlags::POLLOUT,
                 )];
-                if !nix::poll::poll(&mut fds, POLL_SLICE_MS).is_ok_and(|ready| ready > 0) {
-                    break;
+                match nix::poll::poll(&mut fds, POLL_SLICE_MS) {
+                    Ok(_) => continue,
+                    Err(Errno::EINTR) => continue,
+                    Err(_) => break,
                 }
             }
             Err(_) => break,
@@ -149,6 +153,7 @@ impl TerminalSession {
 
     /// Pastes in-memory clipboard text, handing oversized payloads to a background writer.
     pub fn paste(&mut self, bytes: &[u8]) {
+        let bytes = &bytes[..bytes.len().min(MAX_PASTE_BYTES)];
         if bytes.is_empty() {
             return;
         }

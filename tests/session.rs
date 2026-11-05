@@ -187,16 +187,26 @@ fn test_session_ime_commit_encodes_erasure_then_text() {
 
     assert_eq!(encode_ime_edits(None, None), Vec::<u8>::new());
     assert_eq!(encode_ime_edits(Some((0, 0)), None), Vec::<u8>::new());
-    // Two characters erased before the cursor emit two backspaces.
-    assert_eq!(encode_ime_edits(Some((2, 0)), None), b"\x08\x08".to_vec());
+    // Two characters erased before the cursor emit two DEL bytes, matching the Backspace key.
+    assert_eq!(encode_ime_edits(Some((2, 0)), None), b"\x7f\x7f".to_vec());
     // One character erased after the cursor emits a single forward delete.
     assert_eq!(encode_ime_edits(Some((0, 1)), None), b"\x1b[3~".to_vec());
     // Erasure always precedes the committed text.
     assert_eq!(
         encode_ime_edits(Some((1, 1)), Some("\u{4f60}")),
-        b"\x08\x1b[3~\xe4\xbd\xa0".to_vec()
+        b"\x7f\x1b[3~\xe4\xbd\xa0".to_vec()
     );
     assert_eq!(encode_ime_edits(None, Some("hi")), b"hi".to_vec());
+}
+
+#[test]
+fn test_encode_ime_edits_clamps_hostile_delete_lengths() {
+    use ftty::input::ime::{MAX_IME_ERASE_CHARS, encode_ime_edits};
+
+    // A hostile compositor must not force an unbounded allocation: output stays bounded.
+    let bytes = encode_ime_edits(Some((u32::MAX, u32::MAX)), None);
+    let expected = MAX_IME_ERASE_CHARS as usize * (1 + 4);
+    assert_eq!(bytes.len(), expected);
 }
 
 #[test]

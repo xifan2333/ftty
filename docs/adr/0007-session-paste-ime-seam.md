@@ -9,4 +9,4 @@ We move that knowledge behind `TerminalSession`. `session.rs` now owns a single 
 ## Consequences
 - The Wayland adapter contains no escape-sequence literals and no write loops; `paste_clipboard` shrinks from ~113 lines to ~20.
 - Bracketed-paste wrapping and IME erasure encoding are asserted in pure in-memory tests through `TerminalSession` and `encode_ime_edits`.
-- Timeout and truncation behaviour has exactly one implementation, keyed by an explicit budget per producer (100 ms interactive, 5 s paste).
+- Timeout and truncation behaviour has exactly one implementation, keyed by an explicit budget per write path: 100 ms for interactive input and for paste payloads of 4096 encoded bytes or fewer (written synchronously on the event loop); 5 s for PTY writes of larger paste payloads and of fd-originated paste payloads. The budget bounds writes only, not clipboard reads.
