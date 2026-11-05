@@ -26,7 +26,6 @@ use wayland_protocols::xdg::shell::client::{
 };
 
 use crate::error::WaylandError;
-pub use crate::input::pointer::{find_url_at_col, find_url_in_grid, x11_button_index};
 
 pub mod clipboard;
 mod ime;
@@ -184,9 +183,4 @@ impl WaylandState {
         );
         Ok(())
     }
-}
-
-/// Compatibility path for the pointer grid helpers, which live in [`crate::input::pointer`].
-pub mod seat {
-    pub use super::{find_url_at_col, find_url_in_grid, x11_button_index};
 }

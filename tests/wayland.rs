@@ -322,7 +322,7 @@ fn pointer_events_from_the_wire_drive_mouse_reports() {
 #[test]
 fn test_find_url_at_col() {
     use ftty::grid::Row;
-    use ftty::wayland::seat::find_url_at_col;
+    use ftty::input::pointer::find_url_at_col;
 
     let mut row = Row::new(50);
     let s = "Check https://github.com/xifan2333/ftty. Great!";
@@ -348,7 +348,7 @@ fn test_find_url_at_col() {
 #[test]
 fn test_find_url_in_grid_wrapped_lines() {
     use ftty::grid::Grid;
-    use ftty::wayland::seat::find_url_in_grid;
+    use ftty::input::pointer::find_url_in_grid;
 
     let mut grid = Grid::new(20, 2, 0);
     for (i, c) in "https://example.com/".chars().enumerate() {
@@ -373,7 +373,7 @@ fn test_find_url_in_grid_wrapped_lines() {
 #[test]
 fn test_find_url_hidden_and_wide_char() {
     use ftty::grid::{CellFlags, Grid};
-    use ftty::wayland::seat::find_url_in_grid;
+    use ftty::input::pointer::find_url_in_grid;
 
     let mut grid = Grid::new(30, 1, 0);
     let prefix = "https://example.com/";
@@ -455,8 +455,8 @@ fn surface_enter_forces_redraw_immediately() {
 
 #[test]
 fn adapter_module_paths_stay_reachable() {
+    use ftty::input::pointer::{find_url_at_col, find_url_in_grid, x11_button_index};
     use ftty::wayland::clipboard::best_text_mime;
-    use ftty::wayland::seat::{find_url_at_col, find_url_in_grid, x11_button_index};
     use ftty::wayland::window::WindowState as WindowModuleState;
 
     // The window adapter must expose the lifecycle enum under its own module path.
