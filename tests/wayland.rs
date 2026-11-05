@@ -470,3 +470,66 @@ fn adapter_module_paths_stay_reachable() {
     let helpers = (find_url_at_col, find_url_in_grid, x11_button_index);
     let _ = helpers;
 }
+
+#[test]
+fn keyboard_capability_churn_rebinds_the_keyboard() {
+    fn send_capabilities(
+        server: &mut UnixStream,
+        conn: &Connection,
+        queue: &mut wayland_client::EventQueue<AppState>,
+        app: &mut AppState,
+        seat_id: u32,
+        caps: u32,
+    ) {
+        let mut events = Vec::new();
+        for word in [seat_id, 12 << 16, caps] {
+            events.extend_from_slice(&word.to_ne_bytes());
+        }
+        server.write_all(&events).expect("write capabilities");
+        conn.prepare_read()
+            .expect("prepare read")
+            .read()
+            .expect("read");
+        queue.dispatch_pending(app).expect("dispatch");
+    }
+
+    let (client, mut server) = UnixStream::pair().expect("socketpair");
+    let conn = Connection::from_socket(client).expect("conn");
+    let mut queue = conn.new_event_queue::<AppState>();
+    let qh = queue.handle();
+    let registry = conn.display().get_registry(&qh, ());
+    // A legacy seat creates a wl_keyboard that predates the `release` request (version 3).
+    let seat = registry.bind::<WlSeat, _, _>(1, 2, &qh, ());
+    let seat_id = seat.id().protocol_id();
+
+    let term = Terminal::new(80, 24, 100);
+    let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
+    let mut app = AppState::new(TerminalSession::new(term, pty)).expect("app");
+
+    let keyboard_capability = 2;
+    send_capabilities(
+        &mut server,
+        &conn,
+        &mut queue,
+        &mut app,
+        seat_id,
+        keyboard_capability,
+    );
+    let first = app.wayland.keyboard.clone().expect("keyboard bound");
+
+    // Capability removal must drop the stale handle even for pre-v3 keyboards,
+    // otherwise a re-advertised keyboard capability never rebinds.
+    send_capabilities(&mut server, &conn, &mut queue, &mut app, seat_id, 0);
+    assert!(app.wayland.keyboard.is_none());
+
+    send_capabilities(
+        &mut server,
+        &conn,
+        &mut queue,
+        &mut app,
+        seat_id,
+        keyboard_capability,
+    );
+    let second = app.wayland.keyboard.clone().expect("keyboard rebound");
+    assert_ne!(first.id().protocol_id(), second.id().protocol_id());
+}

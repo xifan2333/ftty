@@ -73,7 +73,10 @@ impl Dispatch<WlDataDevice, ()> for AppState {
     ) {
         match event {
             wl_data_device::Event::DataOffer { id } => {
-                if state.pending_offers.len() >= 4 {
+                if state.pending_offers.len() >= 4
+                    && let Some(stale) = state.pending_offers.first()
+                {
+                    stale.offer.destroy();
                     state.pending_offers.remove(0);
                 }
                 state.pending_offers.push(crate::wayland::OfferData {
@@ -82,6 +85,10 @@ impl Dispatch<WlDataDevice, ()> for AppState {
                 });
             }
             wl_data_device::Event::Selection { id } => {
+                // The previous selection offer is dead once a new one arrives.
+                if let Some(previous) = state.wayland.current_offer.take() {
+                    previous.offer.destroy();
+                }
                 state.wayland.current_offer = id.and_then(|offer| {
                     state
                         .pending_offers
@@ -90,7 +97,9 @@ impl Dispatch<WlDataDevice, ()> for AppState {
                         .map(|idx| state.pending_offers.swap_remove(idx))
                 });
                 if state.wayland.current_offer.is_none() {
-                    state.pending_offers.clear();
+                    for stale in state.pending_offers.drain(..) {
+                        stale.offer.destroy();
+                    }
                 }
             }
             _ => {}
@@ -123,7 +132,9 @@ impl Dispatch<WlDataSource, ()> for AppState {
                 });
             }
             wl_data_source::Event::Cancelled => {
-                state.wayland.data_source = None;
+                if let Some(source) = state.wayland.data_source.take() {
+                    source.destroy();
+                }
             }
             _ => {}
         }

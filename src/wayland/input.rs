@@ -5,7 +5,7 @@ use wayland_client::protocol::{
     wl_pointer::{self, Axis, ButtonState, WlPointer},
     wl_seat::{self, Capability, WlSeat},
 };
-use wayland_client::{Connection, Dispatch, QueueHandle, WEnum};
+use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, WEnum};
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::{
     self, WpCursorShapeDeviceV1,
 };
@@ -57,6 +57,13 @@ impl Dispatch<WlSeat, ()> for AppState {
             if caps.contains(Capability::Keyboard) && state.wayland.keyboard.is_none() {
                 let keyboard = proxy.get_keyboard(qh, ());
                 state.wayland.keyboard = Some(keyboard);
+            } else if !caps.contains(Capability::Keyboard)
+                && let Some(keyboard) = state.wayland.keyboard.take()
+                && keyboard.version() >= 3
+            {
+                // `wl_keyboard.release` only exists from version 3; older objects are
+                // dropped locally so a re-advertised capability creates a fresh keyboard.
+                keyboard.release();
             }
             if caps.contains(Capability::Pointer) {
                 if state.wayland.pointer.is_none() {
@@ -68,7 +75,9 @@ impl Dispatch<WlSeat, ()> for AppState {
                 if let Some(device) = state.wayland.cursor_shape_device.take() {
                     device.destroy();
                 }
-                if let Some(pointer) = state.wayland.pointer.take() {
+                if let Some(pointer) = state.wayland.pointer.take()
+                    && pointer.version() >= 3
+                {
                     pointer.release();
                 }
                 let outcome = state.pointer.handle_leave();
