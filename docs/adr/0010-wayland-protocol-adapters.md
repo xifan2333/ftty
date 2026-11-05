@@ -37,6 +37,6 @@ module of the crate, so callers and wire-level tests cross the same seam as befo
 - The largest adapter is 298 lines; `mod.rs` drops from 1380 to 192 lines.
 - Protocol knowledge is local: reading `ime.rs` no longer requires reading clipboard code,
   and a compositor extension can be added or deleted in one file.
-- The destructive shims `wayland::init`, `wayland::text_input`, and `wayland::xdg` were
-  empty and removed. `wayland::seat` survives as a documented re-export because the grid
+- The empty compatibility shims `wayland::init`, `wayland::text_input`, and
+  `wayland::xdg` were removed. `wayland::seat` survives as a documented re-export because the grid
   helpers it exposes live in `crate::input::pointer`, not in this module.
