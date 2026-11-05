@@ -43,3 +43,7 @@ _Avoid_: SessionManager, TermSession, PtyBridge
 **SessionOutcome**:
 The composite set of platform notifications produced by evaluating terminal PTY input and escape sequences.
 _Avoid_: TerminalEvent, SessionUpdate, ProcessResult
+
+**PastePayload**:
+Clipboard text encoded for the PTY, wrapped in bracketed-paste markers when DEC mode 2004 is active.
+_Avoid_: ClipboardBuffer, PasteText, InputBlob

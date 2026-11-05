@@ -1,11 +1,9 @@
 //! Wayland client connection, globals binding, and XDG Shell window lifecycle.
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::os::fd::AsFd;
 
-use nix::errno::Errno;
 use nix::fcntl::OFlag;
-use nix::poll::{PollFd, PollFlags, poll};
 
 use wayland_client::protocol::{
     wl_callback::{self, WlCallback},
@@ -1149,17 +1147,7 @@ impl Dispatch<ZwpTextInputV3, ()> for AppState {
             }
             zwp_text_input_v3::Event::Done { .. } => {
                 let (delete, commit) = state.ime.apply_done();
-                if let Some((before, after)) = delete {
-                    for _ in 0..before {
-                        state.session.write_input_bytes(b"\x08");
-                    }
-                    for _ in 0..after {
-                        state.session.write_input_bytes(b"\x1b[3~");
-                    }
-                }
-                if let Some(text) = commit {
-                    state.session.write_input_bytes(text.as_bytes());
-                }
+                state.session.ime_commit(delete, commit);
                 state.needs_redraw = true;
             }
             _ => {}
@@ -1352,7 +1340,6 @@ impl AppState {
 
     /// Pastes text from the Wayland clipboard into the terminal PTY.
     pub fn paste_clipboard(&mut self, conn: Option<&Connection>) {
-        let bracketed = self.session.terminal.bracketed_paste;
         if let Some(offer_data) = &self.wayland.current_offer {
             if let Some(mime) = best_text_mime(&offer_data.mime_types)
                 && let Ok((read_fd, write_fd)) = nix::unistd::pipe2(OFlag::O_CLOEXEC)
@@ -1364,85 +1351,14 @@ impl AppState {
                     let _ = c.flush();
                 }
 
-                if let Ok(pty_fd) = self.session.pty.try_clone_master() {
-                    std::thread::spawn(move || {
-                        // Limit paste payload to at most 10 MiB to prevent memory exhaustion
-                        let mut reader = std::fs::File::from(read_fd).take(10 * 1024 * 1024);
-                        let mut bytes = Vec::new();
-                        if reader.read_to_end(&mut bytes).is_ok() && !bytes.is_empty() {
-                            let payload = if bracketed {
-                                let mut wrapped = Vec::with_capacity(bytes.len() + 12);
-                                wrapped.extend_from_slice(b"\x1b[200~");
-                                wrapped.extend_from_slice(&bytes);
-                                wrapped.extend_from_slice(b"\x1b[201~");
-                                wrapped
-                            } else {
-                                bytes
-                            };
-                            // PTY master is nonblocking: write with poll readiness loop to avoid truncation
-                            let mut to_write = &payload[..];
-                            let start = std::time::Instant::now();
-                            while !to_write.is_empty()
-                                && start.elapsed() < std::time::Duration::from_secs(5)
-                            {
-                                let mut fds = [PollFd::new(pty_fd.as_fd(), PollFlags::POLLOUT)];
-                                if !poll(&mut fds, 1000u16).is_ok_and(|ready| ready > 0) {
-                                    break;
-                                }
-                                match nix::unistd::write(&pty_fd, to_write) {
-                                    Ok(0) => break,
-                                    Ok(written) => to_write = &to_write[written..],
-                                    Err(Errno::EINTR | Errno::EAGAIN) => continue,
-                                    Err(_) => break,
-                                }
-                            }
-                        }
-                    });
-                    return;
-                }
+                self.session.paste_from_fd(read_fd);
             }
             return;
         }
 
-        // Fallback to internal clipboard buffer if offer not available
-        let fallback_text = self.clipboard_text.clone();
-        if let Some(text) = fallback_text {
-            let payload = if bracketed {
-                let mut wrapped = Vec::with_capacity(text.len() + 12);
-                wrapped.extend_from_slice(b"\x1b[200~");
-                wrapped.extend_from_slice(text.as_bytes());
-                wrapped.extend_from_slice(b"\x1b[201~");
-                wrapped
-            } else {
-                text.into_bytes()
-            };
-
-            if payload.len() <= 4096 {
-                self.write_pty_blocking(&payload);
-            } else if let Ok(pty_fd) = self.session.pty.try_clone_master() {
-                std::thread::spawn(move || {
-                    let mut to_write = &payload[..];
-                    let start = std::time::Instant::now();
-                    while !to_write.is_empty()
-                        && start.elapsed() < std::time::Duration::from_secs(5)
-                    {
-                        let mut fds = [PollFd::new(pty_fd.as_fd(), PollFlags::POLLOUT)];
-                        if !poll(&mut fds, 1000u16).is_ok_and(|ready| ready > 0) {
-                            break;
-                        }
-                        match nix::unistd::write(&pty_fd, to_write) {
-                            Ok(0) => break,
-                            Ok(written) => to_write = &to_write[written..],
-                            Err(Errno::EINTR | Errno::EAGAIN) => continue,
-                            Err(_) => break,
-                        }
-                    }
-                });
-            } else {
-                // If cloning PTY master failed, do not block the main event loop with an oversized write;
-                // write bounded head chunk only.
-                self.write_pty_blocking(&payload[..4096]);
-            }
+        // Fall back to the internal clipboard buffer when no offer is available.
+        if let Some(text) = self.clipboard_text.clone() {
+            self.session.paste(text.as_bytes());
         }
     }
 }

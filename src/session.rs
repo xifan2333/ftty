@@ -1,8 +1,10 @@
 //! Deep module orchestrating terminal emulation, PTY I/O, escape parsing, and protocol timers.
 
-use std::io::{self, Read, Write};
-use std::os::fd::AsFd;
+use std::io::{self, Read};
+use std::os::fd::{AsFd, OwnedFd};
 use std::time::{Duration, Instant};
+
+use nix::errno::Errno;
 
 use crate::kitty::{GraphicContext, KittyParser, KittyStreamChunk, collect_placeholder_ids};
 use crate::parser::{Terminal, VtParser};
@@ -10,6 +12,66 @@ use crate::pty::Pty;
 
 /// Maximum duration (150ms) before Mode 2026 synchronized output is automatically disabled.
 pub const SYNC_OUTPUT_TIMEOUT: Duration = Duration::from_millis(150);
+
+/// Maximum clipboard payload accepted for a single paste (10 MiB), bounding memory use.
+pub const MAX_PASTE_BYTES: usize = 10 * 1024 * 1024;
+
+/// Time budget for a single interactive input write before bytes are dropped.
+const INPUT_WRITE_BUDGET: Duration = Duration::from_millis(100);
+
+/// Time budget for draining a pasted payload to the PTY.
+const PASTE_WRITE_BUDGET: Duration = Duration::from_secs(5);
+
+/// Payloads at or below this size are written synchronously on the event loop.
+const SYNC_PASTE_THRESHOLD: usize = 4096;
+
+/// Poll readiness slice used while waiting for PTY write capacity.
+const POLL_SLICE_MS: u16 = 20;
+
+/// Bracketed paste mode (DEC 2004) opening marker.
+const PASTE_OPEN: &[u8] = b"\x1b[200~";
+
+/// Bracketed paste mode (DEC 2004) closing marker.
+const PASTE_CLOSE: &[u8] = b"\x1b[201~";
+
+/// Wraps `bytes` in bracketed-paste markers when `enabled`.
+#[must_use]
+pub fn wrap_bracketed_paste(bytes: &[u8], enabled: bool) -> Vec<u8> {
+    if !enabled {
+        return bytes.to_vec();
+    }
+    let mut wrapped = Vec::with_capacity(bytes.len() + PASTE_OPEN.len() + PASTE_CLOSE.len());
+    wrapped.extend_from_slice(PASTE_OPEN);
+    wrapped.extend_from_slice(bytes);
+    wrapped.extend_from_slice(PASTE_CLOSE);
+    wrapped
+}
+
+/// Writes `bytes` to a PTY master, retrying on readiness until `budget` is exhausted.
+///
+/// This is the single write path for every producer (keystrokes, protocol responses, pastes,
+/// IME commits), so truncation and timeout behaviour cannot diverge between callers.
+pub fn write_all_to_pty(fd: impl AsFd, mut bytes: &[u8], budget: Duration) {
+    let start = Instant::now();
+    while !bytes.is_empty() && start.elapsed() < budget {
+        let borrowed = fd.as_fd();
+        match nix::unistd::write(borrowed, bytes) {
+            Ok(0) => break,
+            Ok(written) => bytes = &bytes[written..],
+            Err(Errno::EINTR) => continue,
+            Err(Errno::EAGAIN) => {
+                let mut fds = [nix::poll::PollFd::new(
+                    borrowed,
+                    nix::poll::PollFlags::POLLOUT,
+                )];
+                if !nix::poll::poll(&mut fds, POLL_SLICE_MS).is_ok_and(|ready| ready > 0) {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+}
 
 /// Semantic actions and notifications emitted after processing terminal or user input.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -75,24 +137,64 @@ impl TerminalSession {
     }
 
     /// Writes user input bytes directly to the PTY master.
-    pub fn write_input_bytes(&mut self, mut bytes: &[u8]) {
-        let start = Instant::now();
-        while !bytes.is_empty() && start.elapsed() < Duration::from_millis(100) {
-            match self.pty.write(bytes) {
-                Ok(0) => break,
-                Ok(written) => bytes = &bytes[written..],
-                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                    let mut fds = [nix::poll::PollFd::new(
-                        self.pty.as_fd(),
-                        nix::poll::PollFlags::POLLOUT,
-                    )];
-                    if !nix::poll::poll(&mut fds, 20u16).is_ok_and(|ready| ready > 0) {
-                        break;
-                    }
-                }
-                Err(_) => break,
+    pub fn write_input_bytes(&mut self, bytes: &[u8]) {
+        write_all_to_pty(self.pty.as_fd(), bytes, INPUT_WRITE_BUDGET);
+    }
+
+    /// Wraps clipboard bytes in bracketed-paste markers when DEC mode 2004 is active.
+    #[must_use]
+    pub fn encode_paste(&self, bytes: &[u8]) -> Vec<u8> {
+        wrap_bracketed_paste(bytes, self.terminal.bracketed_paste)
+    }
+
+    /// Pastes in-memory clipboard text, handing oversized payloads to a background writer.
+    pub fn paste(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        let payload = self.encode_paste(bytes);
+        if payload.len() <= SYNC_PASTE_THRESHOLD {
+            self.write_input_bytes(&payload);
+            return;
+        }
+        match self.pty.try_clone_master() {
+            Ok(fd) => {
+                std::thread::spawn(move || write_all_to_pty(&fd, &payload, PASTE_WRITE_BUDGET));
             }
+            Err(_) => self.write_input_bytes(&payload[..SYNC_PASTE_THRESHOLD]),
+        }
+    }
+
+    /// Pastes clipboard text read from `fd`, draining at most [`MAX_PASTE_BYTES`] off the loop.
+    ///
+    /// The read and PTY write happen on a background thread so a slow clipboard owner or a
+    /// backed-up shell cannot stall the event loop.
+    pub fn paste_from_fd(&mut self, fd: OwnedFd) {
+        let bracketed = self.terminal.bracketed_paste;
+        let Ok(pty_fd) = self.pty.try_clone_master() else {
+            return;
+        };
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let read = std::fs::File::from(fd)
+                .take(MAX_PASTE_BYTES as u64)
+                .read_to_end(&mut bytes);
+            if read.is_err() || bytes.is_empty() {
+                return;
+            }
+            write_all_to_pty(
+                &pty_fd,
+                &wrap_bracketed_paste(&bytes, bracketed),
+                PASTE_WRITE_BUDGET,
+            );
+        });
+    }
+
+    /// Applies an IME completion batch: surrounding-text erasure, then the committed text.
+    pub fn ime_commit(&mut self, delete: Option<(u32, u32)>, commit: Option<String>) {
+        let bytes = crate::input::ime::encode_ime_edits(delete, commit.as_deref());
+        if !bytes.is_empty() {
+            self.write_input_bytes(&bytes);
         }
     }
 
