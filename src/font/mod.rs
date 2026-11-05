@@ -23,8 +23,6 @@ pub use fallback::{
     FallbackCache, MAX_RESOLVED_CACHE, fontconfig, load_font_bytes, load_font_file, match_family,
 };
 
-// --- Font Manager ---
-
 /// Cell size and baseline alignment metrics for the active font and font size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CellMetrics {

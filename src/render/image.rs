@@ -13,8 +13,6 @@ use super::text::push_quad;
 use super::{MAX_RETAINED_IMAGE_VERTEX_FLOATS, Renderer};
 use crate::width::KITTY_PLACEHOLDER;
 
-// --- Image ---
-
 #[must_use]
 pub fn placeholder_image_id(color: Color) -> u32 {
     match color {

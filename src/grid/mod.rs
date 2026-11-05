@@ -22,8 +22,6 @@ pub use row::{PlaceholderMap, Row};
 
 pub(crate) use std::cell::Cell as DirtyCell;
 
-// --- Grid Core ---
-
 #[doc(hidden)]
 pub const MAX_ROW_POOL_CAPACITY: usize = 64;
 
@@ -1265,8 +1263,6 @@ impl Grid {
         self.cursor.col = self.cursor.col.min(self.cols.saturating_sub(1));
     }
 }
-
-// --- Resize ---
 
 pub mod reflow;
 pub use reflow::{LogicalLine, ReflowCell, reflow_primary_screen, shrink_rows};
