@@ -9,7 +9,6 @@ use crate::width::KITTY_PLACEHOLDER;
 use super::colors::{ColorScheme, RenderOptions};
 use super::procedural::{SOLID_UV, is_procedural_glyph, render_procedural_glyph};
 
-#[doc(hidden)]
 pub const SELECTION_BG: [f32; 4] = [0.35, 0.45, 0.70, 0.5];
 
 pub(crate) fn visible_glyph(cell: &Cell) -> bool {
@@ -27,7 +26,6 @@ fn is_cluster_format(c: char) -> bool {
         || ('\u{1F3FB}'..='\u{1F3FF}').contains(&c)
 }
 
-#[doc(hidden)]
 pub fn prepare_atlas(
     grid: &Grid,
     fonts: &FontManager,
@@ -81,7 +79,6 @@ pub fn prepare_atlas(
     repacked
 }
 
-#[doc(hidden)]
 pub fn rgba(color: Rgb) -> [f32; 4] {
     [
         f32::from(color.r) / 255.0,
@@ -91,7 +88,6 @@ pub fn rgba(color: Rgb) -> [f32; 4] {
     ]
 }
 
-#[doc(hidden)]
 pub fn cell_colors(cell: &Cell, colors: ColorScheme<'_>) -> (Rgb, Rgb) {
     let fg = cell
         .fg
@@ -122,7 +118,6 @@ pub(crate) fn push_quad(
     ]);
 }
 
-#[doc(hidden)]
 pub fn cursor_cell(grid: &Grid) -> Option<(usize, usize, usize)> {
     if !grid.cursor.visible || grid.cursor.row >= grid.rows {
         return None;
@@ -153,7 +148,6 @@ pub fn cursor_cell(grid: &Grid) -> Option<(usize, usize, usize)> {
     Some((row, col, width))
 }
 
-#[doc(hidden)]
 pub struct RenderContext<'a> {
     pub grid: &'a Grid,
     pub colors: ColorScheme<'a>,
@@ -164,7 +158,6 @@ pub struct RenderContext<'a> {
     pub cursor: Option<(usize, usize, usize)>,
 }
 
-#[doc(hidden)]
 pub fn build_row_backgrounds(vertices: &mut Vec<f32>, row: usize, ctx: &RenderContext<'_>) {
     vertices.clear();
     let grid = ctx.grid;
@@ -239,7 +232,6 @@ pub fn build_row_backgrounds(vertices: &mut Vec<f32>, row: usize, ctx: &RenderCo
     }
 }
 
-#[doc(hidden)]
 pub fn build_row_foregrounds(vertices: &mut Vec<f32>, row: usize, ctx: &RenderContext<'_>) {
     vertices.clear();
     let grid = ctx.grid;
@@ -472,7 +464,6 @@ pub fn build_row_foregrounds(vertices: &mut Vec<f32>, row: usize, ctx: &RenderCo
     }
 }
 
-#[doc(hidden)]
 pub fn build_dynamic_overlays(vertices: &mut Vec<f32>, ctx: &RenderContext<'_>) {
     let grid = ctx.grid;
     let colors = ctx.colors;
@@ -588,7 +579,7 @@ pub fn build_dynamic_overlays(vertices: &mut Vec<f32>, ctx: &RenderContext<'_>) 
     }
 }
 
-#[doc(hidden)]
+#[cfg(test)]
 pub fn build_vertices(
     vertices: &mut Vec<f32>,
     grid: &Grid,

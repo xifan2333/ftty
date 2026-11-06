@@ -4,26 +4,26 @@
 // propagate errors. Cargo.toml enables `clippy::unwrap_used`/`expect_used` crate-wide.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
-pub mod color;
-pub mod config;
-pub mod error;
-pub mod event_loop;
-pub mod font;
-pub mod grid;
-pub mod input;
-pub mod kitty;
-pub mod parser;
-pub mod session;
-pub mod theme;
+mod color;
+mod config;
+mod error;
+mod event_loop;
+mod font;
+mod grid;
+mod input;
+mod kitty;
+mod parser;
+mod session;
+mod theme;
 // Audited FFI boundaries: EGL/OpenGL, POSIX PTY, and GNU allocator tuning.
 #[allow(unsafe_code)]
-pub mod alloc;
+mod alloc;
 #[allow(unsafe_code)]
-pub mod pty;
+mod pty;
 #[allow(unsafe_code)]
-pub mod render;
-pub mod wayland;
-pub mod width;
+mod render;
+mod wayland;
+mod width;
 
 // Crate prelude: only names the binary or the test suite reaches for at the root.
 // Everything else is addressed through its module (`grid::Grid`, `error::FttyError`), so

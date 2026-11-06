@@ -86,7 +86,6 @@ pub struct Font {
 /// Converts font typography points to nominal pixels at standard 96 DPI (72 pt == 96 px).
 #[inline]
 #[must_use]
-#[doc(hidden)]
 pub fn points_to_pixels(points: f32) -> f32 {
     points * (96.0 / 72.0)
 }

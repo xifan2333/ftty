@@ -19,7 +19,6 @@ void main() {
 }
 "#;
 
-#[doc(hidden)]
 pub const FRAGMENT_SHADER: &str = r#"
 #extension GL_EXT_blend_func_extended : enable
 

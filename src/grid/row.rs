@@ -12,8 +12,11 @@ pub type PlaceholderMap = HashMap<usize, (u16, u16, u8)>;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Row {
     pub cells: Vec<Cell>,
+    // Boxed so a row with no clusters stays small; most rows have none.
+    #[allow(clippy::box_collection)]
     pub placeholders: Option<Box<PlaceholderMap>>,
     /// Full grapheme-cluster text for cells that contain more than one code point.
+    #[allow(clippy::box_collection)]
     pub clusters: Option<Box<HashMap<usize, String>>>,
     pub wrapped: bool,
     pub dirty: DirtyCell<bool>,

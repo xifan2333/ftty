@@ -4,11 +4,6 @@ use crate::color::Rgb;
 use crate::input::ime::Preedit;
 use crate::input::selection::Selection;
 
-#[doc(hidden)]
-pub const DEFAULT_FG: Rgb = Rgb::new(220, 220, 220);
-#[doc(hidden)]
-pub const DEFAULT_BG: Rgb = Rgb::new(24, 24, 24);
-
 /// Active color scheme holding the 256-color palette and default foreground/background.
 #[derive(Debug, Clone, Copy)]
 pub struct ColorScheme<'a> {

@@ -21,7 +21,6 @@ pub struct CachedGlyph {
 }
 
 #[derive(Default)]
-#[doc(hidden)]
 pub struct Shelf {
     pub x: u32,
     pub y: u32,
@@ -30,7 +29,6 @@ pub struct Shelf {
 
 impl Shelf {
     // Include a transparent pixel on every side; failed allocations leave the shelf alone.
-    #[doc(hidden)]
     pub fn allocate(&mut self, width: u32, height: u32, bounds: [u32; 2]) -> Option<[u32; 2]> {
         let padded_width = width.checked_add(2)?;
         let padded_height = height.checked_add(2)?;
@@ -56,23 +54,15 @@ impl Shelf {
 
 /// A shelf-packed atlas with bounded growth. Clear it between frames to evict old glyphs.
 pub struct GlyphAtlas {
-    #[doc(hidden)]
     pub width: u32,
-    #[doc(hidden)]
     pub height: u32,
-    #[doc(hidden)]
     pub pixels: Vec<u8>,
-    #[doc(hidden)]
     pub dirty: bool,
-    #[doc(hidden)]
     pub full_upload: bool,
-    #[doc(hidden)]
     pub dirty_rect: Option<[u32; 4]>,
     shelf: Shelf,
     // Fast L1 array cache for ASCII characters (0..127) across 4 styles (0..3).
-    #[doc(hidden)]
     pub ascii_cache: [Option<CachedGlyph>; 128 * 4],
-    #[doc(hidden)]
     pub cache: HashMap<(char, u8), CachedGlyph>,
 }
 
@@ -100,7 +90,6 @@ impl GlyphAtlas {
         }
     }
 
-    #[doc(hidden)]
     pub fn clear(&mut self) {
         self.pixels.fill(0);
         self.cache.clear();
@@ -194,7 +183,6 @@ impl GlyphAtlas {
     }
 
     /// Looks up a glyph without modifying the atlas, for use after frame preparation.
-    #[doc(hidden)]
     pub fn get(&self, c: char, flags: CellFlags, _fonts: &FontManager) -> Option<CachedGlyph> {
         let style = style_index(flags) as u8;
         if c.is_ascii() && (style as usize) < 4 {
