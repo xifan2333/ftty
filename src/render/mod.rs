@@ -30,7 +30,6 @@ const MAX_RENDER_CACHE_ROWS: usize = 512;
 // Retained capacity cap for the image vertex staging buffer. A single dense placeholder frame can
 // grow the buffer to tens of thousands of floats; without a cap that peak allocation would stay
 // resident forever. Anything above the cap is dropped at the end of the draw instead of recycled.
-#[doc(hidden)]
 pub const MAX_RETAINED_IMAGE_VERTEX_FLOATS: usize = 16 * 1024;
 
 /// Owns GL objects together with their EGL context, including on initialization failure.

@@ -12,11 +12,8 @@ use super::keys::{KeyAction, KittyKeyboardFlags, Modifiers, canonicalize_sym, is
 
 /// Handles key events and produces VT escape sequences or UTF-8 byte streams.
 pub struct KeyboardHandler {
-    #[doc(hidden)]
     pub context: Context,
-    #[doc(hidden)]
     pub keymap: Option<Keymap>,
-    #[doc(hidden)]
     pub state: Option<State>,
     pub kitty_flags: u8,
     pub kitty_stack: Vec<u8>,
@@ -189,7 +186,6 @@ impl KeyboardHandler {
         }
     }
 
-    #[doc(hidden)]
     pub fn encode_kitty_key(
         &self,
         sym: u32,

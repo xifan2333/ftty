@@ -11,7 +11,6 @@ const MAX_APC_PAYLOAD: usize = 32 * 1024 * 1024;
 
 /// Upper bound on the clean-output scratch buffer retained for reuse. PTY reads are 64 KiB, so a
 /// normal buffer is always recycled; anything larger is dropped instead of pinned indefinitely.
-#[doc(hidden)]
 #[cfg(test)]
 pub const MAX_RECYCLED_CLEAN_BYTES: usize = 256 * 1024;
 
@@ -30,7 +29,6 @@ fn may_contain_kitty_apc(bytes: &[u8]) -> bool {
 /// State machine intercepting Kitty APC graphics sequences (`\x1b_G...;payload\x1b\`) from the byte stream.
 #[derive(Default)]
 pub struct KittyParser {
-    #[doc(hidden)]
     pub in_apc: bool,
     apc_buffer: Vec<u8>,
     pub(crate) pending_stream: Vec<u8>,

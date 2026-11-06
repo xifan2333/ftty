@@ -22,7 +22,6 @@ pub use row::Row;
 
 pub(crate) use std::cell::Cell as DirtyCell;
 
-#[doc(hidden)]
 pub const MAX_ROW_POOL_CAPACITY: usize = 64;
 
 /// 2D Screen grid with scrollback history and alternate screen support.
@@ -54,7 +53,6 @@ pub struct Grid {
     pub(crate) alt_saved_cursor: Option<Cursor>,
 
     // Recycling pool for evicted or discarded rows to eliminate Vec<Cell> allocations.
-    #[doc(hidden)]
     pub row_pool: Vec<Row>,
 
     /// Root cell of the grapheme cluster currently receiving attachments.
@@ -105,7 +103,6 @@ impl Grid {
     ///
     /// If the pool reaches [`MAX_ROW_POOL_CAPACITY`], the incoming row is dropped without allocation.
     /// Cell reset is deferred until checkout via [`alloc_row`] or rotation reset to avoid double clears.
-    #[doc(hidden)]
     pub fn recycle_row(&mut self, row: Row) {
         if self.row_pool.len() < MAX_ROW_POOL_CAPACITY {
             self.row_pool.push(row);
@@ -115,7 +112,6 @@ impl Grid {
     /// Obtains a row from the buffer pool or allocates a new one, ensuring the returned
     /// row matches `cols` and has all cells reset to default.
     #[must_use]
-    #[doc(hidden)]
     pub fn alloc_row(&mut self, cols: usize) -> Row {
         self.alloc_row_with_bg(cols, Color::DefaultBackground)
     }

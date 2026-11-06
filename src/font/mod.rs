@@ -30,7 +30,6 @@ pub struct CellMetrics {
 
 /// Stable identity of a rasterized glyph: which face supplied it and in which style.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[doc(hidden)]
 pub struct FaceKey {
     /// `0` is the styled primary face; `1..=num_fallbacks` is a user fallback; subsequent values select dynamic fallbacks.
     pub face: u16,
@@ -40,7 +39,6 @@ pub struct FaceKey {
 
 /// An immutable chain of font faces for a single style (Regular, Bold, Italic, or BoldItalic).
 #[derive(Clone)]
-#[doc(hidden)]
 pub struct StyleChain {
     pub primary: Font,
     pub fallbacks: Vec<Font>,
@@ -60,13 +58,11 @@ pub(crate) fn style_index(flags: CellFlags) -> usize {
 
 /// Loads configured font chain and on-demand fallback faces with cell metrics calculation.
 pub struct FontManager {
-    #[doc(hidden)]
     pub regular: StyleChain,
     regular_slots: Vec<Option<Font>>,
     chains: RefCell<[Option<StyleChain>; 4]>,
     fallbacks: RefCell<FallbackCache>,
     families: Vec<String>,
-    #[doc(hidden)]
     pub font_size: f32,
     pub subpixel: bool,
     pub bgr: bool,
@@ -301,7 +297,6 @@ impl FontManager {
             .unwrap_or_else(|| self.regular.primary.clone())
     }
 
-    #[doc(hidden)]
     pub fn regular(&self) -> Font {
         self.regular.primary.clone()
     }
@@ -309,7 +304,6 @@ impl FontManager {
     /// Resolves a character to the face that can actually render it.
     ///
     /// Glyph index `0` is `.notdef`, so a zero index means "no face has this glyph".
-    #[doc(hidden)]
     pub fn face_key(&self, c: char, flags: CellFlags) -> FaceKey {
         let style = (style_index(flags) as u8).min(3);
         self.ensure_chain(style);
@@ -360,7 +354,6 @@ impl FontManager {
     }
 
     /// Rasterizes a resolved glyph.
-    #[doc(hidden)]
     pub fn rasterize(&self, key: FaceKey) -> RasterizedGlyph {
         if key.glyph == 0 {
             return RasterizedGlyph::empty();

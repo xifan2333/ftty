@@ -178,7 +178,6 @@ impl AppState {
     ///
     /// Mouse reports are suppressed while tracking is disabled and while Shift is held,
     /// which is the conventional override that hands the pointer back to text selection.
-    #[doc(hidden)]
     pub fn mouse_report_bytes(&self, button: u8, pressed: bool, motion: bool) -> Option<Vec<u8>> {
         let resolver = |id: u32| self.session.terminal.hyperlink_url(id);
         let ctx = self.pointer_ctx(Some(&resolver));

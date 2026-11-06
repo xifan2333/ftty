@@ -12,7 +12,6 @@ use vte::{Params, Perform};
 
 pub use vte::Parser;
 
-#[doc(hidden)]
 pub const MAX_HYPERLINKS: usize = 1024;
 
 /// Semantic shell integration state reported through OSC 133.
@@ -82,11 +81,8 @@ pub struct Terminal {
     pub(crate) next_hyperlink_id: u32,
     /// O(1) interning tables for OSC 8 hyperlink URLs. A single `Rc<str>` allocation is shared
     /// between both maps, and `hyperlink_order` tracks FIFO eviction order.
-    #[doc(hidden)]
     pub hyperlinks_by_url: HashMap<Rc<str>, u32>,
-    #[doc(hidden)]
     pub hyperlinks_by_id: HashMap<u32, Rc<str>>,
-    #[doc(hidden)]
     pub hyperlink_order: VecDeque<u32>,
     /// Active flags for the Kitty keyboard protocol.
     pub kitty_keyboard_flags: u8,

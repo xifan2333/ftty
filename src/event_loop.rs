@@ -38,15 +38,12 @@ pub struct AppState {
     pub pending_offers: Vec<crate::wayland::OfferData>,
     pub running: bool,
     pub needs_redraw: bool,
-    #[doc(hidden)]
     pub frame_callback: Option<WlCallback>,
-    #[doc(hidden)]
     pub pending_size: Option<[u32; 2]>,
     /// Set by an `xdg_surface.configure`; the resize is applied once the queue is drained so a
     /// burst of configures collapses into a single, final size.
     pub(crate) configure_pending: bool,
     pub(crate) render_error: Option<FttyError>,
-    #[doc(hidden)]
     pub pty_registered: bool,
     pub(crate) last_activity: std::time::Instant,
     pub(crate) last_trim: std::time::Instant,
@@ -204,7 +201,6 @@ impl AppState {
     }
 
     #[must_use]
-    #[doc(hidden)]
     pub fn should_register_pty(&self) -> bool {
         !self.pty_registered && self.wayland.configured
     }
@@ -513,7 +509,6 @@ impl AppState {
         Ok(())
     }
 
-    #[doc(hidden)]
     pub fn configure_renderer(&mut self, connection: &Connection) -> Result<(), FttyError> {
         let logical_size = self
             .pending_size

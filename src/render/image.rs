@@ -27,7 +27,6 @@ pub fn placeholder_image_id(color: Color) -> u32 {
 /// An id that already equals its own low 24 bits takes precedence over any aliasing id that
 /// only shares the same low 24 bits, matching the Kitty unicode-placeholder lookup rules.
 #[must_use]
-#[doc(hidden)]
 pub fn build_low24_index(texture_ids: impl Iterator<Item = u32>) -> HashMap<u32, u32> {
     let mut index: HashMap<u32, u32> = HashMap::new();
     for texture_id in texture_ids {
@@ -45,7 +44,6 @@ pub fn build_low24_index(texture_ids: impl Iterator<Item = u32>) -> HashMap<u32,
 /// Returns `buffer` unchanged when its capacity is within the retention cap, otherwise a fresh
 /// small vector so oversized transient allocations are deterministically released.
 #[must_use]
-#[doc(hidden)]
 pub fn bounded_image_vertex_buffer(buffer: Vec<f32>) -> Vec<f32> {
     if buffer.capacity() <= MAX_RETAINED_IMAGE_VERTEX_FLOATS {
         buffer

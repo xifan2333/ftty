@@ -12,14 +12,12 @@ use nix::sys::stat::Mode;
 
 use super::model::{ImageData, KittyCommand, KittyCompression, KittyFormat, KittyMedium};
 
-#[doc(hidden)]
 pub const MAX_SHM_PAYLOAD: u64 = 32 * 1024 * 1024;
 
 /// Upper bound for a zlib-compressed payload after inflation. This matches the
 /// grid's total image budget so a crafted stream cannot exhaust memory.
 pub const MAX_DECOMPRESSED_PAYLOAD: usize = 64 * 1024 * 1024;
 
-#[doc(hidden)]
 pub fn decode_image_data(id: u32, cmd: &KittyCommand, raw_payload: &[u8]) -> io::Result<ImageData> {
     if let Some(error) = cmd.error {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, error));
@@ -224,7 +222,6 @@ fn inflate_zlib(bytes: &[u8]) -> io::Result<Vec<u8>> {
     Ok(output)
 }
 
-#[doc(hidden)]
 #[cfg(test)]
 pub fn read_shm_payload(name: &str) -> io::Result<Vec<u8>> {
     let file = fs::File::from(shm_open(name, OFlag::O_RDONLY, Mode::empty())?);
@@ -232,7 +229,6 @@ pub fn read_shm_payload(name: &str) -> io::Result<Vec<u8>> {
     read_shm_bytes(file, size)
 }
 
-#[doc(hidden)]
 #[cfg(test)]
 pub fn read_shm_bytes(mut file: fs::File, size: u64) -> io::Result<Vec<u8>> {
     if size > MAX_SHM_PAYLOAD {

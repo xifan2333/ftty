@@ -11,10 +11,8 @@ use fontconfig::{CharSet, Fontconfig, Pattern};
 use super::face::Font;
 
 pub(crate) const MAX_FALLBACK_FACES: usize = 64;
-#[doc(hidden)]
 pub const MAX_RESOLVED_CACHE: usize = 4096;
 
-#[doc(hidden)]
 pub struct FallbackFace {
     pub path: PathBuf,
     pub index: u32,
@@ -23,13 +21,9 @@ pub struct FallbackFace {
 }
 
 #[derive(Default)]
-#[doc(hidden)]
 pub struct FallbackCache {
-    #[doc(hidden)]
     pub faces: Vec<FallbackFace>,
-    #[doc(hidden)]
     pub resolved: HashMap<(char, u8), Option<(u16, u16)>>,
-    #[doc(hidden)]
     pub resolved_order: VecDeque<(char, u8)>,
 }
 
@@ -51,7 +45,6 @@ impl FallbackCache {
         self.faces.len() - 1
     }
 
-    #[doc(hidden)]
     pub fn resolve(&mut self, c: char, style: u8, preferred_family: &str) -> Option<(u16, u16)> {
         let key = (c, style);
         if let Some(cached) = self.resolved.get(&key) {
@@ -124,13 +117,11 @@ impl FallbackCache {
     }
 }
 
-#[doc(hidden)]
 pub fn fontconfig() -> Option<&'static Fontconfig> {
     static FC: OnceLock<Option<Fontconfig>> = OnceLock::new();
     FC.get_or_init(Fontconfig::new).as_ref()
 }
 
-#[doc(hidden)]
 pub fn match_family(
     fc: &Fontconfig,
     family_name: &str,
@@ -225,13 +216,11 @@ pub(crate) fn query_fontconfig_candidates(
     None
 }
 
-#[doc(hidden)]
 #[cfg(test)]
 pub fn load_font_bytes(bytes: &[u8], collection_index: u32) -> io::Result<Font> {
     Font::from_bytes(bytes, collection_index)
 }
 
-#[doc(hidden)]
 pub fn load_font_file(path: &Path, collection_index: u32) -> io::Result<Font> {
     Font::from_file(path, collection_index)
 }
