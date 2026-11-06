@@ -3,7 +3,7 @@
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape;
 
 use crate::font::CellMetrics;
-use crate::grid::{CellFlags, Grid, Row};
+use crate::grid::{CellFlags, Grid};
 use crate::input::Modifiers;
 use crate::input::mouse::{MouseModifiers, MouseState, encode_mouse_event};
 use crate::input::selection::{Selection, SelectionPoint, SelectionType, find_word_boundaries};
@@ -696,7 +696,8 @@ pub fn find_url_in_grid(
 
 /// Extracts a plaintext URL and its column span on a given row if `col` falls within it.
 #[must_use]
-pub fn find_url_at_col(row: &Row, col: usize) -> Option<(usize, usize, String)> {
+#[cfg(test)]
+pub fn find_url_at_col(row: &crate::grid::Row, col: usize) -> Option<(usize, usize, String)> {
     let mut grid = Grid::new(row.cells.len(), 1, 0);
     grid.lines[0] = row.clone();
     find_url_in_grid(&grid, 0, 0, col)

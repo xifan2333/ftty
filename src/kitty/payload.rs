@@ -225,6 +225,7 @@ fn inflate_zlib(bytes: &[u8]) -> io::Result<Vec<u8>> {
 }
 
 #[doc(hidden)]
+#[cfg(test)]
 pub fn read_shm_payload(name: &str) -> io::Result<Vec<u8>> {
     let file = fs::File::from(shm_open(name, OFlag::O_RDONLY, Mode::empty())?);
     let size = file.metadata()?.len();
@@ -232,6 +233,7 @@ pub fn read_shm_payload(name: &str) -> io::Result<Vec<u8>> {
 }
 
 #[doc(hidden)]
+#[cfg(test)]
 pub fn read_shm_bytes(mut file: fs::File, size: u64) -> io::Result<Vec<u8>> {
     if size > MAX_SHM_PAYLOAD {
         return Err(io::Error::new(

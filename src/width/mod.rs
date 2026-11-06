@@ -30,6 +30,7 @@ pub fn wcwidth(c: char, ambiguous_width: u8) -> i32 {
 
 /// Width of a string in terminal columns.
 #[must_use]
+#[cfg(test)]
 pub fn wcswidth(text: &str, ambiguous_width: u8) -> i32 {
     if text.is_ascii() && text.bytes().all(|b| (0x20..0x7F).contains(&b)) {
         return text.len() as i32;

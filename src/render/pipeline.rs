@@ -81,12 +81,6 @@ impl RenderPipeline {
         self.last_preedit = None;
     }
 
-    /// Read-only reference to the latest generated render batch.
-    #[must_use]
-    pub fn batch(&self) -> &RenderBatch {
-        &self.batch
-    }
-
     /// Read-only slice of vertex floats in the current batch.
     #[must_use]
     pub fn vertices(&self) -> &[f32] {
@@ -95,6 +89,7 @@ impl RenderPipeline {
 
     /// Number of static row vertices in the current batch.
     #[must_use]
+    #[cfg(test)]
     pub fn static_vertices_len(&self) -> usize {
         self.batch.static_vertices_len
     }
@@ -105,22 +100,11 @@ impl RenderPipeline {
         self.batch.clear_color
     }
 
-    /// Viewport size in pixels for the current batch: `[width, height]`.
-    #[must_use]
-    pub fn viewport_size(&self) -> [i32; 2] {
-        self.batch.viewport_size
-    }
-
     /// Whether the current batch requires a full VBO upload.
     #[must_use]
+    #[cfg(test)]
     pub fn vbo_full_upload(&self) -> bool {
         self.batch.vbo_full_upload
-    }
-
-    /// Whether the glyph atlas was repacked during this frame.
-    #[must_use]
-    pub fn atlas_repacked(&self) -> bool {
-        self.batch.atlas_repacked
     }
 
     /// Prepares a full frame render batch, incrementally regenerating only modified rows.

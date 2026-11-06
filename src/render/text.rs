@@ -589,6 +589,7 @@ pub fn build_dynamic_overlays(vertices: &mut Vec<f32>, ctx: &RenderContext<'_>) 
 }
 
 #[doc(hidden)]
+#[cfg(test)]
 pub fn build_vertices(
     vertices: &mut Vec<f32>,
     grid: &Grid,

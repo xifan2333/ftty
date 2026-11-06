@@ -209,6 +209,9 @@ impl CommandDef {
     }
 }
 
+// Variant names double as the TOML config surface (`rename_all = "snake_case"`), so
+// keeping the `Pipe` prefix preserves configuration compatibility.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PipeActionDef {

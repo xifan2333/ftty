@@ -12,6 +12,7 @@ const MAX_APC_PAYLOAD: usize = 32 * 1024 * 1024;
 /// Upper bound on the clean-output scratch buffer retained for reuse. PTY reads are 64 KiB, so a
 /// normal buffer is always recycled; anything larger is dropped instead of pinned indefinitely.
 #[doc(hidden)]
+#[cfg(test)]
 pub const MAX_RECYCLED_CLEAN_BYTES: usize = 256 * 1024;
 
 #[inline]
@@ -38,9 +39,9 @@ pub struct KittyParser {
     next_image_id: u32,
     /// Latest image id allocated for each client-supplied `I=` image number.
     image_numbers: HashMap<u32, u32>,
-    #[doc(hidden)]
+    #[cfg(test)]
     pub clean_scratch: Vec<u8>,
-    #[doc(hidden)]
+    #[cfg(test)]
     pub events_scratch: Vec<KittyEvent>,
 }
 
@@ -181,6 +182,7 @@ impl KittyParser {
     /// Non-graphics bytes are returned in the first vector to be processed by the standard VT parser.
     /// Events are transferred without cloning nested image buffers, and internal event storage
     /// is left empty to avoid retaining image payloads in parser memory.
+    #[cfg(test)]
     pub fn filter_bytes(&mut self, incoming: &[u8]) -> (Vec<u8>, Vec<KittyEvent>) {
         if self.is_fast_path(incoming) {
             return (incoming.to_vec(), Vec::new());
@@ -205,6 +207,7 @@ impl KittyParser {
     /// The cleaned bytes are transferred by move as the parser's own scratch buffer rather than
     /// cloned. Hot-path callers must return that buffer via [`Self::recycle_clean_buffer`] once the
     /// bytes have been consumed so its capacity can be reused.
+    #[cfg(test)]
     pub fn filter_bytes_slow(&mut self, incoming: &[u8]) -> (Vec<u8>, Vec<KittyEvent>) {
         self.filter_internal(incoming);
         let text = std::mem::take(&mut self.clean_scratch);
@@ -216,6 +219,7 @@ impl KittyParser {
     ///
     /// Capacity is retained only while it stays within [`MAX_RECYCLED_CLEAN_BYTES`]; larger
     /// transient buffers are dropped to avoid pinning peak allocations.
+    #[cfg(test)]
     pub fn recycle_clean_buffer(&mut self, mut buffer: Vec<u8>) {
         buffer.clear();
         self.clean_scratch = if buffer.capacity() <= MAX_RECYCLED_CLEAN_BYTES {
@@ -225,6 +229,7 @@ impl KittyParser {
         };
     }
 
+    #[cfg(test)]
     fn filter_internal(&mut self, incoming: &[u8]) {
         let mut clean = std::mem::take(&mut self.clean_scratch);
         let mut events = std::mem::take(&mut self.events_scratch);
@@ -409,6 +414,7 @@ fn kitty_error_response(
 ///
 /// The wire format is `<ESC>_Gi=<id>[,p=<placement id>];<message><ESC>\\` per official Kitty graphics specification.
 #[must_use]
+#[cfg(test)]
 pub fn kitty_response(image_id: u32, placement_id: Option<u32>, message: &str) -> Vec<u8> {
     kitty_response_full(image_id, None, placement_id, message)
 }

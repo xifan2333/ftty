@@ -226,6 +226,7 @@ pub(crate) fn query_fontconfig_candidates(
 }
 
 #[doc(hidden)]
+#[cfg(test)]
 pub fn load_font_bytes(bytes: &[u8], collection_index: u32) -> io::Result<Font> {
     Font::from_bytes(bytes, collection_index)
 }
