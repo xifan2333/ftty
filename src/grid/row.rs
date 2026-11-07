@@ -37,7 +37,12 @@ impl Row {
     pub fn resize(&mut self, new_cols: usize) {
         if new_cols < self.cells.len() {
             // Prevent splitting a wide character across the truncation boundary.
-            if new_cols > 0 {
+            // Only sever when the truncated cell is a primary WIDE_CHAR whose spacer is dropped.
+            if new_cols > 0
+                && self.cells[new_cols - 1]
+                    .flags
+                    .contains(CellFlags::WIDE_CHAR)
+            {
                 self.sever_wide_at(new_cols - 1);
             }
             self.cells.truncate(new_cols);
