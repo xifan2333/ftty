@@ -12,6 +12,7 @@ pub mod ime;
 pub mod mouse;
 pub mod pointer;
 pub mod selection;
+pub mod url;
 
 pub use keyboard::KeyboardHandler;
 pub use keys::{KeyAction, Modifiers, canonicalize_sym, parse_key_combo};
@@ -1358,6 +1359,154 @@ mod tests {
             // Middle click triggers primary paste
             let middle = controller.handle_button(0x112, true, 200, 3, &ctx);
             assert!(middle.paste_primary);
+        }
+
+        #[test]
+        fn test_find_url_rfc3986_cjk_boundary_and_punctuation() {
+            use crate::input::pointer::find_url_in_grid;
+
+            // 1. URL immediately followed by CJK text with no whitespace
+            let text1 = "打开https://github.com/xifan2333/ftty这是项目仓库";
+            let mut grid1 = Grid::new(60, 1, 0);
+            for (i, c) in text1.chars().enumerate() {
+                grid1.lines[0].cells[i].c = c;
+            }
+            // Clicking on "https://..." (col 10) extracts ONLY the ASCII URL
+            let hit1 = find_url_in_grid(&grid1, 0, 0, 10);
+            assert!(hit1.is_some());
+            let (min_col1, max_col1, url1) = hit1.unwrap();
+            assert_eq!(url1, "https://github.com/xifan2333/ftty");
+            assert_eq!(min_col1, 2);
+            assert_eq!(max_col1, 34);
+
+            // Clicking on the trailing CJK text "这" (col 35) must NOT hit the URL
+            assert_eq!(find_url_in_grid(&grid1, 0, 0, 35), None);
+
+            // 2. URL followed by full-width punctuation (，and 。)
+            let text2 = "请访问https://example.com/api，了解更多。";
+            let mut grid2 = Grid::new(60, 1, 0);
+            for (i, c) in text2.chars().enumerate() {
+                grid2.lines[0].cells[i].c = c;
+            }
+            let hit2 = find_url_in_grid(&grid2, 0, 0, 12);
+            assert!(hit2.is_some());
+            let (min_col2, max_col2, url2) = hit2.unwrap();
+            assert_eq!(url2, "https://example.com/api");
+            assert_eq!(min_col2, 3);
+            assert_eq!(max_col2, 25);
+
+            // Full-width comma (col 26) must not be part of the URL
+            assert_eq!(find_url_in_grid(&grid2, 0, 0, 26), None);
+        }
+
+        #[test]
+        fn test_find_url_deeplink_schemes() {
+            use crate::input::pointer::find_url_in_grid;
+
+            let test_cases = [
+                (
+                    "vscode://file/home/user/project/main.rs:10:5",
+                    "vscode://file/home/user/project/main.rs:10:5",
+                ),
+                (
+                    "cursor://file/home/user/main.rs",
+                    "cursor://file/home/user/main.rs",
+                ),
+                (
+                    "idea://open?file=test.rs&line=42",
+                    "idea://open?file=test.rs&line=42",
+                ),
+                (
+                    "obsidian://open?vault=work&file=index",
+                    "obsidian://open?vault=work&file=index",
+                ),
+                (
+                    "git://github.com/xifan2333/ftty.git",
+                    "git://github.com/xifan2333/ftty.git",
+                ),
+                ("docker://container/a1b2c3d4", "docker://container/a1b2c3d4"),
+            ];
+
+            for (raw, expected) in test_cases {
+                let mut grid = Grid::new(80, 1, 0);
+                for (i, c) in raw.chars().enumerate() {
+                    grid.lines[0].cells[i].c = c;
+                }
+                let hit = find_url_in_grid(&grid, 0, 0, 2);
+                assert!(hit.is_some(), "failed to extract scheme from {raw}");
+                let (_, _, url) = hit.unwrap();
+                assert_eq!(url, expected);
+            }
+        }
+
+        #[test]
+        fn test_find_url_balanced_delimiters_and_trailing_punctuation() {
+            use crate::input::pointer::find_url_in_grid;
+
+            // Wikipedia URL with internal parentheses: preserve closing paren
+            let wiki = "See https://en.wikipedia.org/wiki/Rust_(programming_language) for info";
+            let mut grid_wiki = Grid::new(80, 1, 0);
+            for (i, c) in wiki.chars().enumerate() {
+                grid_wiki.lines[0].cells[i].c = c;
+            }
+            let hit_wiki = find_url_in_grid(&grid_wiki, 0, 0, 10).unwrap();
+            assert_eq!(
+                hit_wiki.2,
+                "https://en.wikipedia.org/wiki/Rust_(programming_language)"
+            );
+
+            // Outer parentheses: strip unbalanced outer closing paren
+            let paren = "Documentation at (https://example.com/docs).";
+            let mut grid_paren = Grid::new(80, 1, 0);
+            for (i, c) in paren.chars().enumerate() {
+                grid_paren.lines[0].cells[i].c = c;
+            }
+            let hit_paren = find_url_in_grid(&grid_paren, 0, 0, 20).unwrap();
+            assert_eq!(hit_paren.2, "https://example.com/docs");
+
+            // Outer brackets: markdown style
+            let bracket = "[https://example.com/repo]";
+            let mut grid_bracket = Grid::new(80, 1, 0);
+            for (i, c) in bracket.chars().enumerate() {
+                grid_bracket.lines[0].cells[i].c = c;
+            }
+            let hit_bracket = find_url_in_grid(&grid_bracket, 0, 0, 5).unwrap();
+            assert_eq!(hit_bracket.2, "https://example.com/repo");
+
+            // Compound trailing punctuation: comma inside paren `https://example.com/api,)`
+            let compound = "Call (https://example.com/api,) now";
+            let mut grid_compound = Grid::new(80, 1, 0);
+            for (i, c) in compound.chars().enumerate() {
+                grid_compound.lines[0].cells[i].c = c;
+            }
+            let hit_compound = find_url_in_grid(&grid_compound, 0, 0, 10).unwrap();
+            assert_eq!(hit_compound.2, "https://example.com/api");
+        }
+
+        #[test]
+        fn test_find_url_invalid_or_bare_schemes() {
+            use crate::input::pointer::find_url_in_grid;
+
+            // Bare scheme with no host
+            let mut grid1 = Grid::new(40, 1, 0);
+            for (i, c) in "just http:// in text".chars().enumerate() {
+                grid1.lines[0].cells[i].c = c;
+            }
+            assert_eq!(find_url_in_grid(&grid1, 0, 0, 7), None);
+
+            // Numeric starting scheme (RFC 3986 requires ALPHA start)
+            let mut grid2 = Grid::new(40, 1, 0);
+            for (i, c) in "123://example.com".chars().enumerate() {
+                grid2.lines[0].cells[i].c = c;
+            }
+            assert_eq!(find_url_in_grid(&grid2, 0, 0, 2), None);
+
+            // Double colon in Rust/C++ code
+            let mut grid3 = Grid::new(40, 1, 0);
+            for (i, c) in "std::io::Result".chars().enumerate() {
+                grid3.lines[0].cells[i].c = c;
+            }
+            assert_eq!(find_url_in_grid(&grid3, 0, 0, 4), None);
         }
     }
 }

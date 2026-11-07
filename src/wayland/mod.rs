@@ -578,10 +578,16 @@ mod tests {
         grid.lines[0].cells[21].c = ' ';
         grid.lines[0].cells[21].flags = CellFlags::WIDE_CHAR_SPACER;
 
+        // Col 5 is within "https://example.com/", which terminates before the wide CJK char '文'
         let hit = find_url_in_grid(&grid, 0, 0, 5);
         assert!(hit.is_some());
-        let (_, _, url) = hit.unwrap();
-        assert_eq!(url, "https://example.com/文");
+        let (min_col, max_col, url) = hit.unwrap();
+        assert_eq!(url, "https://example.com/");
+        assert_eq!(min_col, 0);
+        assert_eq!(max_col, 19);
+
+        // Col 20 is on '文', which is non-ASCII text following the URL and must not be hit
+        assert_eq!(find_url_in_grid(&grid, 0, 0, 20), None);
 
         let mut grid_hidden = Grid::new(30, 1, 0);
         for (i, c) in "https://secret.com/page".chars().enumerate() {
