@@ -33,6 +33,7 @@ nix = { version = "0.31", default-features = false, features = [
   "mman",
 ] }
 png = "0.18.1"
+regex = { version = "1.11", default-features = false, features = ["std", "perf", "unicode-perl"] }
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.6"
 unicode-segmentation = "1.12"
