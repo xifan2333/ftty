@@ -765,10 +765,17 @@ impl Grid {
             let chunk = &rest[..take];
             rest = &rest[take..];
 
-            // Following Contour: cleanly sever wide characters at both boundaries of the run
+            // Following Contour: cleanly sever wide characters touching the run boundaries.
+            // At the left boundary (col), any wide character or spacer being overwritten is severed.
+            // At the right boundary (col + take), only an orphaned spacer whose leading character
+            // was overwritten by the run is severed; intact wide characters starting at col + take are preserved.
             let row_line = &mut self.lines[row];
             row_line.sever_wide_at(col);
-            if col + take < self.cols {
+            if col + take < self.cols
+                && row_line.cells[col + take]
+                    .flags
+                    .contains(CellFlags::WIDE_CHAR_SPACER)
+            {
                 row_line.sever_wide_at(col + take);
             }
 
@@ -3167,6 +3174,86 @@ mod tests {
         assert_eq!(grid.lines[0].cells[5].bg, bg);
         assert_eq!(grid.lines[0].cells[6].c, '微');
         assert_eq!(grid.lines[0].cells[6].bg, bg);
+    }
+
+    #[test]
+    fn test_ascii_run_immediately_before_wide_char_preserves_wide_char() {
+        let fg = Color::DefaultForeground;
+        let bg = Color::DefaultBackground;
+        let mut grid = Grid::new(20, 1, 0);
+
+        // Initial state: write "dbus 的通讯"
+        // col 0..4: "dbus"
+        // col 4: ' '
+        // col 5..6: '的' (wide char and spacer)
+        grid.cursor.col = 5;
+        grid.write_char('的', fg, bg, CellFlags::empty());
+        assert_eq!(grid.lines[0].cells[5].c, '的');
+        assert!(
+            grid.lines[0].cells[6]
+                .flags
+                .contains(CellFlags::WIDE_CHAR_SPACER)
+        );
+
+        // Write an ASCII character 's' at col 4 (e.g. cursor moves back and redraws 's')
+        grid.cursor.col = 4;
+        grid.write_ascii_run(
+            b"s",
+            fg,
+            bg,
+            CellFlags::empty(),
+            Color::DefaultForeground,
+            None,
+        );
+        assert_eq!(grid.lines[0].cells[4].c, 's');
+
+        // '的' at col 5 and its spacer at col 6 MUST NOT be erased
+        assert_eq!(
+            grid.lines[0].cells[5].c, '的',
+            "wide char at col 5 must remain intact when writing at col 4"
+        );
+        assert!(grid.lines[0].cells[5].flags.contains(CellFlags::WIDE_CHAR));
+        assert!(
+            grid.lines[0].cells[6]
+                .flags
+                .contains(CellFlags::WIDE_CHAR_SPACER)
+        );
+    }
+
+    #[test]
+    fn test_row_resize_preserves_wide_char_pair_ending_within_boundary() {
+        let fg = Color::DefaultForeground;
+        let bg = Color::Rgb(37, 65, 49);
+        let mut row = Row::blank(12, bg);
+        // Wide char '中' at cols 8..9
+        row.cells[8] = Cell {
+            c: '中',
+            fg,
+            bg,
+            underline_color: fg,
+            flags: CellFlags::WIDE_CHAR,
+            hyperlink_id: None,
+        };
+        row.cells[9] = Cell {
+            c: ' ',
+            fg,
+            bg,
+            underline_color: fg,
+            flags: CellFlags::WIDE_CHAR_SPACER,
+            hyperlink_id: None,
+        };
+
+        // Resize to 10 cols: cols 8 and 9 are both kept! '中' must NOT be severed
+        row.resize(10);
+        assert_eq!(row.cells[8].c, '中');
+        assert!(row.cells[8].flags.contains(CellFlags::WIDE_CHAR));
+        assert!(row.cells[9].flags.contains(CellFlags::WIDE_CHAR_SPACER));
+
+        // Resize to 9 cols: col 9 (spacer) is truncated! '中' at col 8 must be cleanly severed to space
+        row.resize(9);
+        assert_eq!(row.cells[8].c, ' ');
+        assert_eq!(row.cells[8].flags, CellFlags::empty());
+        assert_eq!(row.cells[8].bg, bg);
     }
 
     #[test]
