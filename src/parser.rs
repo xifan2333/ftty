@@ -93,46 +93,63 @@ pub struct Terminal {
 }
 
 #[inline(always)]
-fn find_printable_ascii_prefix(bytes: &[u8]) -> usize {
-    let mut i = 0;
+fn contains_non_printable_ascii_u64(chunk: u64) -> bool {
+    let lo = chunk.wrapping_sub(0x2020_2020_2020_2020);
+    let hi = 0x7e7e_7e7e_7e7e_7e7e_u64.wrapping_sub(chunk);
+    ((lo | hi) & 0x8080_8080_8080_8080) != 0
+}
+
+#[inline(always)]
+fn scan_chunk_non_printable(chunk: &[u8]) -> Option<usize> {
+    chunk.iter().position(|&b| !(0x20..=0x7e).contains(&b))
+}
+
+#[inline(always)]
+fn scan_16_prefix(bytes: &[u8], mut i: usize) -> Result<usize, usize> {
     while i + 16 <= bytes.len() {
-        let chunk0 = u64::from_le_bytes(match bytes[i..i + 8].try_into() {
-            Ok(arr) => arr,
-            Err(_) => break,
-        });
-        let chunk1 = u64::from_le_bytes(match bytes[i + 8..i + 16].try_into() {
-            Ok(arr) => arr,
-            Err(_) => break,
-        });
-        let lo0 = chunk0.wrapping_sub(0x2020_2020_2020_2020);
-        let hi0 = 0x7e7e_7e7e_7e7e_7e7e_u64.wrapping_sub(chunk0);
-        let lo1 = chunk1.wrapping_sub(0x2020_2020_2020_2020);
-        let hi1 = 0x7e7e_7e7e_7e7e_7e7e_u64.wrapping_sub(chunk1);
-        if (((lo0 | hi0) | (lo1 | hi1)) & 0x8080_8080_8080_8080) != 0 {
-            for j in 0..16 {
-                if !(0x20..=0x7e).contains(&bytes[i + j]) {
-                    return i + j;
-                }
-            }
+        let Ok(arr0) = bytes[i..i + 8].try_into() else {
+            break;
+        };
+        let Ok(arr1) = bytes[i + 8..i + 16].try_into() else {
+            break;
+        };
+        let chunk0 = u64::from_le_bytes(arr0);
+        let chunk1 = u64::from_le_bytes(arr1);
+        if contains_non_printable_ascii_u64(chunk0) || contains_non_printable_ascii_u64(chunk1) {
+            let offset = scan_chunk_non_printable(&bytes[i..i + 16]).unwrap_or(0);
+            return Err(i + offset);
         }
         i += 16;
     }
+    Ok(i)
+}
+
+#[inline(always)]
+fn scan_8_prefix(bytes: &[u8], mut i: usize) -> Result<usize, usize> {
     while i + 8 <= bytes.len() {
-        let chunk = u64::from_le_bytes(match bytes[i..i + 8].try_into() {
-            Ok(arr) => arr,
-            Err(_) => break,
-        });
-        let lo = chunk.wrapping_sub(0x2020_2020_2020_2020);
-        let hi = 0x7e7e_7e7e_7e7e_7e7e_u64.wrapping_sub(chunk);
-        if ((lo | hi) & 0x8080_8080_8080_8080) != 0 {
-            for j in 0..8 {
-                if !(0x20..=0x7e).contains(&bytes[i + j]) {
-                    return i + j;
-                }
-            }
+        let Ok(arr) = bytes[i..i + 8].try_into() else {
+            break;
+        };
+        let chunk = u64::from_le_bytes(arr);
+        if contains_non_printable_ascii_u64(chunk) {
+            let offset = scan_chunk_non_printable(&bytes[i..i + 8]).unwrap_or(0);
+            return Err(i + offset);
         }
         i += 8;
     }
+    Ok(i)
+}
+
+#[inline(always)]
+fn find_printable_ascii_prefix(bytes: &[u8]) -> usize {
+    let mut i = match scan_16_prefix(bytes, 0) {
+        Ok(idx) => idx,
+        Err(idx) => return idx,
+    };
+    i = match scan_8_prefix(bytes, i) {
+        Ok(idx) => idx,
+        Err(idx) => return idx,
+    };
     while i < bytes.len() && (0x20..=0x7e).contains(&bytes[i]) {
         i += 1;
     }
@@ -335,6 +352,86 @@ pub struct VtParser {
     pub(crate) in_escape: bool,
 }
 
+fn consume_escape_bytes(
+    parser: &mut Parser,
+    in_escape: &mut bool,
+    terminal: &mut Terminal,
+    bytes: &[u8],
+    mut idx: usize,
+) -> usize {
+    while idx < bytes.len() && *in_escape {
+        let mut performer = Performer {
+            terminal,
+            in_escape,
+        };
+        parser.advance(&mut performer, &bytes[idx..=idx]);
+        idx += 1;
+    }
+    idx
+}
+
+fn handle_control_byte(
+    parser: &mut Parser,
+    in_escape: &mut bool,
+    terminal: &mut Terminal,
+    remaining: &[u8],
+) -> usize {
+    match remaining[0] {
+        b'\n' | 0x0B | 0x0C => {
+            terminal.grid.newline_with_bg(terminal.active_bg);
+            terminal.grid.carriage_return();
+            1
+        }
+        b'\r' => {
+            terminal.grid.carriage_return();
+            1
+        }
+        b'\t' => {
+            terminal.grid.tab();
+            1
+        }
+        b'\x08' => {
+            terminal.grid.backspace();
+            1
+        }
+        b'\x07' => 1,
+        b'\x1b' => {
+            *in_escape = true;
+            if remaining.len() >= 2
+                && remaining[1] == b'['
+                && let Some(final_idx) = remaining[2..]
+                    .iter()
+                    .position(|&b| (0x40..=0x7e).contains(&b))
+            {
+                let end = 2 + final_idx;
+                let mut performer = Performer {
+                    terminal,
+                    in_escape,
+                };
+                parser.advance(&mut performer, &remaining[..=end]);
+                return end + 1;
+            }
+            let mut performer = Performer {
+                terminal,
+                in_escape,
+            };
+            parser.advance(&mut performer, &remaining[..1]);
+            1
+        }
+        byte => {
+            if (0x90..=0x9F).contains(&byte) {
+                *in_escape = true;
+            }
+            let mut performer = Performer {
+                terminal,
+                in_escape,
+            };
+            parser.advance(&mut performer, &remaining[..1]);
+            1
+        }
+    }
+}
+
 impl VtParser {
     #[must_use]
     pub fn new() -> Self {
@@ -361,14 +458,13 @@ impl VtParser {
         let mut idx = 0;
         while idx < bytes.len() {
             if self.in_escape {
-                while idx < bytes.len() && self.in_escape {
-                    let mut performer = Performer {
-                        terminal,
-                        in_escape: &mut self.in_escape,
-                    };
-                    self.parser.advance(&mut performer, &bytes[idx..=idx]);
-                    idx += 1;
-                }
+                idx = consume_escape_bytes(
+                    &mut self.parser,
+                    &mut self.in_escape,
+                    terminal,
+                    bytes,
+                    idx,
+                );
                 continue;
             }
 
@@ -411,64 +507,7 @@ impl VtParser {
                 continue;
             }
 
-            match remaining[0] {
-                b'\n' | 0x0B | 0x0C => {
-                    terminal.grid.newline_with_bg(terminal.active_bg);
-                    terminal.grid.carriage_return();
-                    idx += 1;
-                }
-                b'\r' => {
-                    terminal.grid.carriage_return();
-                    idx += 1;
-                }
-                b'\t' => {
-                    terminal.grid.tab();
-                    idx += 1;
-                }
-                b'\x08' => {
-                    terminal.grid.backspace();
-                    idx += 1;
-                }
-                b'\x07' => {
-                    idx += 1;
-                }
-                b'\x1b' => {
-                    self.in_escape = true;
-                    // Check if remaining slice starts with CSI ("\x1b[") and find its terminator (0x40..=0x7E)
-                    if remaining.len() >= 2
-                        && remaining[1] == b'['
-                        && let Some(final_idx) = remaining[2..]
-                            .iter()
-                            .position(|&b| (0x40..=0x7e).contains(&b))
-                    {
-                        let end = 2 + final_idx;
-                        let mut performer = Performer {
-                            terminal,
-                            in_escape: &mut self.in_escape,
-                        };
-                        self.parser.advance(&mut performer, &remaining[..=end]);
-                        idx += end + 1;
-                        continue;
-                    }
-                    let mut performer = Performer {
-                        terminal,
-                        in_escape: &mut self.in_escape,
-                    };
-                    self.parser.advance(&mut performer, &remaining[..1]);
-                    idx += 1;
-                }
-                byte => {
-                    if (0x90..=0x9F).contains(&byte) {
-                        self.in_escape = true;
-                    }
-                    let mut performer = Performer {
-                        terminal,
-                        in_escape: &mut self.in_escape,
-                    };
-                    self.parser.advance(&mut performer, &remaining[..1]);
-                    idx += 1;
-                }
-            }
+            idx += handle_control_byte(&mut self.parser, &mut self.in_escape, terminal, remaining);
         }
     }
 }
@@ -633,251 +672,176 @@ pub(crate) const MAX_KEYBOARD_STACK_DEPTH: usize = 64;
 /// 8 REPORT_ALL_KEYS_AS_ESC  16 REPORT_ASSOCIATED_TEXT
 pub(crate) const SUPPORTED_KITTY_FLAGS: u16 = 0x1F;
 
+fn erase_display_mode(first_param: u16) -> ClearMode {
+    match first_param {
+        1 => ClearMode::Above,
+        2 => ClearMode::All,
+        3 => ClearMode::Saved,
+        _ => ClearMode::Below,
+    }
+}
+
+fn erase_line_mode(first_param: u16) -> ClearMode {
+    match first_param {
+        1 => ClearMode::Above,
+        2 => ClearMode::All,
+        _ => ClearMode::Below,
+    }
+}
+
 impl Terminal {
-    pub(crate) fn handle_csi(
-        &mut self,
-        params: &Params,
-        intermediates: &[u8],
-        _ignore: bool,
-        action: char,
-    ) {
-        let is_private = intermediates.contains(&b'?');
-        let mut flat_params_buf = [0u16; 32];
-        let mut flat_len = 0;
-        for param in params.iter() {
-            for &val in param {
-                if flat_len < flat_params_buf.len() {
-                    flat_params_buf[flat_len] = val;
-                    flat_len += 1;
-                }
-            }
-        }
-        let flat_params = &flat_params_buf[..flat_len];
-
-        let first_param = flat_params.first().copied().unwrap_or(0);
-        let param_or = |default: usize| -> usize {
-            if first_param == 0 {
-                default
-            } else {
-                first_param as usize
-            }
+    fn decrqm_status(&self, mode: u16) -> u8 {
+        let is_set = match mode {
+            25 => self.grid.cursor.visible,
+            1004 => self.focus_reporting,
+            1049 => self.grid.is_alt_screen(),
+            2004 => self.bracketed_paste,
+            2026 => self.synchronized_output,
+            2031 => self.report_color_scheme,
+            2048 => self.report_window_size,
+            _ => return 0,
         };
+        if is_set { 1 } else { 2 }
+    }
 
-        if is_private {
-            if action == 'u' {
-                // CSI ? u - Query Kitty keyboard protocol flags
-                self.responses
-                    .push(format!("\x1b[?{}u", self.kitty_keyboard_flags).into_bytes());
-                return;
-            }
-            if intermediates.contains(&b'$') && action == 'p' {
-                // DECRQM - Request DEC Private Mode
-                for mode in flat_params {
-                    let status = match *mode {
-                        25 => {
-                            if self.grid.cursor.visible {
-                                1
-                            } else {
-                                2
-                            }
-                        }
-                        1004 => {
-                            if self.focus_reporting {
-                                1
-                            } else {
-                                2
-                            }
-                        }
-                        1049 => {
-                            if self.grid.is_alt_screen() {
-                                1
-                            } else {
-                                2
-                            }
-                        }
-                        2004 => {
-                            if self.bracketed_paste {
-                                1
-                            } else {
-                                2
-                            }
-                        }
-                        2026 => {
-                            if self.synchronized_output {
-                                1
-                            } else {
-                                2
-                            }
-                        }
-                        2031 => {
-                            if self.report_color_scheme {
-                                1
-                            } else {
-                                2
-                            }
-                        }
-                        2048 => {
-                            if self.report_window_size {
-                                1
-                            } else {
-                                2
-                            }
-                        }
-                        _ => 0, // Not recognized
-                    };
-                    self.responses
-                        .push(format!("\x1b[?{};{}$y", mode, status).into_bytes());
-                }
-                return;
-            }
-            if action == 'h' || action == 'l' {
-                let enabled = action == 'h';
-                for mode in flat_params {
-                    match *mode {
-                        25 => self.grid.cursor.visible = enabled,
-                        1049 => {
-                            if enabled {
-                                self.grid.enter_alt_screen();
-                            } else {
-                                self.grid.exit_alt_screen();
-                            }
-                        }
-                        1004 => self.focus_reporting = enabled,
-                        2004 => self.bracketed_paste = enabled,
-                        2026 => {
-                            if enabled {
-                                self.sync_output_gen = self.sync_output_gen.wrapping_add(1);
-                            }
-                            self.synchronized_output = enabled;
-                        }
-                        2031 => {
-                            self.report_color_scheme = enabled;
-                            if enabled {
-                                self.send_color_scheme_report();
-                            }
-                        }
-                        2048 => {
-                            self.report_window_size = enabled;
-                            if enabled {
-                                let current_size = (
-                                    [self.grid.rows, self.grid.cols],
-                                    [self.viewport_pixels[1], self.viewport_pixels[0]],
-                                );
-                                self.last_reported_window_size = Some(current_size);
-                                self.responses.push(
-                                    format!(
-                                        "\x1b[48;{};{};{};{}t",
-                                        self.grid.rows,
-                                        self.grid.cols,
-                                        self.viewport_pixels[1],
-                                        self.viewport_pixels[0]
-                                    )
-                                    .into_bytes(),
-                                );
-                            } else {
-                                self.last_reported_window_size = None;
-                            }
-                        }
-                        _ => {
-                            self.mouse.apply_private_mode(*mode, enabled);
-                        }
-                    }
+    fn apply_dec_private_mode(&mut self, mode: u16, enabled: bool) {
+        match mode {
+            25 => self.grid.cursor.visible = enabled,
+            1049 => {
+                if enabled {
+                    self.grid.enter_alt_screen();
+                } else {
+                    self.grid.exit_alt_screen();
                 }
             }
-            return;
+            1004 => self.focus_reporting = enabled,
+            2004 => self.bracketed_paste = enabled,
+            2026 => {
+                if enabled {
+                    self.sync_output_gen = self.sync_output_gen.wrapping_add(1);
+                }
+                self.synchronized_output = enabled;
+            }
+            2031 => {
+                self.report_color_scheme = enabled;
+                if enabled {
+                    self.send_color_scheme_report();
+                }
+            }
+            2048 => {
+                self.report_window_size = enabled;
+                if enabled {
+                    let current_size = (
+                        [self.grid.rows, self.grid.cols],
+                        [self.viewport_pixels[1], self.viewport_pixels[0]],
+                    );
+                    self.last_reported_window_size = Some(current_size);
+                    self.responses.push(
+                        format!(
+                            "\x1b[48;{};{};{};{}t",
+                            self.grid.rows,
+                            self.grid.cols,
+                            self.viewport_pixels[1],
+                            self.viewport_pixels[0]
+                        )
+                        .into_bytes(),
+                    );
+                } else {
+                    self.last_reported_window_size = None;
+                }
+            }
+            _ => {
+                self.mouse.apply_private_mode(mode, enabled);
+            }
         }
+    }
 
-        if action == 'q' && intermediates.contains(&b'>') && first_param == 0 {
-            // XTVERSION (CSI > q): identify the terminal for capability detection.
-            self.responses.push(
-                format!("\x1bP>|ftty-kitty({})\x1b\\", env!("CARGO_PKG_VERSION")).into_bytes(),
-            );
-            return;
-        }
-
+    fn handle_csi_private(&mut self, action: char, intermediates: &[u8], flat_params: &[u16]) {
         if action == 'u' {
-            if intermediates.contains(&b'>') && flat_params.len() <= 1 {
-                // CSI > flags u - Push Kitty keyboard flags
-                let raw = flat_params.first().copied().unwrap_or(0);
-                let flags = (raw & SUPPORTED_KITTY_FLAGS) as u8;
-                if self.kitty_keyboard_stack.len() >= MAX_KEYBOARD_STACK_DEPTH {
-                    self.kitty_keyboard_stack.remove(0);
-                }
-                self.kitty_keyboard_stack.push(self.kitty_keyboard_flags);
-                self.kitty_keyboard_flags = flags;
-                self.pending_kitty_keyboard = Some((flags, 1));
-                return;
-            } else if intermediates.contains(&b'=') || intermediates.contains(&b'>') {
-                // CSI = flags ; mode u  or  CSI > flags ; mode u
-                let raw = flat_params.first().copied().unwrap_or(0);
-                let flags = (raw & SUPPORTED_KITTY_FLAGS) as u8;
-                let mode = flat_params.get(1).copied().unwrap_or(1) as u8;
-                match mode {
-                    1 => self.kitty_keyboard_flags = flags,
-                    2 => self.kitty_keyboard_flags |= flags,
-                    3 => self.kitty_keyboard_flags &= !flags,
-                    _ => {}
-                }
-                self.pending_kitty_keyboard = Some((flags, mode));
-                return;
-            } else if intermediates.contains(&b'<') {
-                // CSI < count u - Pop Kitty keyboard flags
-                let count = flat_params.first().copied().unwrap_or(1).max(1) as usize;
-                for _ in 0..count {
-                    if let Some(f) = self.kitty_keyboard_stack.pop() {
-                        self.kitty_keyboard_flags = f;
-                    } else {
-                        // Empty stack resets to 0 according to Kitty keyboard protocol
-                        self.kitty_keyboard_flags = 0;
-                    }
-                }
-                self.pending_kitty_keyboard = Some((self.kitty_keyboard_flags, 1));
-                return;
+            self.responses
+                .push(format!("\x1b[?{}u", self.kitty_keyboard_flags).into_bytes());
+            return;
+        }
+        if intermediates.contains(&b'$') && action == 'p' {
+            for mode in flat_params {
+                let status = self.decrqm_status(*mode);
+                self.responses
+                    .push(format!("\x1b[?{};{}$y", mode, status).into_bytes());
+            }
+            return;
+        }
+        if action == 'h' || action == 'l' {
+            let enabled = action == 'h';
+            for mode in flat_params {
+                self.apply_dec_private_mode(*mode, enabled);
             }
         }
+    }
 
+    fn handle_csi_kitty_keyboard(&mut self, intermediates: &[u8], flat_params: &[u16]) {
+        if intermediates.contains(&b'>') && flat_params.len() <= 1 {
+            let raw = flat_params.first().copied().unwrap_or(0);
+            let flags = (raw & SUPPORTED_KITTY_FLAGS) as u8;
+            if self.kitty_keyboard_stack.len() >= MAX_KEYBOARD_STACK_DEPTH {
+                self.kitty_keyboard_stack.remove(0);
+            }
+            self.kitty_keyboard_stack.push(self.kitty_keyboard_flags);
+            self.kitty_keyboard_flags = flags;
+            self.pending_kitty_keyboard = Some((flags, 1));
+            return;
+        }
+        if intermediates.contains(&b'=') || intermediates.contains(&b'>') {
+            let raw = flat_params.first().copied().unwrap_or(0);
+            let flags = (raw & SUPPORTED_KITTY_FLAGS) as u8;
+            let mode = flat_params.get(1).copied().unwrap_or(1) as u8;
+            match mode {
+                1 => self.kitty_keyboard_flags = flags,
+                2 => self.kitty_keyboard_flags |= flags,
+                3 => self.kitty_keyboard_flags &= !flags,
+                _ => {}
+            }
+            self.pending_kitty_keyboard = Some((flags, mode));
+            return;
+        }
+        if intermediates.contains(&b'<') {
+            let count = flat_params.first().copied().unwrap_or(1).max(1) as usize;
+            for _ in 0..count {
+                self.kitty_keyboard_flags = self.kitty_keyboard_stack.pop().unwrap_or(0);
+            }
+            self.pending_kitty_keyboard = Some((self.kitty_keyboard_flags, 1));
+        }
+    }
+
+    fn handle_csi_cursor(&mut self, action: char, first_param: u16, flat_params: &[u16]) {
+        let param = if first_param == 0 {
+            1
+        } else {
+            first_param as usize
+        };
         match action {
-            // CUU - Cursor Up
-            'A' => {
-                let count = param_or(1);
-                self.grid.cursor.row = self.grid.cursor.row.saturating_sub(count);
-            }
-            // CUD - Cursor Down
+            'A' => self.grid.cursor.row = self.grid.cursor.row.saturating_sub(param),
             'B' => {
-                let count = param_or(1);
                 self.grid.cursor.row =
-                    (self.grid.cursor.row + count).min(self.grid.rows.saturating_sub(1));
+                    (self.grid.cursor.row + param).min(self.grid.rows.saturating_sub(1));
             }
-            // CUF - Cursor Forward
             'C' => {
-                let count = param_or(1);
                 self.grid.cursor.col =
-                    (self.grid.cursor.col + count).min(self.grid.cols.saturating_sub(1));
+                    (self.grid.cursor.col + param).min(self.grid.cols.saturating_sub(1));
             }
-            // CUB - Cursor Back
-            'D' => {
-                let count = param_or(1);
-                self.grid.cursor.col = self.grid.cursor.col.saturating_sub(count);
-            }
-            // CNL - Cursor Next Line
+            'D' => self.grid.cursor.col = self.grid.cursor.col.saturating_sub(param),
             'E' => {
-                let count = param_or(1);
                 self.grid.cursor.row =
-                    (self.grid.cursor.row + count).min(self.grid.rows.saturating_sub(1));
+                    (self.grid.cursor.row + param).min(self.grid.rows.saturating_sub(1));
                 self.grid.cursor.col = 0;
             }
-            // CPL - Cursor Previous Line
             'F' => {
-                let count = param_or(1);
-                self.grid.cursor.row = self.grid.cursor.row.saturating_sub(count);
+                self.grid.cursor.row = self.grid.cursor.row.saturating_sub(param);
                 self.grid.cursor.col = 0;
             }
-            // CHA / HPA - Cursor Character Absolute
             'G' | '\'' => {
-                let col = param_or(1).saturating_sub(1);
+                let col = param.saturating_sub(1);
                 self.grid.cursor.col = col.min(self.grid.cols.saturating_sub(1));
             }
-            // CUP / HVP - Cursor Position
             'H' | 'f' => {
                 let row = flat_params
                     .first()
@@ -894,47 +858,42 @@ impl Terminal {
                 self.grid.cursor.row = row.min(self.grid.rows.saturating_sub(1));
                 self.grid.cursor.col = col.min(self.grid.cols.saturating_sub(1));
             }
-            // ED - Erase in Display
-            'J' => {
-                let mode = match first_param {
-                    1 => ClearMode::Above,
-                    2 => ClearMode::All,
-                    3 => ClearMode::Saved,
-                    _ => ClearMode::Below,
-                };
-                self.grid.clear_screen_with_bg(mode, self.active_bg);
-            }
-            // EL - Erase in Line
-            'K' => {
-                let mode = match first_param {
-                    1 => ClearMode::Above,
-                    2 => ClearMode::All,
-                    _ => ClearMode::Below,
-                };
-                self.grid.clear_line_with_bg(mode, self.active_bg);
-            }
-            // IL - Insert Lines
-            'L' => self.grid.insert_lines_with_bg(param_or(1), self.active_bg),
-            // DL - Delete Lines
-            'M' => self.grid.delete_lines_with_bg(param_or(1), self.active_bg),
-            // DCH - Delete Characters
-            'P' => self.grid.delete_chars_with_bg(param_or(1), self.active_bg),
-            // ICH - Insert Blank Characters
-            '@' => self
-                .grid
-                .insert_blank_chars_with_bg(param_or(1), self.active_bg),
-            // ECH - Erase Characters
-            'X' => self.grid.erase_chars_with_bg(param_or(1), self.active_bg),
-            // SU - Scroll Up
-            'S' => self.grid.scroll_up_with_bg(param_or(1), self.active_bg),
-            // SD - Scroll Down
-            'T' => self.grid.scroll_down_with_bg(param_or(1), self.active_bg),
-            // VPA - Line Position Absolute
             'd' => {
-                let row = param_or(1).saturating_sub(1);
+                let row = param.saturating_sub(1);
                 self.grid.cursor.row = row.min(self.grid.rows.saturating_sub(1));
             }
-            // DSR - Device Status Report
+            's' => self.grid.save_cursor(),
+            'u' => self.grid.restore_cursor(),
+            _ => {}
+        }
+    }
+
+    fn handle_csi_erase_edit(&mut self, action: char, first_param: u16) {
+        let param = if first_param == 0 {
+            1
+        } else {
+            first_param as usize
+        };
+        match action {
+            'J' => self
+                .grid
+                .clear_screen_with_bg(erase_display_mode(first_param), self.active_bg),
+            'K' => self
+                .grid
+                .clear_line_with_bg(erase_line_mode(first_param), self.active_bg),
+            'L' => self.grid.insert_lines_with_bg(param, self.active_bg),
+            'M' => self.grid.delete_lines_with_bg(param, self.active_bg),
+            'P' => self.grid.delete_chars_with_bg(param, self.active_bg),
+            '@' => self.grid.insert_blank_chars_with_bg(param, self.active_bg),
+            'X' => self.grid.erase_chars_with_bg(param, self.active_bg),
+            'S' => self.grid.scroll_up_with_bg(param, self.active_bg),
+            'T' => self.grid.scroll_down_with_bg(param, self.active_bg),
+            _ => {}
+        }
+    }
+
+    fn handle_csi_query(&mut self, action: char, intermediates: &[u8], first_param: u16) {
+        match action {
             'n' => match first_param {
                 5 => self.responses.push(b"\x1b[0n".to_vec()),
                 6 => self.responses.push(
@@ -947,14 +906,12 @@ impl Terminal {
                 ),
                 _ => {}
             },
-            // DA - Device Attributes
             'c' => {
                 if intermediates.contains(&b'>') {
-                    // Secondary Device Attributes (DA2)
                     self.responses.push(b"\x1b[>0;10;1c".to_vec());
-                } else if first_param == 0 {
-                    // Primary Device Attributes (DA1) - VT220 response.
-                    // Advertise OSC 52 clipboard access when writes are allowed, matching Kitty.
+                    return;
+                }
+                if first_param == 0 {
                     if self.allow_osc52_write {
                         self.responses.push(b"\x1b[?62;52;c".to_vec());
                     } else {
@@ -962,29 +919,6 @@ impl Terminal {
                     }
                 }
             }
-            // SGR - Select Graphic Rendition
-            'm' => self.handle_sgr(params),
-            // DECSTBM - Set Scrolling Region
-            'r' => {
-                let top = flat_params
-                    .first()
-                    .copied()
-                    .unwrap_or(1)
-                    .max(1)
-                    .saturating_sub(1) as usize;
-                let bottom = flat_params
-                    .get(1)
-                    .copied()
-                    .unwrap_or(self.grid.rows as u16)
-                    .max(1)
-                    .saturating_sub(1) as usize;
-                self.grid.set_scroll_region(top, bottom);
-            }
-            // Save cursor position
-            's' => self.grid.save_cursor(),
-            // Restore cursor position
-            'u' => self.grid.restore_cursor(),
-            // Window manipulation: image clients query pixel geometry before placing images.
             't' => match first_param {
                 14 => self.responses.push(
                     format!(
@@ -1001,6 +935,73 @@ impl Terminal {
                     .push(format!("\x1b[8;{};{}t", self.grid.rows, self.grid.cols).into_bytes()),
                 _ => {}
             },
+            _ => {}
+        }
+    }
+
+    fn handle_csi_scroll_region(&mut self, flat_params: &[u16]) {
+        let top = flat_params
+            .first()
+            .copied()
+            .unwrap_or(1)
+            .max(1)
+            .saturating_sub(1) as usize;
+        let bottom = flat_params
+            .get(1)
+            .copied()
+            .unwrap_or(self.grid.rows as u16)
+            .max(1)
+            .saturating_sub(1) as usize;
+        self.grid.set_scroll_region(top, bottom);
+    }
+
+    pub(crate) fn handle_csi(
+        &mut self,
+        params: &Params,
+        intermediates: &[u8],
+        _ignore: bool,
+        action: char,
+    ) {
+        let mut flat_params_buf = [0u16; 32];
+        let mut flat_len = 0;
+        for &val in params.iter().flatten() {
+            if flat_len < flat_params_buf.len() {
+                flat_params_buf[flat_len] = val;
+                flat_len += 1;
+            }
+        }
+        let flat_params = &flat_params_buf[..flat_len];
+        let first_param = flat_params.first().copied().unwrap_or(0);
+
+        if intermediates.contains(&b'?') {
+            self.handle_csi_private(action, intermediates, flat_params);
+            return;
+        }
+
+        if action == 'q' && intermediates.contains(&b'>') && first_param == 0 {
+            self.responses.push(
+                format!("\x1bP>|ftty-kitty({})\x1b\\", env!("CARGO_PKG_VERSION")).into_bytes(),
+            );
+            return;
+        }
+
+        if action == 'u' {
+            self.handle_csi_kitty_keyboard(intermediates, flat_params);
+            return;
+        }
+
+        match action {
+            'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G' | '\'' | 'H' | 'f' | 'd' | 's' => {
+                self.handle_csi_cursor(action, first_param, flat_params);
+            }
+            'J' | 'K' | 'L' | 'M' | 'P' | '@' | 'X' | 'S' | 'T' => {
+                self.handle_csi_erase_edit(action, first_param);
+            }
+            'n' | 'c' | 't' => {
+                self.handle_csi_query(action, intermediates, first_param);
+            }
+            'r' => self.handle_csi_scroll_region(flat_params),
+            'm' => self.handle_sgr(params),
             _ => {}
         }
     }
@@ -1041,195 +1042,368 @@ pub fn percent_decode(s: &str) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
-impl Terminal {
-    pub(crate) fn handle_osc(&mut self, params: &[&[u8]], _bell_terminated: bool) {
-        // OSC responses (10, 11, 4, 52) unconditionally use BEL (\x07) per XTerm recommendations
-        // to prevent trailing-backslash keystroke leakage in TUI and multiplexer parsers (herdr,
-        // crossterm, ratatui) when reading asynchronous PTY responses.
-        const RESPONSE_TERMINATOR: &str = "\x07";
+// OSC responses (10, 11, 4, 52) unconditionally use BEL (\x07) per XTerm recommendations
+// to prevent trailing-backslash keystroke leakage in TUI and multiplexer parsers (herdr,
+// crossterm, ratatui) when reading asynchronous PTY responses.
+const OSC_RESPONSE_TERMINATOR: &str = "\x07";
 
-        if params.len() >= 2
-            && (params[0] == b"0" || params[0] == b"2")
-            && let Ok(title) = std::str::from_utf8(params[1])
-        {
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum OscColorTarget {
+    Foreground,
+    Background,
+}
+
+impl Terminal {
+    fn handle_osc_title(&mut self, params: &[&[u8]]) {
+        let Some(&raw_title) = params.get(1) else {
+            return;
+        };
+        if let Ok(title) = std::str::from_utf8(raw_title) {
             self.title = title.to_string();
             self.title_dirty = true;
-        } else if !params.is_empty() {
-            if params[0] == b"10" && params.len() >= 2 {
-                if params[1] == b"?" {
-                    let fg = self.theme.default_fg();
-                    let resp = format!(
-                        "\x1b]10;rgb:{:02x}{:02x}/{:02x}{:02x}/{:02x}{:02x}{RESPONSE_TERMINATOR}",
-                        fg.r, fg.r, fg.g, fg.g, fg.b, fg.b
-                    );
-                    self.responses.push(resp.into_bytes());
-                } else if let Ok(s) = std::str::from_utf8(params[1])
-                    && let Some(color) = crate::color::parse_color_spec(s)
-                {
-                    self.theme.set_default_fg(color);
-                }
-            } else if params[0] == b"11" && params.len() >= 2 {
-                if params[1] == b"?" {
-                    let bg = self.theme.default_bg();
-                    let resp = format!(
-                        "\x1b]11;rgb:{:02x}{:02x}/{:02x}{:02x}/{:02x}{:02x}{RESPONSE_TERMINATOR}",
-                        bg.r, bg.r, bg.g, bg.g, bg.b, bg.b
-                    );
-                    self.responses.push(resp.into_bytes());
-                } else if let Ok(s) = std::str::from_utf8(params[1])
-                    && let Some(color) = crate::color::parse_color_spec(s)
-                {
-                    self.update_dynamic_background(color);
-                }
-            } else if params[0] == b"110" {
-                self.theme.reset_default_fg();
-            } else if params[0] == b"111" {
-                self.reset_default_background();
-            } else if params[0] == b"4" && params.len() >= 3 {
-                for chunk in params[1..].as_chunks::<2>().0 {
-                    if let Ok(idx_str) = std::str::from_utf8(chunk[0])
-                        && let Ok(idx) = idx_str.parse::<usize>()
-                        && idx < 256
-                    {
-                        if chunk[1] == b"?" {
-                            let col = self.theme.palette_color(idx).unwrap_or(Rgb::new(0, 0, 0));
-                            let resp = format!(
-                                "\x1b]4;{idx};rgb:{:02x}{:02x}/{:02x}{:02x}/{:02x}{:02x}{RESPONSE_TERMINATOR}",
-                                col.r, col.r, col.g, col.g, col.b, col.b
-                            );
-                            self.responses.push(resp.into_bytes());
-                        } else if let Ok(s) = std::str::from_utf8(chunk[1])
-                            && let Some(color) = crate::color::parse_color_spec(s)
-                        {
-                            self.theme.set_indexed(idx, color);
-                        }
-                    }
-                }
-            } else if params[0] == b"104" {
-                if params.len() == 1 {
-                    self.theme.reset_palette(None);
-                } else {
-                    for param in &params[1..] {
-                        if let Ok(s) = std::str::from_utf8(param)
-                            && let Ok(idx) = s.parse::<usize>()
-                            && idx < 256
-                        {
-                            self.theme.reset_palette(Some(idx));
-                        }
-                    }
-                }
-            } else if params[0] == b"52" && params.len() >= 2 {
-                // OSC 52 ; [Pc] ; Pd
-                let (target, payload) = if params.len() == 2 {
-                    (b"c".as_slice(), params[1])
-                } else {
-                    (params[1], params[2])
-                };
+        }
+    }
 
-                let target_str = std::str::from_utf8(target).unwrap_or("c");
-                let primary_target = target_str.chars().next().unwrap_or('c');
+    fn handle_osc_color(&mut self, target: OscColorTarget, params: &[&[u8]]) {
+        let Some(&spec_bytes) = params.get(1) else {
+            return;
+        };
+        let code = match target {
+            OscColorTarget::Foreground => "10",
+            OscColorTarget::Background => "11",
+        };
+        if spec_bytes == b"?" {
+            let col = match target {
+                OscColorTarget::Foreground => self.theme.default_fg(),
+                OscColorTarget::Background => self.theme.default_bg(),
+            };
+            let resp = format!(
+                "\x1b]{code};rgb:{:02x}{:02x}/{:02x}{:02x}/{:02x}{:02x}{OSC_RESPONSE_TERMINATOR}",
+                col.r, col.r, col.g, col.g, col.b, col.b
+            );
+            self.responses.push(resp.into_bytes());
+            return;
+        }
 
-                if payload == b"?" {
-                    if self.allow_osc52_read {
-                        let b64 = self
-                            .clipboard_content
-                            .as_ref()
-                            .map(|text| BASE64_STANDARD.encode(text.as_bytes()))
-                            .unwrap_or_default();
-                        let resp =
-                            format!("\x1b]52;{};{}{RESPONSE_TERMINATOR}", primary_target, b64);
-                        self.responses.push(resp.into_bytes());
-                    }
-                } else if payload.is_empty() {
-                    if self.allow_osc52_write {
-                        self.clipboard_content = None;
-                        self.pending_clipboard = Some(None);
-                    }
-                } else if self.allow_osc52_write
-                    && let Ok(decoded) = BASE64_STANDARD.decode(payload)
-                    && let Ok(text) = String::from_utf8(decoded)
-                {
-                    self.clipboard_content = Some(text.clone());
-                    self.pending_clipboard = Some(Some(text));
-                }
-            } else if params[0] == b"7" && params.len() >= 2 {
-                // OSC 7 ; file://[hostname]/path
-                if let Ok(uri) = std::str::from_utf8(params[1])
-                    && let Some(path) = parse_osc7_path(uri)
-                {
-                    self.current_dir = Some(path);
-                }
-            } else if params[0] == b"133" && params.len() >= 2 {
-                // OSC 133 ; [A|B|C|D] [; exit_code]
-                match params[1] {
-                    b"A" => {
-                        self.shell_integration = Some(ShellIntegrationState::PromptStart);
-                        if !self.grid.is_alt_screen() {
-                            let abs_line = self.grid.scrollback.len() + self.grid.cursor.row;
-                            self.grid.add_prompt_mark(abs_line);
-                        }
-                    }
-                    b"B" => self.shell_integration = Some(ShellIntegrationState::CommandStart),
-                    b"C" => self.shell_integration = Some(ShellIntegrationState::OutputStart),
-                    b"D" => {
-                        let exit_code = if params.len() >= 3 {
-                            std::str::from_utf8(params[2])
-                                .ok()
-                                .and_then(|s| s.parse::<i32>().ok())
-                        } else {
-                            None
-                        };
-                        self.shell_integration =
-                            Some(ShellIntegrationState::CommandFinished(exit_code));
-                    }
-                    _ => {}
-                }
-            } else if params[0] == b"9" && params.len() >= 3 && params[1] == b"4" {
-                // OSC 9 ; 4 ; state [; progress]
-                let state_val = std::str::from_utf8(params[2])
-                    .ok()
-                    .and_then(|s| s.parse::<u8>().ok());
-                let progress_val = if params.len() >= 4 {
-                    std::str::from_utf8(params[3])
-                        .ok()
-                        .and_then(|s| s.parse::<u8>().ok())
-                        .unwrap_or(0)
-                        .min(100)
-                } else {
-                    0
-                };
-                self.progress = match state_val {
-                    Some(0) => None,
-                    Some(1) => Some(ProgressState::Normal(progress_val)),
-                    Some(2) => Some(ProgressState::Error(progress_val)),
-                    Some(3) => Some(ProgressState::Indeterminate),
-                    Some(4) => Some(ProgressState::Warning(progress_val)),
-                    _ => None,
-                };
-            } else if params[0] == b"8" {
-                // OSC 8 ; [params] ; [url]
-                let url_bytes = if params.len() >= 3 {
-                    params[2]
-                } else if params.len() == 2 {
-                    params[1]
-                } else {
-                    b"".as_slice()
-                };
+        let Ok(s) = std::str::from_utf8(spec_bytes) else {
+            return;
+        };
+        let Some(color) = crate::color::parse_color_spec(s) else {
+            return;
+        };
 
-                if url_bytes.is_empty() {
-                    self.active_hyperlink = None;
-                } else if let Ok(url) = std::str::from_utf8(url_bytes) {
-                    let id = self.get_or_intern_hyperlink(url.to_string());
-                    self.active_hyperlink = if id > 0 { Some(id) } else { None };
+        match target {
+            OscColorTarget::Foreground => self.theme.set_default_fg(color),
+            OscColorTarget::Background => self.update_dynamic_background(color),
+        }
+    }
+
+    fn handle_osc_palette_entry(&mut self, idx_bytes: &[u8], spec_bytes: &[u8]) {
+        let Ok(idx_str) = std::str::from_utf8(idx_bytes) else {
+            return;
+        };
+        let Ok(idx) = idx_str.parse::<usize>() else {
+            return;
+        };
+        if idx >= 256 {
+            return;
+        }
+
+        if spec_bytes == b"?" {
+            let col = self.theme.palette_color(idx).unwrap_or(Rgb::new(0, 0, 0));
+            let resp = format!(
+                "\x1b]4;{idx};rgb:{:02x}{:02x}/{:02x}{:02x}/{:02x}{:02x}{OSC_RESPONSE_TERMINATOR}",
+                col.r, col.r, col.g, col.g, col.b, col.b
+            );
+            self.responses.push(resp.into_bytes());
+            return;
+        }
+
+        if let Ok(s) = std::str::from_utf8(spec_bytes)
+            && let Some(color) = crate::color::parse_color_spec(s)
+        {
+            self.theme.set_indexed(idx, color);
+        }
+    }
+
+    fn handle_osc_palette_set(&mut self, params: &[&[u8]]) {
+        if params.len() < 3 {
+            return;
+        }
+        for chunk in params[1..].as_chunks::<2>().0 {
+            self.handle_osc_palette_entry(chunk[0], chunk[1]);
+        }
+    }
+
+    fn handle_osc_palette_reset(&mut self, params: &[&[u8]]) {
+        if params.len() <= 1 {
+            self.theme.reset_palette(None);
+            return;
+        }
+        for param in &params[1..] {
+            if let Ok(s) = std::str::from_utf8(param)
+                && let Ok(idx) = s.parse::<usize>()
+                && idx < 256
+            {
+                self.theme.reset_palette(Some(idx));
+            }
+        }
+    }
+
+    fn handle_osc_clipboard(&mut self, params: &[&[u8]]) {
+        if params.len() < 2 {
+            return;
+        }
+        let (target, payload) = if params.len() == 2 {
+            (b"c".as_slice(), params[1])
+        } else {
+            (params[1], params[2])
+        };
+
+        let target_str = std::str::from_utf8(target).unwrap_or("c");
+        let primary_target = target_str.chars().next().unwrap_or('c');
+
+        if payload == b"?" {
+            if self.allow_osc52_read {
+                let b64 = self
+                    .clipboard_content
+                    .as_ref()
+                    .map(|text| BASE64_STANDARD.encode(text.as_bytes()))
+                    .unwrap_or_default();
+                let resp = format!(
+                    "\x1b]52;{};{}{OSC_RESPONSE_TERMINATOR}",
+                    primary_target, b64
+                );
+                self.responses.push(resp.into_bytes());
+            }
+            return;
+        }
+
+        if !self.allow_osc52_write {
+            return;
+        }
+
+        if payload.is_empty() {
+            self.clipboard_content = None;
+            self.pending_clipboard = Some(None);
+            return;
+        }
+
+        if let Ok(decoded) = BASE64_STANDARD.decode(payload)
+            && let Ok(text) = String::from_utf8(decoded)
+        {
+            self.clipboard_content = Some(text.clone());
+            self.pending_clipboard = Some(Some(text));
+        }
+    }
+
+    fn handle_osc_cwd(&mut self, params: &[&[u8]]) {
+        let Some(&raw_uri) = params.get(1) else {
+            return;
+        };
+        if let Ok(uri) = std::str::from_utf8(raw_uri)
+            && let Some(path) = parse_osc7_path(uri)
+        {
+            self.current_dir = Some(path);
+        }
+    }
+
+    fn handle_osc_shell_integration(&mut self, params: &[&[u8]]) {
+        let Some(&action) = params.get(1) else {
+            return;
+        };
+        match action {
+            b"A" => {
+                self.shell_integration = Some(ShellIntegrationState::PromptStart);
+                if !self.grid.is_alt_screen() {
+                    let abs_line = self.grid.scrollback.len() + self.grid.cursor.row;
+                    self.grid.add_prompt_mark(abs_line);
                 }
             }
+            b"B" => self.shell_integration = Some(ShellIntegrationState::CommandStart),
+            b"C" => self.shell_integration = Some(ShellIntegrationState::OutputStart),
+            b"D" => {
+                let exit_code = params
+                    .get(2)
+                    .and_then(|p| std::str::from_utf8(p).ok())
+                    .and_then(|s| s.parse::<i32>().ok());
+                self.shell_integration = Some(ShellIntegrationState::CommandFinished(exit_code));
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_osc_progress(&mut self, params: &[&[u8]]) {
+        if params.len() < 3 || params.get(1) != Some(&b"4".as_slice()) {
+            return;
+        }
+        let state_val = params
+            .get(2)
+            .and_then(|p| std::str::from_utf8(p).ok())
+            .and_then(|s| s.parse::<u8>().ok());
+        let progress_val = params
+            .get(3)
+            .and_then(|p| std::str::from_utf8(p).ok())
+            .and_then(|s| s.parse::<u8>().ok())
+            .unwrap_or(0)
+            .min(100);
+
+        self.progress = match state_val {
+            Some(0) => None,
+            Some(1) => Some(ProgressState::Normal(progress_val)),
+            Some(2) => Some(ProgressState::Error(progress_val)),
+            Some(3) => Some(ProgressState::Indeterminate),
+            Some(4) => Some(ProgressState::Warning(progress_val)),
+            _ => None,
+        };
+    }
+
+    fn handle_osc_hyperlink(&mut self, params: &[&[u8]]) {
+        let url_bytes = match params.len() {
+            n if n >= 3 => params[2],
+            2 => params[1],
+            _ => b"".as_slice(),
+        };
+
+        if url_bytes.is_empty() {
+            self.active_hyperlink = None;
+            return;
+        }
+
+        if let Ok(url) = std::str::from_utf8(url_bytes) {
+            let id = self.get_or_intern_hyperlink(url.to_string());
+            self.active_hyperlink = if id > 0 { Some(id) } else { None };
+        }
+    }
+
+    pub(crate) fn handle_osc(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        let Some(&command) = params.first() else {
+            return;
+        };
+
+        match command {
+            b"0" | b"2" => self.handle_osc_title(params),
+            b"10" => self.handle_osc_color(OscColorTarget::Foreground, params),
+            b"11" => self.handle_osc_color(OscColorTarget::Background, params),
+            b"110" => self.theme.reset_default_fg(),
+            b"111" => self.reset_default_background(),
+            b"4" => self.handle_osc_palette_set(params),
+            b"104" => self.handle_osc_palette_reset(params),
+            b"52" => self.handle_osc_clipboard(params),
+            b"7" => self.handle_osc_cwd(params),
+            b"133" => self.handle_osc_shell_integration(params),
+            b"9" => self.handle_osc_progress(params),
+            b"8" => self.handle_osc_hyperlink(params),
+            _ => {}
         }
     }
 }
 
 // --- SGR Handler ---
 
+fn parse_sgr_extended_color(p: &[u16], param_list: &[&[u16]], i: &mut usize) -> Option<Color> {
+    if p.len() >= 3 && p[1] == 5 {
+        return Some(Color::Indexed(p[2] as u8));
+    }
+    if p.len() >= 5 && p[1] == 2 {
+        let offset = if p.len() >= 6 { 3 } else { 2 };
+        return Some(Color::Rgb(
+            p[offset] as u8,
+            p[offset + 1] as u8,
+            p[offset + 2] as u8,
+        ));
+    }
+    if *i + 2 < param_list.len()
+        && param_list[*i + 1].first() == Some(&5)
+        && let Some(&idx) = param_list[*i + 2].first()
+    {
+        *i += 2;
+        return Some(Color::Indexed(idx as u8));
+    }
+    if *i + 4 < param_list.len() && param_list[*i + 1].first() == Some(&2) {
+        let r = param_list[*i + 2].first().copied().unwrap_or(0) as u8;
+        let g = param_list[*i + 3].first().copied().unwrap_or(0) as u8;
+        let b = param_list[*i + 4].first().copied().unwrap_or(0) as u8;
+        *i += 4;
+        return Some(Color::Rgb(r, g, b));
+    }
+    None
+}
+
 impl Terminal {
+    fn apply_sgr_underline(&mut self, p: &[u16]) {
+        self.active_flags.remove(CellFlags::ALL_UNDERLINES);
+        if p.len() <= 1 {
+            self.active_flags.insert(CellFlags::UNDERLINE);
+            return;
+        }
+        match p[1] {
+            0 => {}
+            1 => self.active_flags.insert(CellFlags::UNDERLINE),
+            2 => self
+                .active_flags
+                .insert(CellFlags::UNDERLINE | CellFlags::UNDERLINE_DOUBLE),
+            3 => self
+                .active_flags
+                .insert(CellFlags::UNDERLINE | CellFlags::UNDERLINE_CURLY),
+            4 => self
+                .active_flags
+                .insert(CellFlags::UNDERLINE | CellFlags::UNDERLINE_DOTTED),
+            5 => self
+                .active_flags
+                .insert(CellFlags::UNDERLINE | CellFlags::UNDERLINE_DASHED),
+            _ => self.active_flags.insert(CellFlags::UNDERLINE),
+        }
+    }
+
+    fn apply_sgr_attribute(&mut self, code: u16, p: &[u16]) {
+        match code {
+            0 => self.reset_attributes(),
+            1 => self.active_flags.insert(CellFlags::BOLD),
+            2 => self.active_flags.insert(CellFlags::DIM),
+            3 => self.active_flags.insert(CellFlags::ITALIC),
+            4 => self.apply_sgr_underline(p),
+            7 => self.active_flags.insert(CellFlags::REVERSE),
+            8 => self.active_flags.insert(CellFlags::HIDDEN),
+            9 => self.active_flags.insert(CellFlags::STRIKETHROUGH),
+            22 => self.active_flags.remove(CellFlags::BOLD | CellFlags::DIM),
+            23 => self.active_flags.remove(CellFlags::ITALIC),
+            24 => self.active_flags.remove(CellFlags::ALL_UNDERLINES),
+            27 => self.active_flags.remove(CellFlags::REVERSE),
+            28 => self.active_flags.remove(CellFlags::HIDDEN),
+            29 => self.active_flags.remove(CellFlags::STRIKETHROUGH),
+            _ => {}
+        }
+    }
+
+    fn apply_sgr_color(&mut self, code: u16, p: &[u16], param_list: &[&[u16]], i: &mut usize) {
+        match code {
+            30..=37 => self.active_fg = Color::Indexed((code - 30) as u8),
+            38 => {
+                if let Some(col) = parse_sgr_extended_color(p, param_list, i) {
+                    self.active_fg = col;
+                }
+            }
+            39 => self.active_fg = Color::DefaultForeground,
+            40..=47 => self.active_bg = Color::Indexed((code - 40) as u8),
+            48 => {
+                if let Some(col) = parse_sgr_extended_color(p, param_list, i) {
+                    self.active_bg = col;
+                }
+            }
+            49 => self.active_bg = Color::DefaultBackground,
+            58 => {
+                if let Some(col) = parse_sgr_extended_color(p, param_list, i) {
+                    self.active_underline_color = col;
+                }
+            }
+            59 => self.active_underline_color = Color::DefaultForeground,
+            90..=97 => self.active_fg = Color::Indexed((code - 90 + 8) as u8),
+            100..=107 => self.active_bg = Color::Indexed((code - 100 + 8) as u8),
+            _ => {}
+        }
+    }
+
     pub(crate) fn handle_sgr(&mut self, params: &Params) {
         let mut param_list_buf: [&[u16]; 32] = [&[]; 32];
         let mut param_count = 0;
@@ -1250,115 +1424,8 @@ impl Terminal {
             let p = param_list[i];
             let code = p.first().copied().unwrap_or(0);
             match code {
-                0 => self.reset_attributes(),
-                1 => self.active_flags.insert(CellFlags::BOLD),
-                2 => self.active_flags.insert(CellFlags::DIM),
-                3 => self.active_flags.insert(CellFlags::ITALIC),
-                4 => {
-                    self.active_flags.remove(CellFlags::ALL_UNDERLINES);
-                    if p.len() > 1 {
-                        // Subparameters: e.g. 4:3 (undercurl)
-                        match p[1] {
-                            0 => {}
-                            1 => self.active_flags.insert(CellFlags::UNDERLINE),
-                            2 => self
-                                .active_flags
-                                .insert(CellFlags::UNDERLINE | CellFlags::UNDERLINE_DOUBLE),
-                            3 => self
-                                .active_flags
-                                .insert(CellFlags::UNDERLINE | CellFlags::UNDERLINE_CURLY),
-                            4 => self
-                                .active_flags
-                                .insert(CellFlags::UNDERLINE | CellFlags::UNDERLINE_DOTTED),
-                            5 => self
-                                .active_flags
-                                .insert(CellFlags::UNDERLINE | CellFlags::UNDERLINE_DASHED),
-                            _ => self.active_flags.insert(CellFlags::UNDERLINE),
-                        }
-                    } else {
-                        // Plain single underline
-                        self.active_flags.insert(CellFlags::UNDERLINE);
-                    }
-                }
-                7 => self.active_flags.insert(CellFlags::REVERSE),
-                8 => self.active_flags.insert(CellFlags::HIDDEN),
-                9 => self.active_flags.insert(CellFlags::STRIKETHROUGH),
-                22 => self.active_flags.remove(CellFlags::BOLD | CellFlags::DIM),
-                23 => self.active_flags.remove(CellFlags::ITALIC),
-                24 => self.active_flags.remove(CellFlags::ALL_UNDERLINES),
-                27 => self.active_flags.remove(CellFlags::REVERSE),
-                28 => self.active_flags.remove(CellFlags::HIDDEN),
-                29 => self.active_flags.remove(CellFlags::STRIKETHROUGH),
-                30..=37 => self.active_fg = Color::Indexed((code - 30) as u8),
-                38 => {
-                    // Extended foreground: colon subparams or semicolon-separated
-                    if p.len() >= 3 && p[1] == 5 {
-                        self.active_fg = Color::Indexed(p[2] as u8);
-                    } else if p.len() >= 5 && p[1] == 2 {
-                        let offset = if p.len() >= 6 { 3 } else { 2 };
-                        self.active_fg =
-                            Color::Rgb(p[offset] as u8, p[offset + 1] as u8, p[offset + 2] as u8);
-                    } else if i + 2 < param_list.len() && param_list[i + 1].first() == Some(&5) {
-                        if let Some(&idx) = param_list[i + 2].first() {
-                            self.active_fg = Color::Indexed(idx as u8);
-                            i += 2;
-                        }
-                    } else if i + 4 < param_list.len() && param_list[i + 1].first() == Some(&2) {
-                        let r = param_list[i + 2].first().copied().unwrap_or(0) as u8;
-                        let g = param_list[i + 3].first().copied().unwrap_or(0) as u8;
-                        let b = param_list[i + 4].first().copied().unwrap_or(0) as u8;
-                        self.active_fg = Color::Rgb(r, g, b);
-                        i += 4;
-                    }
-                }
-                39 => self.active_fg = Color::DefaultForeground,
-                40..=47 => self.active_bg = Color::Indexed((code - 40) as u8),
-                48 => {
-                    // Extended background: colon subparams or semicolon-separated
-                    if p.len() >= 3 && p[1] == 5 {
-                        self.active_bg = Color::Indexed(p[2] as u8);
-                    } else if p.len() >= 5 && p[1] == 2 {
-                        let offset = if p.len() >= 6 { 3 } else { 2 };
-                        self.active_bg =
-                            Color::Rgb(p[offset] as u8, p[offset + 1] as u8, p[offset + 2] as u8);
-                    } else if i + 2 < param_list.len() && param_list[i + 1].first() == Some(&5) {
-                        if let Some(&idx) = param_list[i + 2].first() {
-                            self.active_bg = Color::Indexed(idx as u8);
-                            i += 2;
-                        }
-                    } else if i + 4 < param_list.len() && param_list[i + 1].first() == Some(&2) {
-                        let r = param_list[i + 2].first().copied().unwrap_or(0) as u8;
-                        let g = param_list[i + 3].first().copied().unwrap_or(0) as u8;
-                        let b = param_list[i + 4].first().copied().unwrap_or(0) as u8;
-                        self.active_bg = Color::Rgb(r, g, b);
-                        i += 4;
-                    }
-                }
-                49 => self.active_bg = Color::DefaultBackground,
-                58 => {
-                    // Extended underline color: colon subparams or semicolon-separated
-                    if p.len() >= 3 && p[1] == 5 {
-                        self.active_underline_color = Color::Indexed(p[2] as u8);
-                    } else if p.len() >= 5 && p[1] == 2 {
-                        let offset = if p.len() >= 6 { 3 } else { 2 };
-                        self.active_underline_color =
-                            Color::Rgb(p[offset] as u8, p[offset + 1] as u8, p[offset + 2] as u8);
-                    } else if i + 2 < param_list.len() && param_list[i + 1].first() == Some(&5) {
-                        if let Some(&idx) = param_list[i + 2].first() {
-                            self.active_underline_color = Color::Indexed(idx as u8);
-                            i += 2;
-                        }
-                    } else if i + 4 < param_list.len() && param_list[i + 1].first() == Some(&2) {
-                        let r = param_list[i + 2].first().copied().unwrap_or(0) as u8;
-                        let g = param_list[i + 3].first().copied().unwrap_or(0) as u8;
-                        let b = param_list[i + 4].first().copied().unwrap_or(0) as u8;
-                        self.active_underline_color = Color::Rgb(r, g, b);
-                        i += 4;
-                    }
-                }
-                59 => self.active_underline_color = Color::DefaultForeground,
-                90..=97 => self.active_fg = Color::Indexed((code - 90 + 8) as u8),
-                100..=107 => self.active_bg = Color::Indexed((code - 100 + 8) as u8),
+                0..=29 => self.apply_sgr_attribute(code, p),
+                30..=107 => self.apply_sgr_color(code, p, param_list, &mut i),
                 _ => {}
             }
             i += 1;
@@ -1592,13 +1659,11 @@ mod tests {
         let bytes =
         b"\x1b[?2026h\x1b[?25l\x1b]8;;\x1b\\\x1b[25;127H\x1b[?25l\x1b[?2026l\x1b[25;127H\x1b[?25l";
         term.advance_bytes(bytes);
-        for row in 0..term.grid.rows {
-            for col in 0..term.grid.cols {
-                assert_ne!(
-                    term.grid.lines[row].cells[col].c, '\\',
-                    "Found '\\' at ({row}, {col})!"
-                );
-            }
+        for (row, line) in term.grid.lines.iter().enumerate().take(term.grid.rows) {
+            assert!(
+                !line.cells[..term.grid.cols].iter().any(|c| c.c == '\\'),
+                "Found '\\' at row {row}!"
+            );
         }
     }
 
@@ -2241,15 +2306,13 @@ mod tests {
         // \x1b[2J clears the screen using BCE
         term.advance_bytes(&mut parser, b"\x1b[44m\x1b[2J");
 
-        for row in 0..24 {
-            for col in 0..80 {
-                assert_eq!(
-                    term.grid.lines[row].cells[col].bg,
-                    Color::Indexed(4),
-                    "cell at ({row}, {col}) must have blue background via BCE"
-                );
-                assert_eq!(term.grid.lines[row].cells[col].c, ' ');
-            }
+        for (row, line) in term.grid.lines.iter().enumerate().take(24) {
+            assert!(
+                line.cells[..80]
+                    .iter()
+                    .all(|c| c.bg == Color::Indexed(4) && c.c == ' '),
+                "cell at row {row} must have blue background via BCE"
+            );
         }
 
         // Reset background to black and clear line 0 below column 10
