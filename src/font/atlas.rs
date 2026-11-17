@@ -64,6 +64,7 @@ pub struct GlyphAtlas {
     // Fast L1 array cache for ASCII characters (0..127) across 4 styles (0..3).
     pub ascii_cache: [Option<CachedGlyph>; 128 * 4],
     pub cache: HashMap<(char, u8), CachedGlyph>,
+    pub cluster_cache: HashMap<String, CachedGlyph>,
 }
 
 impl Default for GlyphAtlas {
@@ -87,12 +88,14 @@ impl GlyphAtlas {
             shelf: Shelf::default(),
             ascii_cache: [None; 128 * 4],
             cache: HashMap::new(),
+            cluster_cache: HashMap::new(),
         }
     }
 
     pub fn clear(&mut self) {
         self.pixels.fill(0);
         self.cache.clear();
+        self.cluster_cache.clear();
         self.ascii_cache = [None; 128 * 4];
         self.shelf = Shelf::default();
         self.dirty = true;
@@ -223,6 +226,30 @@ impl GlyphAtlas {
         } else {
             self.cache.insert((c, style), glyph);
         }
+        Some(glyph)
+    }
+
+    /// Looks up a cached shaped cluster glyph without modifying the atlas.
+    #[must_use]
+    pub fn get_cluster(&self, cluster: &str) -> Option<CachedGlyph> {
+        self.cluster_cache.get(cluster).copied()
+    }
+
+    /// Shapes and rasterizes a multi-codepoint grapheme cluster. Returns None if it cannot be composed
+    /// or if the atlas cannot fit it.
+    pub fn get_or_insert_cluster(
+        &mut self,
+        cluster: &str,
+        flags: CellFlags,
+        fonts: &FontManager,
+    ) -> Option<CachedGlyph> {
+        if let Some(glyph) = self.cluster_cache.get(cluster) {
+            return Some(*glyph);
+        }
+        let key = fonts.shape_cluster(cluster, flags)?;
+        let rasterized = fonts.rasterize(key);
+        let glyph = self.insert_bitmap(&rasterized)?;
+        self.cluster_cache.insert(cluster.to_string(), glyph);
         Some(glyph)
     }
 }

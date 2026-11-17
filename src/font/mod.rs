@@ -353,6 +353,50 @@ impl FontManager {
         }
     }
 
+    /// Shapes a multi-codepoint cluster against the font chain.
+    ///
+    /// Returns `Some(FaceKey)` if a font composes the cluster into a single ligature glyph.
+    #[must_use]
+    pub fn shape_cluster(&self, cluster: &str, flags: CellFlags) -> Option<FaceKey> {
+        let style = (style_index(flags) as u8).min(3);
+        self.ensure_chain(style);
+        let binding = self.chains.borrow();
+        let chain = binding[style as usize].as_ref().unwrap_or(&self.regular);
+
+        // Tier 1: Primary font
+        if let Some(glyph) = chain.primary.shape_cluster(cluster) {
+            return Some(FaceKey {
+                face: 0,
+                glyph,
+                style,
+            });
+        }
+
+        // Tier 2: User-configured fallback fonts
+        for (idx, fallback) in chain.fallbacks.iter().enumerate() {
+            if let Some(glyph) = fallback.shape_cluster(cluster) {
+                return Some(FaceKey {
+                    face: (idx + 1) as u16,
+                    glyph,
+                    style,
+                });
+            }
+        }
+
+        let num_configured = (1 + chain.fallbacks.len()) as u16;
+        drop(binding);
+
+        // Tier 3: Dynamic fallback discovery
+        let mut fallbacks = self.fallbacks.borrow_mut();
+        let preferred = self.family();
+        let (face_idx, glyph) = fallbacks.resolve_cluster(cluster, style, preferred)?;
+        Some(FaceKey {
+            face: num_configured + face_idx,
+            glyph,
+            style,
+        })
+    }
+
     /// Rasterizes a resolved glyph.
     pub fn rasterize(&self, key: FaceKey) -> RasterizedGlyph {
         if key.glyph == 0 {
@@ -716,17 +760,22 @@ mod tests {
     fn test_ascii_direct_cache_consistency() {
         let fonts = fonts();
         let mut atlas = GlyphAtlas::new(256, 256);
-        for flags in [
+        let test_cases = [
             CellFlags::empty(),
             CellFlags::BOLD,
             CellFlags::ITALIC,
             CellFlags::BOLD | CellFlags::ITALIC,
-        ] {
-            for c in ['A', 'z', '0', '$', ' '] {
-                let inserted = atlas.get_or_insert(c, flags, fonts).expect("fit ascii");
-                let retrieved = atlas.get(c, flags, fonts).expect("cached ascii");
-                assert_eq!(inserted, retrieved);
-            }
+        ]
+        .into_iter()
+        .flat_map(|flags| {
+            ['A', 'z', '0', '$', ' ']
+                .into_iter()
+                .map(move |c| (flags, c))
+        });
+        for (flags, c) in test_cases {
+            let inserted = atlas.get_or_insert(c, flags, fonts).expect("fit ascii");
+            let retrieved = atlas.get(c, flags, fonts).expect("cached ascii");
+            assert_eq!(inserted, retrieved);
         }
         // Atlas clear invalidates ASCII cache
         atlas.clear();
@@ -1076,6 +1125,37 @@ mod tests {
                 .unwrap_or_else(|| panic!("atlas must fit emoji {emoji}"));
             assert!(cached.colored, "emoji {emoji} must be colored");
             assert!(cached.width > 0 && cached.height > 0);
+        }
+    }
+
+    #[test]
+    fn emoji_clusters_composed_and_cached_in_atlas() {
+        let path = std::path::Path::new("/usr/share/fonts/noto/NotoColorEmoji.ttf");
+        if !path.exists() {
+            return;
+        }
+        let fonts = fonts();
+        let mut atlas = GlyphAtlas::new(256, 256);
+
+        for cluster in ["🇨🇳", "👨‍👩‍👧‍👦", "1️⃣", "👍🏽", "❤️"] {
+            let key = fonts.shape_cluster(cluster, CellFlags::empty());
+            assert!(
+                key.is_some(),
+                "cluster {cluster} must resolve to a composed FaceKey"
+            );
+            let cached = atlas
+                .get_or_insert_cluster(cluster, CellFlags::empty(), fonts)
+                .unwrap_or_else(|| panic!("atlas must fit cluster {cluster}"));
+            assert!(
+                cached.colored,
+                "composed emoji cluster {cluster} must be colored"
+            );
+            assert!(cached.width > 0 && cached.height > 0);
+
+            let retrieved = atlas
+                .get_cluster(cluster)
+                .expect("retrieved cluster from atlas");
+            assert_eq!(retrieved, cached);
         }
     }
 }
