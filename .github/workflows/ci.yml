@@ -4,7 +4,11 @@ on:
   push:
     branches:
       - main
+    paths:
+      - '**'
   pull_request:
+    paths:
+      - '**'
   workflow_dispatch:
 
 permissions:
