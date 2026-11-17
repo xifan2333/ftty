@@ -67,9 +67,9 @@ All coding agents must strictly adhere to the SOP:
 
 1. Inspect issue: `gh issue view <id>`
 2. Checkout feature branch: `git checkout -b <branch_name>`
-3. Empty commit and push (the `[skip ci]` suffix keeps the placeholder out of CI — it changes no files, and GitHub skips push/PR runs whose head commit carries a skip instruction):
+3. Empty commit and push:
    ```bash
-   git commit --allow-empty -m "<type>(<scope>): start <task_summary> (#<issue_id>) [skip ci]"
+   git commit --allow-empty -m "<type>(<scope>): start <task_summary> (#<issue_id>)"
    git push -u origin <branch_name>
    ```
 4. Create Draft PR with all checklist items unchecked (`- [ ]`):
