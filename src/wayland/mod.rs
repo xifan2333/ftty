@@ -191,9 +191,12 @@ mod tests {
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
 
+    use wayland_client::protocol::wl_compositor::WlCompositor;
     use wayland_client::protocol::wl_data_device_manager::WlDataDeviceManager;
+    use wayland_client::protocol::wl_registry::WlRegistry;
     use wayland_client::protocol::wl_seat::WlSeat;
-    use wayland_client::{Connection, Proxy};
+    use wayland_client::{Connection, Proxy, QueueHandle};
+    use wayland_protocols::xdg::shell::client::xdg_wm_base::XdgWmBase;
 
     use crate::event_loop::AppState;
     use crate::input::mouse::{MouseEncoding, MouseTracking};
@@ -202,6 +205,58 @@ mod tests {
     use crate::pty::Pty;
     use crate::session::TerminalSession;
     use crate::wayland::{WaylandState, WindowState};
+
+    /// Boots a wire-test harness: a connected client/server socket pair, its event
+    /// queue and registry, and a freshly spawned app. No compositor globals are bound yet.
+    fn test_app() -> (
+        Connection,
+        wayland_client::EventQueue<AppState>,
+        QueueHandle<AppState>,
+        WlRegistry,
+        UnixStream,
+        AppState,
+    ) {
+        let (client, server) = UnixStream::pair().expect("socketpair");
+        let conn = Connection::from_socket(client).expect("conn");
+        let queue = conn.new_event_queue::<AppState>();
+        let qh = queue.handle();
+        let registry = conn.display().get_registry(&qh, ());
+        let term = Terminal::new(80, 24, 100);
+        let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
+        let app = AppState::new(TerminalSession::new(term, pty)).expect("app");
+        (conn, queue, qh, registry, server, app)
+    }
+
+    /// Binds the compositor and xdg-shell globals and creates the toplevel window.
+    fn with_window(app: &mut AppState, registry: &WlRegistry, qh: &QueueHandle<AppState>) {
+        let comp = registry.bind::<WlCompositor, _, _>(1, 4, qh, ());
+        app.wayland.compositor = Some(comp);
+        let xdg = registry.bind::<XdgWmBase, _, _>(2, 1, qh, ());
+        app.wayland.xdg_wm_base = Some(xdg);
+        app.wayland.init_window(qh);
+    }
+
+    /// Drains one round-trip of compositor wire events into the app.
+    fn dispatch_wire(
+        conn: &Connection,
+        queue: &mut wayland_client::EventQueue<AppState>,
+        app: &mut AppState,
+    ) {
+        conn.prepare_read()
+            .expect("prepare read")
+            .read()
+            .expect("read");
+        queue.dispatch_pending(app).expect("dispatch");
+    }
+
+    /// Writes a sequence of 32-bit little-endian words to the mock compositor.
+    fn write_words(server: &mut UnixStream, words: &[u32]) {
+        let mut events = Vec::new();
+        for word in words {
+            events.extend_from_slice(&word.to_ne_bytes());
+        }
+        server.write_all(&events).expect("write wire events");
+    }
 
     #[test]
     fn test_wayland_state_initialization() {
@@ -336,31 +391,8 @@ mod tests {
     fn test_xdg_toplevel_configure_sizing_behavior() {
         use wayland_protocols::xdg::shell::client::xdg_toplevel::{Event, XdgToplevel};
 
-        let (client, server) = std::os::unix::net::UnixStream::pair().expect("socketpair");
-        let conn = Connection::from_socket(client).expect("conn");
-        let queue = conn.new_event_queue::<AppState>();
-        let qh = queue.handle();
-        let registry = conn.display().get_registry(&qh, ());
-        let term = Terminal::new(80, 24, 100);
-        let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
-        let mut app = AppState::new(TerminalSession::new(term, pty)).expect("app");
-
-        let comp = registry.bind::<wayland_client::protocol::wl_compositor::WlCompositor, _, _>(
-            1,
-            4,
-            &qh,
-            (),
-        );
-        app.wayland.compositor = Some(comp);
-        let xdg = registry
-            .bind::<wayland_protocols::xdg::shell::client::xdg_wm_base::XdgWmBase, _, _>(
-                2,
-                1,
-                &qh,
-                (),
-            );
-        app.wayland.xdg_wm_base = Some(xdg);
-        app.wayland.init_window(&qh);
+        let (conn, _queue, qh, registry, _server, mut app) = test_app();
+        with_window(&mut app, &registry, &qh);
         let toplevel = app.wayland.xdg_toplevel.clone().expect("toplevel");
 
         // 1. Positive configure event dispatched through production handler schedules 1351x735
@@ -395,16 +427,11 @@ mod tests {
             app.pending_size,
             Some([app.wayland.width, app.wayland.height])
         );
-        drop(server);
     }
 
     #[test]
     fn clipboard_offer_is_created_and_dispatched_from_the_wire() {
-        let (client, mut server) = UnixStream::pair().unwrap();
-        let conn = Connection::from_socket(client).unwrap();
-        let mut queue = conn.new_event_queue::<AppState>();
-        let qh = queue.handle();
-        let registry = conn.display().get_registry(&qh, ());
+        let (conn, mut queue, qh, registry, mut server, mut app) = test_app();
         let manager = registry.bind::<WlDataDeviceManager, _, _>(1, 3, &qh, ());
         let seat = registry.bind::<WlSeat, _, _>(2, 5, &qh, ());
         let device = manager.get_data_device(&seat, &qh, ());
@@ -432,12 +459,7 @@ mod tests {
             events.extend_from_slice(&word.to_ne_bytes());
         }
         server.write_all(&events).unwrap();
-
-        let term = Terminal::new(80, 24, 100);
-        let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).unwrap();
-        let mut app = AppState::new(TerminalSession::new(term, pty)).unwrap();
-        conn.prepare_read().unwrap().read().unwrap();
-        queue.dispatch_pending(&mut app).unwrap();
+        dispatch_wire(&conn, &mut queue, &mut app);
 
         let offer = app.wayland.current_offer.as_ref().unwrap();
         assert_eq!(offer.offer.id().protocol_id(), offer_id);
@@ -447,21 +469,11 @@ mod tests {
 
     #[test]
     fn pointer_events_from_the_wire_drive_mouse_reports() {
-        let (client, mut server) = UnixStream::pair().unwrap();
-        let conn = Connection::from_socket(client).unwrap();
-        let mut queue = conn.new_event_queue::<AppState>();
-        let qh = queue.handle();
-        let registry = conn.display().get_registry(&qh, ());
+        let (conn, mut queue, qh, registry, mut server, mut app) = test_app();
         let seat = registry.bind::<WlSeat, _, _>(1, 5, &qh, ());
-        let mut events = Vec::new();
-        for word in [seat.id().protocol_id(), 12 << 16, 1] {
-            events.extend_from_slice(&word.to_ne_bytes());
-        }
-        server.write_all(&events).unwrap();
+        write_words(&mut server, &[seat.id().protocol_id(), 12 << 16, 1]);
+        dispatch_wire(&conn, &mut queue, &mut app);
 
-        let term = Terminal::new(80, 24, 100);
-        let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).unwrap();
-        let mut app = AppState::new(TerminalSession::new(term, pty)).unwrap();
         app.session.terminal.mouse.tracking = MouseTracking::Drag;
         app.session.terminal.mouse.encoding = MouseEncoding::Sgr;
         conn.prepare_read().unwrap().read().unwrap();
@@ -477,16 +489,9 @@ mod tests {
         let y = (((ch * 1.5) + pad_y) * 256.0) as i32 as u32;
 
         // wl_pointer.motion(time, x, y) followed by wl_pointer.button(serial, time, BTN_LEFT, pressed).
-        let mut events = Vec::new();
-        for word in [pointer_id, (20 << 16) | 2, 7, x, y] {
-            events.extend_from_slice(&word.to_ne_bytes());
-        }
-        for word in [pointer_id, (24 << 16) | 3, 9, 9, 0x110, 1] {
-            events.extend_from_slice(&word.to_ne_bytes());
-        }
-        server.write_all(&events).unwrap();
-        conn.prepare_read().unwrap().read().unwrap();
-        queue.dispatch_pending(&mut app).unwrap();
+        write_words(&mut server, &[pointer_id, (20 << 16) | 2, 7, x, y]);
+        write_words(&mut server, &[pointer_id, (24 << 16) | 3, 9, 9, 0x110, 1]);
+        dispatch_wire(&conn, &mut queue, &mut app);
 
         assert!(app.pointer.mouse_reported, "left press was not forwarded");
         assert_eq!(app.pointer.mouse_button, 0);
@@ -500,13 +505,11 @@ mod tests {
         app.session.terminal.mouse.tracking = MouseTracking::Disabled;
         app.pointer.mouse_reported = false;
         app.pointer.mouse_pos = [(cw * 2.5) + pad_x, (ch * 1.5) + pad_y];
-        let mut events = Vec::new();
-        for word in [pointer_id, (24 << 16) | 3, 10, 400, 0x110, 1] {
-            events.extend_from_slice(&word.to_ne_bytes());
-        }
-        server.write_all(&events).unwrap();
-        conn.prepare_read().unwrap().read().unwrap();
-        queue.dispatch_pending(&mut app).unwrap();
+        write_words(
+            &mut server,
+            &[pointer_id, (24 << 16) | 3, 10, 400, 0x110, 1],
+        );
+        dispatch_wire(&conn, &mut queue, &mut app);
         assert!(app.pointer.mouse_pressed);
         assert!(!app.pointer.mouse_reported);
         assert_eq!(app.pointer.selection.start, SelectionPoint::new(1, 2));
@@ -601,32 +604,8 @@ mod tests {
 
     #[test]
     fn surface_enter_forces_redraw_immediately() {
-        let (client, server) = UnixStream::pair().expect("socketpair");
-        let conn = Connection::from_socket(client).expect("conn");
-        let queue = conn.new_event_queue::<AppState>();
-        let qh = queue.handle();
-        let registry = conn.display().get_registry(&qh, ());
-
-        let term = Terminal::new(80, 24, 100);
-        let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
-        let mut app = AppState::new(TerminalSession::new(term, pty)).expect("app");
-
-        let comp = registry.bind::<wayland_client::protocol::wl_compositor::WlCompositor, _, _>(
-            1,
-            4,
-            &qh,
-            (),
-        );
-        app.wayland.compositor = Some(comp);
-        let xdg = registry
-            .bind::<wayland_protocols::xdg::shell::client::xdg_wm_base::XdgWmBase, _, _>(
-                2,
-                1,
-                &qh,
-                (),
-            );
-        app.wayland.xdg_wm_base = Some(xdg);
-        app.wayland.init_window(&qh);
+        let (conn, _queue, qh, registry, _server, mut app) = test_app();
+        with_window(&mut app, &registry, &qh);
 
         let surface = app.wayland.surface.clone().expect("wl_surface bound");
         let output =
@@ -657,7 +636,6 @@ mod tests {
         // (so the frame loop is unblocked) and a redraw flag is set, without waiting for input.
         assert!(app.frame_callback.is_none());
         assert!(app.needs_redraw);
-        drop(server);
     }
 
     #[test]
@@ -688,30 +666,14 @@ mod tests {
             seat_id: u32,
             caps: u32,
         ) {
-            let mut events = Vec::new();
-            for word in [seat_id, 12 << 16, caps] {
-                events.extend_from_slice(&word.to_ne_bytes());
-            }
-            server.write_all(&events).expect("write capabilities");
-            conn.prepare_read()
-                .expect("prepare read")
-                .read()
-                .expect("read");
-            queue.dispatch_pending(app).expect("dispatch");
+            write_words(server, &[seat_id, 12 << 16, caps]);
+            dispatch_wire(conn, queue, app);
         }
 
-        let (client, mut server) = UnixStream::pair().expect("socketpair");
-        let conn = Connection::from_socket(client).expect("conn");
-        let mut queue = conn.new_event_queue::<AppState>();
-        let qh = queue.handle();
-        let registry = conn.display().get_registry(&qh, ());
+        let (conn, mut queue, qh, registry, mut server, mut app) = test_app();
         // A legacy seat creates a wl_keyboard that predates the `release` request (version 3).
         let seat = registry.bind::<WlSeat, _, _>(1, 2, &qh, ());
         let seat_id = seat.id().protocol_id();
-
-        let term = Terminal::new(80, 24, 100);
-        let pty = Pty::spawn(Some(&["/bin/sh"]), 80, 24).expect("PTY spawn");
-        let mut app = AppState::new(TerminalSession::new(term, pty)).expect("app");
 
         let keyboard_capability = 2;
         send_capabilities(

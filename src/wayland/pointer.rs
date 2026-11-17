@@ -81,16 +81,8 @@ impl AppState {
                     .grid
                     .scroll_viewport_down(lines as usize);
             }
-            let resolver = |id: u32| self.session.terminal.hyperlink_url(id);
-            let ctx = Self::make_pointer_context(
-                &self.session.terminal,
-                &self.font_mgr,
-                &self.config,
-                &self.keyboard,
-                &self.wayland,
-                Some(&resolver),
-            );
-            let (_, shape_update) = self.pointer.update_hover_state(&ctx);
+            let (_, shape_update) =
+                self.with_pointer_ctx(|pointer, ctx| pointer.update_hover_state(ctx));
             if let Some(shape) = shape_update
                 && let Some(device) = &self.wayland.cursor_shape_device
                 && self.pointer_serial != 0
@@ -101,6 +93,90 @@ impl AppState {
         if outcome.needs_redraw {
             self.needs_redraw = true;
         }
+    }
+
+    /// Runs a controller closure with a freshly built transient pointer context.
+    ///
+    /// The context borrows `session`, `font_mgr`, `config`, `keyboard`, and `wayland`
+    /// through discrete field borrows. Handing `&mut self.pointer` to the closure keeps
+    /// the mutable controller borrow disjoint from the context's borrows — something a
+    /// plain `&self` receiver (like [`Self::pointer_ctx`]) cannot express.
+    fn with_pointer_ctx<R>(
+        &mut self,
+        run: impl for<'x> FnOnce(&mut PointerController, &PointerContext<'x>) -> R,
+    ) -> R {
+        let resolver = |id: u32| self.session.terminal.hyperlink_url(id);
+        let ctx = Self::make_pointer_context(
+            &self.session.terminal,
+            &self.font_mgr,
+            &self.config,
+            &self.keyboard,
+            &self.wayland,
+            Some(&resolver),
+        );
+        run(&mut self.pointer, &ctx)
+    }
+
+    /// Handles `wl_pointer.enter` from the wire, then dispatches the declarative outcome.
+    pub(crate) fn handle_pointer_enter(
+        &mut self,
+        serial: u32,
+        surface_x: f64,
+        surface_y: f64,
+        conn: &Connection,
+    ) {
+        self.pointer_serial = serial;
+        self.last_serial = serial;
+        let outcome = self.with_pointer_ctx(|pointer, ctx| {
+            pointer.handle_enter(surface_x, surface_y, serial, ctx)
+        });
+        self.dispatch_pointer_outcome(outcome, conn);
+    }
+
+    /// Handles `wl_pointer.leave` from the wire, then dispatches the declarative outcome.
+    pub(crate) fn handle_pointer_leave(&mut self, conn: &Connection) {
+        let outcome = self.pointer.handle_leave();
+        self.dispatch_pointer_outcome(outcome, conn);
+    }
+
+    /// Handles `wl_pointer.motion` from the wire, then dispatches the declarative outcome.
+    pub(crate) fn handle_pointer_motion(
+        &mut self,
+        surface_x: f64,
+        surface_y: f64,
+        conn: &Connection,
+    ) {
+        let outcome =
+            self.with_pointer_ctx(|pointer, ctx| pointer.handle_motion(surface_x, surface_y, ctx));
+        self.dispatch_pointer_outcome(outcome, conn);
+    }
+
+    /// Handles `wl_pointer.button` from the wire, then dispatches the declarative outcome.
+    pub(crate) fn handle_pointer_button(
+        &mut self,
+        button: u32,
+        pressed: bool,
+        time: u32,
+        serial: u32,
+        conn: &Connection,
+    ) {
+        self.last_serial = serial;
+        let outcome = self.with_pointer_ctx(|pointer, ctx| {
+            pointer.handle_button(button, pressed, time, serial, ctx)
+        });
+        self.dispatch_pointer_outcome(outcome, conn);
+    }
+
+    /// Handles vertical `wl_pointer.axis` scroll from the wire, then dispatches the outcome.
+    pub(crate) fn handle_pointer_axis(&mut self, value: f64, conn: &Connection) {
+        let outcome = self.with_pointer_ctx(|pointer, ctx| pointer.handle_axis(value, ctx));
+        self.dispatch_pointer_outcome(outcome, conn);
+    }
+
+    /// Handles `wl_pointer.axis_stop` from the wire, then dispatches the declarative outcome.
+    pub(crate) fn handle_pointer_axis_stop(&mut self, conn: &Connection) {
+        let outcome = self.pointer.handle_axis_stop();
+        self.dispatch_pointer_outcome(outcome, conn);
     }
 
     /// Initializes the cursor shape device if protocol is available and updates shape if focused.
@@ -123,9 +199,7 @@ impl AppState {
         if !self.pointer.is_in_surface() || self.pointer_serial == 0 {
             return;
         }
-        let resolver = |id: u32| self.session.terminal.hyperlink_url(id);
-        let ctx = self.pointer_ctx(Some(&resolver));
-        let shape = self.pointer.expected_cursor_shape(&ctx);
+        let shape = self.with_pointer_ctx(|pointer, ctx| pointer.expected_cursor_shape(ctx));
         if self.pointer.current_cursor_shape() == Some(shape) {
             return;
         }
@@ -137,16 +211,8 @@ impl AppState {
 
     /// Updates the hovered hyperlink and cursor shape based on current pointer coordinates.
     pub fn update_hover_state(&mut self) {
-        let resolver = |id: u32| self.session.terminal.hyperlink_url(id);
-        let ctx = Self::make_pointer_context(
-            &self.session.terminal,
-            &self.font_mgr,
-            &self.config,
-            &self.keyboard,
-            &self.wayland,
-            Some(&resolver),
-        );
-        let (span_changed, shape_update) = self.pointer.update_hover_state(&ctx);
+        let (span_changed, shape_update) =
+            self.with_pointer_ctx(|pointer, ctx| pointer.update_hover_state(ctx));
         if span_changed {
             self.needs_redraw = true;
         }
