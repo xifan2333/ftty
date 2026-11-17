@@ -210,50 +210,7 @@ impl Renderer {
             let gl = &self.gl;
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, self.texture);
-            if atlas.dirty {
-                gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
-                if atlas.full_upload || atlas.dirty_rect.is_none() {
-                    gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, 0);
-                    gl.pixel_store_i32(glow::UNPACK_SKIP_PIXELS, 0);
-                    gl.pixel_store_i32(glow::UNPACK_SKIP_ROWS, 0);
-                    gl.tex_image_2d(
-                        glow::TEXTURE_2D,
-                        0,
-                        glow::RGBA as i32,
-                        atlas.width as i32,
-                        atlas.height as i32,
-                        0,
-                        glow::RGBA,
-                        glow::UNSIGNED_BYTE,
-                        glow::PixelUnpackData::Slice(Some(&atlas.pixels)),
-                    );
-                    atlas.full_upload = false;
-                } else if let Some([min_x, min_y, max_x, max_y]) = atlas.dirty_rect {
-                    let sub_w = (max_x - min_x).min(atlas.width - min_x);
-                    let sub_h = (max_y - min_y).min(atlas.height - min_y);
-                    if sub_w > 0 && sub_h > 0 {
-                        gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, atlas.width as i32);
-                        gl.pixel_store_i32(glow::UNPACK_SKIP_PIXELS, min_x as i32);
-                        gl.pixel_store_i32(glow::UNPACK_SKIP_ROWS, min_y as i32);
-                        gl.tex_sub_image_2d(
-                            glow::TEXTURE_2D,
-                            0,
-                            min_x as i32,
-                            min_y as i32,
-                            sub_w as i32,
-                            sub_h as i32,
-                            glow::RGBA,
-                            glow::UNSIGNED_BYTE,
-                            glow::PixelUnpackData::Slice(Some(&atlas.pixels)),
-                        );
-                        gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, 0);
-                        gl.pixel_store_i32(glow::UNPACK_SKIP_PIXELS, 0);
-                        gl.pixel_store_i32(glow::UNPACK_SKIP_ROWS, 0);
-                    }
-                }
-                atlas.dirty_rect = None;
-                atlas.dirty = false;
-            }
+            Self::upload_atlas(gl, atlas);
             gl.use_program(self.program);
             gl.uniform_1_i32(self.image_mode.as_ref(), 0);
             gl.uniform_1_i32(
@@ -285,6 +242,63 @@ impl Renderer {
         self.render_image_placements(grid, false, fonts.metrics, options);
         self.render_unicode_placeholders(grid, fonts.metrics, options);
         Ok(())
+    }
+
+    /// Uploads the glyph atlas texture, either as a full image or as a dirty sub-rect.
+    ///
+    /// # Safety
+    /// The caller must hold a current GL context that owns the bound atlas texture, and
+    /// `atlas.pixels` must cover the uploaded region.
+    unsafe fn upload_atlas(gl: &glow::Context, atlas: &mut GlyphAtlas) {
+        // SAFETY: the GL context is current and owns the atlas texture; `atlas.pixels`
+        // covers the full/sub upload and outlives these calls.
+        unsafe {
+            if !atlas.dirty {
+                return;
+            }
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+            if atlas.full_upload || atlas.dirty_rect.is_none() {
+                gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, 0);
+                gl.pixel_store_i32(glow::UNPACK_SKIP_PIXELS, 0);
+                gl.pixel_store_i32(glow::UNPACK_SKIP_ROWS, 0);
+                gl.tex_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    glow::RGBA as i32,
+                    atlas.width as i32,
+                    atlas.height as i32,
+                    0,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::Slice(Some(&atlas.pixels)),
+                );
+                atlas.full_upload = false;
+            } else if let Some([min_x, min_y, max_x, max_y]) = atlas.dirty_rect {
+                let sub_w = (max_x - min_x).min(atlas.width - min_x);
+                let sub_h = (max_y - min_y).min(atlas.height - min_y);
+                if sub_w > 0 && sub_h > 0 {
+                    gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, atlas.width as i32);
+                    gl.pixel_store_i32(glow::UNPACK_SKIP_PIXELS, min_x as i32);
+                    gl.pixel_store_i32(glow::UNPACK_SKIP_ROWS, min_y as i32);
+                    gl.tex_sub_image_2d(
+                        glow::TEXTURE_2D,
+                        0,
+                        min_x as i32,
+                        min_y as i32,
+                        sub_w as i32,
+                        sub_h as i32,
+                        glow::RGBA,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::Slice(Some(&atlas.pixels)),
+                    );
+                    gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, 0);
+                    gl.pixel_store_i32(glow::UNPACK_SKIP_PIXELS, 0);
+                    gl.pixel_store_i32(glow::UNPACK_SKIP_ROWS, 0);
+                }
+            }
+            atlas.dirty_rect = None;
+            atlas.dirty = false;
+        }
     }
 
     pub(crate) unsafe fn upload_vbo(
@@ -361,15 +375,29 @@ mod tests {
     use crate::render::{ColorScheme, HoveredHyperlinkSpan, RenderOptions};
     use crate::width::KITTY_PLACEHOLDER;
 
-    #[test]
-    fn test_selection_background_color_constant() {
-        assert_eq!(SELECTION_BG, [0.35, 0.45, 0.70, 0.5]);
+    /// Loads the shared system monospace font used by every render test.
+    fn fonts() -> FontManager {
+        FontManager::load(14.0).expect("system monospace font")
     }
 
-    fn frame(grid: &Grid) -> (Vec<f32>, GlyphAtlas) {
-        let fonts = FontManager::load(14.0).expect("system monospace font");
-        let mut atlas = GlyphAtlas::new(16, 16);
-        prepare_atlas(grid, &fonts, &mut atlas, None);
+    /// Builds a rasterized atlas for a grid, sized and optionally preedit-seeded.
+    fn atlas_for(
+        grid: &Grid,
+        fonts: &FontManager,
+        size: u32,
+        preedit: Option<&Preedit>,
+    ) -> GlyphAtlas {
+        let mut atlas = GlyphAtlas::new(size, size);
+        prepare_atlas(grid, fonts, &mut atlas, preedit);
+        atlas
+    }
+
+    fn vertices_for(
+        grid: &Grid,
+        fonts: &FontManager,
+        atlas: &GlyphAtlas,
+        options: RenderOptions<'_>,
+    ) -> Vec<f32> {
         let mut vertices = Vec::new();
         build_vertices(
             &mut vertices,
@@ -380,10 +408,57 @@ mod tests {
                 Rgb::new(24, 24, 24),
             ),
             fonts.metrics,
-            &fonts,
-            &atlas,
-            RenderOptions::default(),
+            fonts,
+            atlas,
+            options,
         );
+        vertices
+    }
+
+    /// Builds a render context over the shared scheme/metrics for row/dynamic builders.
+    fn ctx_for<'a>(
+        grid: &'a Grid,
+        colors: ColorScheme<'a>,
+        fonts: &'a FontManager,
+        atlas: &'a GlyphAtlas,
+        options: RenderOptions<'a>,
+        cursor: Option<(usize, usize, usize)>,
+    ) -> crate::render::text::RenderContext<'a> {
+        crate::render::text::RenderContext {
+            grid,
+            colors,
+            metrics: fonts.metrics,
+            fonts,
+            atlas,
+            options,
+            cursor,
+        }
+    }
+
+    /// Builds a batch-test pipeline harness: fresh pipeline, grid, fonts, atlas, and palette.
+    fn pipeline_harness() -> (
+        crate::render::RenderPipeline,
+        Grid,
+        FontManager,
+        GlyphAtlas,
+        [Rgb; 256],
+    ) {
+        let pipeline = crate::render::RenderPipeline::new();
+        let grid = Grid::new(80, 24, 100);
+        let fonts = fonts();
+        let atlas = GlyphAtlas::new(16, 16);
+        (pipeline, grid, fonts, atlas, default_256_palette())
+    }
+
+    #[test]
+    fn test_selection_background_color_constant() {
+        assert_eq!(SELECTION_BG, [0.35, 0.45, 0.70, 0.5]);
+    }
+
+    fn frame(grid: &Grid) -> (Vec<f32>, GlyphAtlas) {
+        let fonts = fonts();
+        let atlas = atlas_for(grid, &fonts, 16, None);
+        let vertices = vertices_for(grid, &fonts, &atlas, RenderOptions::default());
         (vertices, atlas)
     }
 
@@ -469,7 +544,7 @@ mod tests {
 
     #[test]
     fn cjk_cells_render_through_fallback_faces() {
-        let fonts = FontManager::load(14.0).expect("system monospace font");
+        let fonts = fonts();
         if fonts.face_key('中', CellFlags::empty()).face == 0 {
             return; // No CJK-capable face is installed on this machine.
         }
@@ -479,22 +554,8 @@ mod tests {
         grid.lines[0].cells[0].flags = CellFlags::WIDE_CHAR;
         grid.lines[0].cells[1].flags = CellFlags::WIDE_CHAR_SPACER;
 
-        let mut atlas = GlyphAtlas::new(64, 64);
-        prepare_atlas(&grid, &fonts, &mut atlas, None);
-        let mut vertices = Vec::new();
-        build_vertices(
-            &mut vertices,
-            &grid,
-            ColorScheme::new(
-                &default_256_palette(),
-                Rgb::new(220, 220, 220),
-                Rgb::new(24, 24, 24),
-            ),
-            fonts.metrics,
-            &fonts,
-            &atlas,
-            RenderOptions::default(),
-        );
+        let atlas = atlas_for(&grid, &fonts, 64, None);
+        let vertices = vertices_for(&grid, &fonts, &atlas, RenderOptions::default());
         assert_eq!(vertices.len(), 48, "one quad for the wide CJK glyph");
         // A rasterized glyph samples the atlas instead of using the solid placeholder.
         assert!(vertices[2] >= 0.0, "expected a rasterized CJK glyph quad");
@@ -533,7 +594,7 @@ mod tests {
 
     #[test]
     fn atlas_exhaustion_renders_fallback_instead_of_dropping_text() {
-        let fonts = FontManager::load(14.0).expect("system monospace font");
+        let fonts = fonts();
         let mut grid = Grid::new(1, 1, 0);
         grid.cursor.visible = false;
         grid.lines[0].cells[0].c = 'Z';
@@ -542,61 +603,28 @@ mod tests {
         let mut atlas = GlyphAtlas::new(16, 16);
         let _ = atlas.get_or_insert('?', CellFlags::empty(), &fonts);
 
-        let mut vertices = Vec::new();
-        build_vertices(
-            &mut vertices,
-            &grid,
-            ColorScheme::new(
-                &default_256_palette(),
-                Rgb::new(220, 220, 220),
-                Rgb::new(24, 24, 24),
-            ),
-            fonts.metrics,
-            &fonts,
-            &atlas,
-            RenderOptions::default(),
-        );
+        let vertices = vertices_for(&grid, &fonts, &atlas, RenderOptions::default());
         // Ensure vertices were generated for the character cell rather than dropped.
         assert_eq!(vertices.len(), 48);
 
         // Even with a completely empty atlas (no '?' either), a placeholder quad is generated.
         let empty_atlas = GlyphAtlas::new(16, 16);
-        let mut placeholder_vertices = Vec::new();
-        build_vertices(
-            &mut placeholder_vertices,
-            &grid,
-            ColorScheme::new(
-                &default_256_palette(),
-                Rgb::new(220, 220, 220),
-                Rgb::new(24, 24, 24),
-            ),
-            fonts.metrics,
-            &fonts,
-            &empty_atlas,
-            RenderOptions::default(),
-        );
+        let placeholder_vertices =
+            vertices_for(&grid, &fonts, &empty_atlas, RenderOptions::default());
         assert_eq!(placeholder_vertices.len(), 48);
         assert_eq!(placeholder_vertices[2], -1.0); // SOLID_UV placeholder
     }
 
     #[test]
     fn test_padding_offsets_vertices() {
-        let fonts = FontManager::load(14.0).expect("system monospace font");
+        let fonts = fonts();
         let mut grid = Grid::new(1, 1, 0);
         grid.cursor.visible = false;
         grid.lines[0].cells[0].bg = Color::Rgb(10, 20, 30);
 
         let atlas = GlyphAtlas::new(16, 16);
-        let mut vertices = Vec::new();
-        build_vertices(
-            &mut vertices,
+        let vertices = vertices_for(
             &grid,
-            ColorScheme::new(
-                &default_256_palette(),
-                Rgb::new(220, 220, 220),
-                Rgb::new(24, 24, 24),
-            ),
-            fonts.metrics,
             &fonts,
             &atlas,
             RenderOptions::new([12, 18], None, None),
@@ -619,19 +647,9 @@ mod tests {
             cursor_end: 4,
         };
 
-        let mut atlas = GlyphAtlas::new(64, 64);
-        prepare_atlas(&grid, &fonts, &mut atlas, Some(&preedit));
-
-        let mut vertices = Vec::new();
-        build_vertices(
-            &mut vertices,
+        let atlas = atlas_for(&grid, &fonts, 64, Some(&preedit));
+        let vertices = vertices_for(
             &grid,
-            ColorScheme::new(
-                &default_256_palette(),
-                Rgb::new(220, 220, 220),
-                Rgb::new(24, 24, 24),
-            ),
-            fonts.metrics,
             &fonts,
             &atlas,
             RenderOptions::new([0, 0], Some(&preedit), None),
@@ -642,16 +660,8 @@ mod tests {
 
         // Also test preedit renders when cursor is hidden (!grid.cursor.visible) per Kitty
         grid.cursor.visible = false;
-        let mut hidden_cursor_vertices = Vec::new();
-        build_vertices(
-            &mut hidden_cursor_vertices,
+        let hidden_cursor_vertices = vertices_for(
             &grid,
-            ColorScheme::new(
-                &default_256_palette(),
-                Rgb::new(220, 220, 220),
-                Rgb::new(24, 24, 24),
-            ),
-            fonts.metrics,
             &fonts,
             &atlas,
             RenderOptions::new([0, 0], Some(&preedit), None),
@@ -664,7 +674,7 @@ mod tests {
 
     #[test]
     fn test_wide_preedit_clamped_at_last_column() {
-        let fonts = FontManager::load(14.0).expect("system monospace font");
+        let fonts = fonts();
         let mut grid = Grid::new(5, 2, 0);
         grid.cursor.row = 0;
         grid.cursor.col = 4; // last column
@@ -675,19 +685,9 @@ mod tests {
             cursor_end: 1,
         };
 
-        let mut atlas = GlyphAtlas::new(64, 64);
-        prepare_atlas(&grid, &fonts, &mut atlas, Some(&preedit));
-
-        let mut vertices = Vec::new();
-        build_vertices(
-            &mut vertices,
+        let atlas = atlas_for(&grid, &fonts, 64, Some(&preedit));
+        let vertices = vertices_for(
             &grid,
-            ColorScheme::new(
-                &default_256_palette(),
-                Rgb::new(220, 220, 220),
-                Rgb::new(24, 24, 24),
-            ),
-            fonts.metrics,
             &fonts,
             &atlas,
             RenderOptions::new([10, 10], Some(&preedit), None),
@@ -704,7 +704,7 @@ mod tests {
 
     #[test]
     fn test_hovered_hyperlink_renders_underline() {
-        let fonts = FontManager::load(14.0).expect("system monospace font");
+        let fonts = fonts();
         let mut grid = Grid::new(10, 2, 0);
         grid.cursor.visible = false;
         // Write character with hyperlink_id 1 at line 0, col 0
@@ -717,34 +717,17 @@ mod tests {
             Some(1),
         );
 
-        let mut atlas = GlyphAtlas::new(64, 64);
-        prepare_atlas(&grid, &fonts, &mut atlas, None);
+        let atlas = atlas_for(&grid, &fonts, 64, None);
 
-        let mut vertices_no_hover = Vec::new();
-        build_vertices(
-            &mut vertices_no_hover,
+        let vertices_no_hover = vertices_for(
             &grid,
-            ColorScheme::new(
-                &default_256_palette(),
-                Rgb::new(220, 220, 220),
-                Rgb::new(24, 24, 24),
-            ),
-            fonts.metrics,
             &fonts,
             &atlas,
             RenderOptions::new([0, 0], None, None),
         );
 
-        let mut vertices_mismatched_hover = Vec::new();
-        build_vertices(
-            &mut vertices_mismatched_hover,
+        let vertices_mismatched_hover = vertices_for(
             &grid,
-            ColorScheme::new(
-                &default_256_palette(),
-                Rgb::new(220, 220, 220),
-                Rgb::new(24, 24, 24),
-            ),
-            fonts.metrics,
             &fonts,
             &atlas,
             RenderOptions::new([0, 0], None, None).with_hovered_span(Some(HoveredHyperlinkSpan {
@@ -754,16 +737,8 @@ mod tests {
             })),
         );
 
-        let mut vertices_matched_hover = Vec::new();
-        build_vertices(
-            &mut vertices_matched_hover,
+        let vertices_matched_hover = vertices_for(
             &grid,
-            ColorScheme::new(
-                &default_256_palette(),
-                Rgb::new(220, 220, 220),
-                Rgb::new(24, 24, 24),
-            ),
-            fonts.metrics,
             &fonts,
             &atlas,
             RenderOptions::new([0, 0], None, None).with_hovered_span(Some(HoveredHyperlinkSpan {
@@ -782,7 +757,7 @@ mod tests {
 
     #[test]
     fn test_hovered_hyperlink_scopes_to_span_not_entire_url() {
-        let fonts = FontManager::load(14.0).expect("system monospace font");
+        let fonts = fonts();
         let mut grid = Grid::new(10, 2, 0);
         grid.cursor.visible = false;
         // Line 0: write 'x' with hyperlink 1
@@ -808,20 +783,10 @@ mod tests {
             Some(1),
         );
 
-        let mut atlas = GlyphAtlas::new(64, 64);
-        prepare_atlas(&grid, &fonts, &mut atlas, None);
+        let atlas = atlas_for(&grid, &fonts, 64, None);
 
-        let mut vertices = Vec::new();
-        // Hover ONLY the span on line 1
-        build_vertices(
-            &mut vertices,
+        let vertices = vertices_for(
             &grid,
-            ColorScheme::new(
-                &default_256_palette(),
-                Rgb::new(220, 220, 220),
-                Rgb::new(24, 24, 24),
-            ),
-            fonts.metrics,
             &fonts,
             &atlas,
             RenderOptions::new([0, 0], None, None).with_hovered_span(Some(HoveredHyperlinkSpan {
@@ -870,27 +835,13 @@ mod tests {
             CellFlags::empty(),
         );
 
-        let mut atlas = GlyphAtlas::new(64, 64);
-        prepare_atlas(&grid, &fonts, &mut atlas, None);
+        let atlas = atlas_for(&grid, &fonts, 64, None);
 
         // Procedural glyphs must NOT be inserted into atlas
         assert!(atlas.get('█', CellFlags::empty(), &fonts).is_none());
         assert!(atlas.get('─', CellFlags::empty(), &fonts).is_none());
 
-        let mut vertices = Vec::new();
-        build_vertices(
-            &mut vertices,
-            &grid,
-            ColorScheme::new(
-                &default_256_palette(),
-                Rgb::new(220, 220, 220),
-                Rgb::new(24, 24, 24),
-            ),
-            fonts.metrics,
-            &fonts,
-            &atlas,
-            RenderOptions::default(),
-        );
+        let vertices = vertices_for(&grid, &fonts, &atlas, RenderOptions::default());
 
         let cw = fonts.metrics.cell_width as f32;
         let ch = fonts.metrics.cell_height as f32;
@@ -924,7 +875,7 @@ mod tests {
 
     #[test]
     fn test_incremental_dirty_tracking_only_regenerates_modified_row() {
-        let fonts = FontManager::load(14.0).expect("system monospace font");
+        let fonts = fonts();
         let mut grid = Grid::new(10, 5, 0);
         grid.cursor.visible = false;
 
@@ -943,15 +894,14 @@ mod tests {
 
         let mut row_bg = vec![Vec::new(); 5];
         let mut row_fg = vec![Vec::new(); 5];
-        let ctx = crate::render::text::RenderContext {
-            grid: &grid,
+        let ctx = ctx_for(
+            &grid,
             colors,
-            metrics: fonts.metrics,
-            fonts: &fonts,
-            atlas: &atlas,
-            options: RenderOptions::default(),
-            cursor: None,
-        };
+            &fonts,
+            &atlas,
+            RenderOptions::default(),
+            None,
+        );
 
         // Initially, all rows generated and cleared
         for (r, (bg, fg)) in row_bg.iter_mut().zip(row_fg.iter_mut()).enumerate() {
@@ -985,7 +935,7 @@ mod tests {
 
     #[test]
     fn test_column_resize_regenerates_row_foregrounds_and_backgrounds() {
-        let fonts = FontManager::load(14.0).expect("system monospace font");
+        let fonts = fonts();
         let mut grid = Grid::new(10, 5, 0);
         grid.cursor.visible = false;
         for r in 0..5 {
@@ -999,22 +949,20 @@ mod tests {
             );
         }
 
-        let mut atlas = GlyphAtlas::new(64, 64);
-        prepare_atlas(&grid, &fonts, &mut atlas, None);
+        let mut atlas = atlas_for(&grid, &fonts, 64, None);
         let palette = default_256_palette();
         let colors = ColorScheme::new(&palette, Rgb::new(220, 220, 220), Rgb::new(24, 24, 24));
 
         let mut row_bg = vec![Vec::new(); 5];
         let mut row_fg = vec![Vec::new(); 5];
-        let ctx = crate::render::text::RenderContext {
-            grid: &grid,
+        let ctx = ctx_for(
+            &grid,
             colors,
-            metrics: fonts.metrics,
-            fonts: &fonts,
-            atlas: &atlas,
-            options: RenderOptions::default(),
-            cursor: None,
-        };
+            &fonts,
+            &atlas,
+            RenderOptions::default(),
+            None,
+        );
         for r in 0..5 {
             build_row_backgrounds(&mut row_bg[r], r, &ctx);
             build_row_foregrounds(&mut row_fg[r], r, &ctx);
@@ -1036,15 +984,14 @@ mod tests {
         );
 
         prepare_atlas(&grid, &fonts, &mut atlas, None);
-        let ctx_expanded = crate::render::text::RenderContext {
-            grid: &grid,
+        let ctx_expanded = ctx_for(
+            &grid,
             colors,
-            metrics: fonts.metrics,
-            fonts: &fonts,
-            atlas: &atlas,
-            options: RenderOptions::default(),
-            cursor: None,
-        };
+            &fonts,
+            &atlas,
+            RenderOptions::default(),
+            None,
+        );
 
         // Rebuild row 2: it must generate vertices for both 'X' at col 0 and 'Y' at col 15
         build_row_backgrounds(&mut row_bg[2], 2, &ctx_expanded);
@@ -1077,19 +1024,18 @@ mod tests {
         for col in 2..8 {
             grid.lines[0].cells[col].bg = Color::Rgb(50, 60, 70);
         }
-        let fonts = FontManager::load(14.0).expect("system monospace font");
+        let fonts = fonts();
         let atlas = GlyphAtlas::new(16, 16);
         let mut bg_vertices = Vec::new();
         let palette = default_256_palette();
-        let ctx = crate::render::text::RenderContext {
-            grid: &grid,
-            colors: ColorScheme::new(&palette, Rgb::new(220, 220, 220), Rgb::new(24, 24, 24)),
-            metrics: fonts.metrics,
-            fonts: &fonts,
-            atlas: &atlas,
-            options: RenderOptions::default(),
-            cursor: None,
-        };
+        let ctx = ctx_for(
+            &grid,
+            ColorScheme::new(&palette, Rgb::new(220, 220, 220), Rgb::new(24, 24, 24)),
+            &fonts,
+            &atlas,
+            RenderOptions::default(),
+            None,
+        );
         build_row_backgrounds(&mut bg_vertices, 0, &ctx);
         // 6 contiguous cells should be merged into exactly 1 quad (48 floats)
         assert_eq!(bg_vertices.len(), 48);
@@ -1097,26 +1043,16 @@ mod tests {
 
     #[test]
     fn test_preedit_overlay_vertex_regeneration() {
-        let fonts = FontManager::load(14.0).expect("system monospace font");
+        let fonts = fonts();
         let grid = Grid::new(80, 24, 0);
-        let mut atlas = GlyphAtlas::new(64, 64);
         let preedit1 = Preedit {
             text: "hello".to_string(),
             cursor_begin: 0,
             cursor_end: 5,
         };
-        prepare_atlas(&grid, &fonts, &mut atlas, Some(&preedit1));
-
-        let mut vertices = Vec::new();
-        build_vertices(
-            &mut vertices,
+        let atlas = atlas_for(&grid, &fonts, 64, Some(&preedit1));
+        let vertices = vertices_for(
             &grid,
-            ColorScheme::new(
-                &default_256_palette(),
-                Rgb::new(220, 220, 220),
-                Rgb::new(24, 24, 24),
-            ),
-            fonts.metrics,
             &fonts,
             &atlas,
             RenderOptions::new([0, 0], Some(&preedit1), None),
@@ -1131,23 +1067,19 @@ mod tests {
         grid.cursor.shape = crate::grid::CursorShape::Beam;
         grid.lines[0].cells[0].c = 'A';
         grid.lines[0].cells[0].bg = Color::Rgb(10, 20, 30);
-
-        let fonts = FontManager::load(14.0).expect("system monospace font");
-        let mut atlas = GlyphAtlas::new(32, 32);
-        prepare_atlas(&grid, &fonts, &mut atlas, None);
-
+        let fonts = fonts();
+        let atlas = atlas_for(&grid, &fonts, 32, None);
         let palette = default_256_palette();
         let colors = ColorScheme::new(&palette, Rgb::new(220, 220, 220), Rgb::new(24, 24, 24));
         let cursor = cursor_cell(&grid);
-        let ctx = crate::render::text::RenderContext {
-            grid: &grid,
+        let ctx = ctx_for(
+            &grid,
             colors,
-            metrics: fonts.metrics,
-            fonts: &fonts,
-            atlas: &atlas,
-            options: RenderOptions::default(),
+            &fonts,
+            &atlas,
+            RenderOptions::default(),
             cursor,
-        };
+        );
 
         // 1. Build row backgrounds and foregrounds
         let mut row_bg = Vec::new();
@@ -1169,15 +1101,14 @@ mod tests {
         assert_eq!(vertices.len(), static_len);
 
         // 4. When cursor hidden, overlay appends 0 floats
-        let ctx_hidden = crate::render::text::RenderContext {
-            grid: &grid,
+        let ctx_hidden = ctx_for(
+            &grid,
             colors,
-            metrics: fonts.metrics,
-            fonts: &fonts,
-            atlas: &atlas,
-            options: RenderOptions::default(),
-            cursor: None,
-        };
+            &fonts,
+            &atlas,
+            RenderOptions::default(),
+            None,
+        );
         build_dynamic_overlays(&mut vertices, &ctx_hidden);
         assert_eq!(vertices.len(), static_len);
     }
@@ -1188,20 +1119,19 @@ mod tests {
         grid.cursor.visible = true;
         grid.cursor.shape = crate::grid::CursorShape::Underline;
 
-        let fonts = FontManager::load(14.0).expect("system monospace font");
+        let fonts = fonts();
         let atlas = GlyphAtlas::new(16, 16);
         let palette = default_256_palette();
         let colors = ColorScheme::new(&palette, Rgb::new(220, 220, 220), Rgb::new(24, 24, 24));
         let cursor = cursor_cell(&grid);
-        let ctx = crate::render::text::RenderContext {
-            grid: &grid,
+        let ctx = ctx_for(
+            &grid,
             colors,
-            metrics: fonts.metrics,
-            fonts: &fonts,
-            atlas: &atlas,
-            options: RenderOptions::default(),
+            &fonts,
+            &atlas,
+            RenderOptions::default(),
             cursor,
-        };
+        );
 
         let mut overlay_vertices = Vec::new();
         build_dynamic_overlays(&mut overlay_vertices, &ctx);
@@ -1309,23 +1239,9 @@ mod tests {
         grid.lines[0].cells[0].c = '😀';
         grid.lines[0].cells[0].flags = CellFlags::WIDE_CHAR;
         grid.lines[0].cells[1].flags = CellFlags::WIDE_CHAR_SPACER;
-        let fonts = FontManager::load(14.0).expect("system monospace font");
-        let mut atlas = GlyphAtlas::new(256, 256);
-        prepare_atlas(&grid, &fonts, &mut atlas, None);
-        let mut vertices = Vec::new();
-        build_vertices(
-            &mut vertices,
-            &grid,
-            ColorScheme::new(
-                &default_256_palette(),
-                Rgb::new(220, 220, 220),
-                Rgb::new(24, 24, 24),
-            ),
-            fonts.metrics,
-            &fonts,
-            &atlas,
-            RenderOptions::default(),
-        );
+        let fonts = fonts();
+        let atlas = atlas_for(&grid, &fonts, 256, None);
+        let vertices = vertices_for(&grid, &fonts, &atlas, RenderOptions::default());
         let glyph_quads: Vec<_> = vertices.chunks(8).filter(|v| v[2] >= 0.0).collect();
         assert!(!glyph_quads.is_empty(), "must render glyph vertices");
         assert!(
@@ -1347,20 +1263,15 @@ mod tests {
     }
 
     mod render_pipeline_tests {
+        use super::pipeline_harness;
+
         use crate::color::Rgb;
-        use crate::color::default_256_palette;
-        use crate::font::{FontManager, GlyphAtlas};
-        use crate::grid::Grid;
         use crate::input::selection::{Selection, SelectionPoint, SelectionType};
-        use crate::render::{ColorScheme, RenderOptions, RenderPipeline};
+        use crate::render::{ColorScheme, RenderOptions};
 
         #[test]
         fn test_render_pipeline_prepare_frame_generates_batch() {
-            let mut pipeline = RenderPipeline::new();
-            let mut grid = Grid::new(80, 24, 100);
-            let fonts = FontManager::load(14.0).expect("system monospace font");
-            let mut atlas = GlyphAtlas::new(16, 16);
-            let palette = default_256_palette();
+            let (mut pipeline, mut grid, fonts, mut atlas, palette) = pipeline_harness();
             let colors = ColorScheme::new(&palette, Rgb::new(220, 220, 220), Rgb::new(24, 24, 24));
             let options = RenderOptions::default();
 
@@ -1385,11 +1296,7 @@ mod tests {
 
         #[test]
         fn test_render_pipeline_incremental_dirty_row_caching() {
-            let mut pipeline = RenderPipeline::new();
-            let mut grid = Grid::new(80, 24, 100);
-            let fonts = FontManager::load(14.0).expect("system monospace font");
-            let mut atlas = GlyphAtlas::new(16, 16);
-            let palette = default_256_palette();
+            let (mut pipeline, mut grid, fonts, mut atlas, palette) = pipeline_harness();
             let colors = ColorScheme::new(&palette, Rgb::new(220, 220, 220), Rgb::new(24, 24, 24));
             let options = RenderOptions::default();
 
@@ -1421,11 +1328,7 @@ mod tests {
 
         #[test]
         fn test_render_pipeline_selection_overlay_batch() {
-            let mut pipeline = RenderPipeline::new();
-            let mut grid = Grid::new(80, 24, 100);
-            let fonts = FontManager::load(14.0).expect("system monospace font");
-            let mut atlas = GlyphAtlas::new(16, 16);
-            let palette = default_256_palette();
+            let (mut pipeline, mut grid, fonts, mut atlas, palette) = pipeline_harness();
             let colors = ColorScheme::new(&palette, Rgb::new(220, 220, 220), Rgb::new(24, 24, 24));
 
             // Frame without selection
@@ -1469,11 +1372,7 @@ mod tests {
 
         #[test]
         fn test_render_pipeline_clear_cache() {
-            let mut pipeline = RenderPipeline::new();
-            let mut grid = Grid::new(80, 24, 100);
-            let fonts = FontManager::load(14.0).expect("system monospace font");
-            let mut atlas = GlyphAtlas::new(16, 16);
-            let palette = default_256_palette();
+            let (mut pipeline, mut grid, fonts, mut atlas, palette) = pipeline_harness();
             let colors = ColorScheme::new(&palette, Rgb::new(220, 220, 220), Rgb::new(24, 24, 24));
 
             let _ = pipeline.prepare_frame(
