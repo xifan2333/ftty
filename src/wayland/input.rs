@@ -1,9 +1,12 @@
 //! Input device adapter: seat capabilities, keyboard, pointer, and cursor shape.
 
+use std::os::fd::OwnedFd;
+
 use wayland_client::protocol::{
     wl_keyboard::{self, KeyState, WlKeyboard},
     wl_pointer::{self, Axis, ButtonState, WlPointer},
     wl_seat::{self, Capability, WlSeat},
+    wl_surface::WlSurface,
 };
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, WEnum};
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::{
@@ -41,6 +44,147 @@ impl WaylandState {
 
 // --- Seat & Input ---
 
+impl AppState {
+    /// Applies a seat capabilities change: bind or release keyboard and pointer objects.
+    fn handle_seat_capabilities(
+        &mut self,
+        seat: &WlSeat,
+        caps: Capability,
+        qh: &QueueHandle<Self>,
+    ) {
+        self.handle_keyboard_capability(seat, caps, qh);
+        self.handle_pointer_capability(seat, caps, qh);
+    }
+
+    /// Binds the keyboard when the seat gains the capability, or releases it when lost.
+    fn handle_keyboard_capability(
+        &mut self,
+        seat: &WlSeat,
+        caps: Capability,
+        qh: &QueueHandle<Self>,
+    ) {
+        if caps.contains(Capability::Keyboard) && self.wayland.keyboard.is_none() {
+            let keyboard = seat.get_keyboard(qh, ());
+            self.wayland.keyboard = Some(keyboard);
+        } else if !caps.contains(Capability::Keyboard)
+            && let Some(keyboard) = self.wayland.keyboard.take()
+            && keyboard.version() >= 3
+        {
+            // `wl_keyboard.release` only exists from version 3; older objects are
+            // dropped locally so a re-advertised capability creates a fresh keyboard.
+            keyboard.release();
+        }
+    }
+
+    /// Binds the pointer and cursor-shape device when the seat gains the capability,
+    /// or tears both down and drops hover state when it is lost.
+    fn handle_pointer_capability(
+        &mut self,
+        seat: &WlSeat,
+        caps: Capability,
+        qh: &QueueHandle<Self>,
+    ) {
+        if caps.contains(Capability::Pointer) {
+            if self.wayland.pointer.is_none() {
+                let pointer = seat.get_pointer(qh, ());
+                self.wayland.pointer = Some(pointer);
+                self.try_init_cursor_shape(qh);
+            }
+        } else {
+            if let Some(device) = self.wayland.cursor_shape_device.take() {
+                device.destroy();
+            }
+            if let Some(pointer) = self.wayland.pointer.take()
+                && pointer.version() >= 3
+            {
+                pointer.release();
+            }
+            let outcome = self.pointer.handle_leave();
+            if outcome.needs_redraw {
+                self.needs_redraw = true;
+            }
+        }
+    }
+
+    /// Installs a new xkb keymap announced by the compositor.
+    fn handle_keymap(&mut self, fd: OwnedFd, size: u32) {
+        self.keyboard.set_keymap_from_fd(fd, size as usize);
+    }
+
+    /// Applies keyboard focus enter: focus reporting, IME activation, and cursor tracking.
+    fn handle_keyboard_enter(&mut self, serial: u32, surface: &WlSurface) {
+        self.last_serial = serial;
+        if self.wayland.surface.as_ref() != Some(surface) {
+            return;
+        }
+        if self.session.terminal.focus_reporting {
+            self.session.write_input_bytes(b"\x1b[I");
+        }
+        self.ime.active = true;
+        self.last_ime_cursor_rect.set(None);
+        if let Some(text_input) = &self.wayland.text_input {
+            text_input.enable();
+            text_input.set_content_type(
+                zwp_text_input_v3::ContentHint::None,
+                zwp_text_input_v3::ContentPurpose::Terminal,
+            );
+            self.update_ime_cursor_area();
+        }
+    }
+
+    /// Applies keyboard focus leave: focus reporting, IME teardown, and a repaint.
+    fn handle_keyboard_leave(&mut self, surface: &WlSurface) {
+        if self.wayland.surface.as_ref() != Some(surface) {
+            return;
+        }
+        if self.session.terminal.focus_reporting {
+            self.session.write_input_bytes(b"\x1b[O");
+        }
+        self.ime.clear();
+        self.last_ime_cursor_rect.set(None);
+        if let Some(text_input) = &self.wayland.text_input {
+            text_input.disable();
+            text_input.commit();
+        }
+        self.needs_redraw = true;
+    }
+
+    /// Drives a raw key event through keybindings or keyboard translation to the PTY.
+    fn handle_keyboard_key(
+        &mut self,
+        serial: u32,
+        key: u32,
+        pressed: bool,
+        qh: &QueueHandle<Self>,
+        conn: &Connection,
+    ) {
+        self.last_serial = serial;
+        if pressed && let Some(action) = self.keyboard.check_action(key, &self.config.keybindings) {
+            self.handle_key_action(action, Some(qh), Some(conn));
+        } else if let Some(bytes) = self.keyboard.handle_key_event(key, pressed, false) {
+            if pressed && self.config.auto_scroll() && !self.session.terminal.grid.is_alt_screen() {
+                self.session.terminal.grid.scroll_viewport_bottom();
+            }
+            self.session.write_input_bytes(&bytes);
+        }
+    }
+
+    /// Applies a modifier update and refreshes the hovered element.
+    fn handle_keyboard_modifiers(
+        &mut self,
+        serial: u32,
+        mods_depressed: u32,
+        mods_latched: u32,
+        mods_locked: u32,
+        group: u32,
+    ) {
+        self.last_serial = serial;
+        self.keyboard
+            .update_modifiers(mods_depressed, mods_latched, mods_locked, group);
+        self.update_hover_state();
+    }
+}
+
 impl Dispatch<WlSeat, ()> for AppState {
     fn event(
         state: &mut Self,
@@ -54,37 +198,7 @@ impl Dispatch<WlSeat, ()> for AppState {
             capabilities: WEnum::Value(caps),
         } = event
         {
-            if caps.contains(Capability::Keyboard) && state.wayland.keyboard.is_none() {
-                let keyboard = proxy.get_keyboard(qh, ());
-                state.wayland.keyboard = Some(keyboard);
-            } else if !caps.contains(Capability::Keyboard)
-                && let Some(keyboard) = state.wayland.keyboard.take()
-                && keyboard.version() >= 3
-            {
-                // `wl_keyboard.release` only exists from version 3; older objects are
-                // dropped locally so a re-advertised capability creates a fresh keyboard.
-                keyboard.release();
-            }
-            if caps.contains(Capability::Pointer) {
-                if state.wayland.pointer.is_none() {
-                    let pointer = proxy.get_pointer(qh, ());
-                    state.wayland.pointer = Some(pointer);
-                    state.try_init_cursor_shape(qh);
-                }
-            } else {
-                if let Some(device) = state.wayland.cursor_shape_device.take() {
-                    device.destroy();
-                }
-                if let Some(pointer) = state.wayland.pointer.take()
-                    && pointer.version() >= 3
-                {
-                    pointer.release();
-                }
-                let outcome = state.pointer.handle_leave();
-                if outcome.needs_redraw {
-                    state.needs_redraw = true;
-                }
-            }
+            state.handle_seat_capabilities(proxy, caps, qh);
         }
     }
 }
@@ -95,7 +209,7 @@ impl Dispatch<WlKeyboard, ()> for AppState {
         _proxy: &WlKeyboard,
         event: wl_keyboard::Event,
         _data: &(),
-        _conn: &Connection,
+        conn: &Connection,
         qh: &QueueHandle<Self>,
     ) {
         match event {
@@ -104,41 +218,15 @@ impl Dispatch<WlKeyboard, ()> for AppState {
                 fd,
                 size,
             } => {
-                state.keyboard.set_keymap_from_fd(fd, size as usize);
+                state.handle_keymap(fd, size);
             }
             wl_keyboard::Event::Enter {
                 serial, surface, ..
             } => {
-                state.last_serial = serial;
-                if state.wayland.surface.as_ref() == Some(&surface) {
-                    if state.session.terminal.focus_reporting {
-                        state.session.write_input_bytes(b"\x1b[I");
-                    }
-                    state.ime.active = true;
-                    state.last_ime_cursor_rect.set(None);
-                    if let Some(text_input) = &state.wayland.text_input {
-                        text_input.enable();
-                        text_input.set_content_type(
-                            zwp_text_input_v3::ContentHint::None,
-                            zwp_text_input_v3::ContentPurpose::Terminal,
-                        );
-                        state.update_ime_cursor_area();
-                    }
-                }
+                state.handle_keyboard_enter(serial, &surface);
             }
             wl_keyboard::Event::Leave { surface, .. } => {
-                if state.wayland.surface.as_ref() == Some(&surface) {
-                    if state.session.terminal.focus_reporting {
-                        state.session.write_input_bytes(b"\x1b[O");
-                    }
-                    state.ime.clear();
-                    state.last_ime_cursor_rect.set(None);
-                    if let Some(text_input) = &state.wayland.text_input {
-                        text_input.disable();
-                        text_input.commit();
-                    }
-                    state.needs_redraw = true;
-                }
+                state.handle_keyboard_leave(&surface);
             }
             wl_keyboard::Event::Key {
                 serial,
@@ -146,22 +234,7 @@ impl Dispatch<WlKeyboard, ()> for AppState {
                 state: WEnum::Value(key_state),
                 ..
             } => {
-                state.last_serial = serial;
-                let pressed = key_state == KeyState::Pressed;
-                if pressed
-                    && let Some(action) =
-                        state.keyboard.check_action(key, &state.config.keybindings)
-                {
-                    state.handle_key_action(action, Some(qh), Some(_conn));
-                } else if let Some(bytes) = state.keyboard.handle_key_event(key, pressed, false) {
-                    if pressed
-                        && state.config.auto_scroll()
-                        && !state.session.terminal.grid.is_alt_screen()
-                    {
-                        state.session.terminal.grid.scroll_viewport_bottom();
-                    }
-                    state.session.write_input_bytes(&bytes);
-                }
+                state.handle_keyboard_key(serial, key, key_state == KeyState::Pressed, qh, conn);
             }
             wl_keyboard::Event::Modifiers {
                 serial,
@@ -170,11 +243,13 @@ impl Dispatch<WlKeyboard, ()> for AppState {
                 mods_locked,
                 group,
             } => {
-                state.last_serial = serial;
-                state
-                    .keyboard
-                    .update_modifiers(mods_depressed, mods_latched, mods_locked, group);
-                state.update_hover_state();
+                state.handle_keyboard_modifiers(
+                    serial,
+                    mods_depressed,
+                    mods_latched,
+                    mods_locked,
+                    group,
+                );
             }
             _ => {}
         }
@@ -197,42 +272,17 @@ impl Dispatch<WlPointer, ()> for AppState {
                 surface_y,
                 ..
             } => {
-                state.pointer_serial = serial;
-                state.last_serial = serial;
-                let resolver = |id: u32| state.session.terminal.hyperlink_url(id);
-                let ctx = Self::make_pointer_context(
-                    &state.session.terminal,
-                    &state.font_mgr,
-                    &state.config,
-                    &state.keyboard,
-                    &state.wayland,
-                    Some(&resolver),
-                );
-                let outcome = state
-                    .pointer
-                    .handle_enter(surface_x, surface_y, serial, &ctx);
-                state.dispatch_pointer_outcome(outcome, conn);
+                state.handle_pointer_enter(serial, surface_x, surface_y, conn);
             }
             wl_pointer::Event::Leave { .. } => {
-                let outcome = state.pointer.handle_leave();
-                state.dispatch_pointer_outcome(outcome, conn);
+                state.handle_pointer_leave(conn);
             }
             wl_pointer::Event::Motion {
                 surface_x,
                 surface_y,
                 ..
             } => {
-                let resolver = |id: u32| state.session.terminal.hyperlink_url(id);
-                let ctx = Self::make_pointer_context(
-                    &state.session.terminal,
-                    &state.font_mgr,
-                    &state.config,
-                    &state.keyboard,
-                    &state.wayland,
-                    Some(&resolver),
-                );
-                let outcome = state.pointer.handle_motion(surface_x, surface_y, &ctx);
-                state.dispatch_pointer_outcome(outcome, conn);
+                state.handle_pointer_motion(surface_x, surface_y, conn);
             }
             wl_pointer::Event::Button {
                 button,
@@ -240,42 +290,18 @@ impl Dispatch<WlPointer, ()> for AppState {
                 time,
                 serial,
             } => {
-                state.last_serial = serial;
                 let pressed = button_state == ButtonState::Pressed;
-                let resolver = |id: u32| state.session.terminal.hyperlink_url(id);
-                let ctx = Self::make_pointer_context(
-                    &state.session.terminal,
-                    &state.font_mgr,
-                    &state.config,
-                    &state.keyboard,
-                    &state.wayland,
-                    Some(&resolver),
-                );
-                let outcome = state
-                    .pointer
-                    .handle_button(button, pressed, time, serial, &ctx);
-                state.dispatch_pointer_outcome(outcome, conn);
+                state.handle_pointer_button(button, pressed, time, serial, conn);
             }
             wl_pointer::Event::Axis {
                 axis: WEnum::Value(Axis::VerticalScroll),
                 value,
                 ..
             } => {
-                let resolver = |id: u32| state.session.terminal.hyperlink_url(id);
-                let ctx = Self::make_pointer_context(
-                    &state.session.terminal,
-                    &state.font_mgr,
-                    &state.config,
-                    &state.keyboard,
-                    &state.wayland,
-                    Some(&resolver),
-                );
-                let outcome = state.pointer.handle_axis(value, &ctx);
-                state.dispatch_pointer_outcome(outcome, conn);
+                state.handle_pointer_axis(value, conn);
             }
             wl_pointer::Event::AxisStop { .. } => {
-                let outcome = state.pointer.handle_axis_stop();
-                state.dispatch_pointer_outcome(outcome, conn);
+                state.handle_pointer_axis_stop(conn);
             }
             _ => {}
         }
