@@ -5,6 +5,8 @@ on:
     branches:
       - main
   pull_request:
+    # Draft PRs are exempt from CI; `ready_for_review` fires when a draft flips to ready.
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
 permissions:
@@ -17,6 +19,8 @@ concurrency:
 jobs:
   check:
     name: check-and-test
+    # Draft PRs are exempt from CI (`ready_for_review` is in the trigger types).
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
