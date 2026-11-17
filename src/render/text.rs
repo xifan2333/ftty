@@ -1,8 +1,9 @@
 //! Cell-grid to vertex generation: backgrounds, glyphs, and dynamic overlays.
 
 use crate::color::{Color, Rgb};
+use crate::font::atlas::CachedGlyph;
 use crate::font::{CellMetrics, FontManager, GlyphAtlas};
-use crate::grid::{Cell, CellFlags, CursorShape, Grid};
+use crate::grid::{Cell, CellFlags, CursorShape, Grid, Row};
 use crate::input::ime::Preedit;
 use crate::width::KITTY_PLACEHOLDER;
 
@@ -26,6 +27,74 @@ fn is_cluster_format(c: char) -> bool {
         || ('\u{1F3FB}'..='\u{1F3FF}').contains(&c)
 }
 
+fn prepare_preedit_glyphs(p: &Preedit, fonts: &FontManager, atlas: &mut GlyphAtlas) -> bool {
+    let mut full = false;
+    for c in p.text.chars() {
+        if !is_procedural_glyph(c) {
+            full |= atlas
+                .get_or_insert(c, CellFlags::UNDERLINE, fonts)
+                .is_none();
+        }
+    }
+    full
+}
+
+fn prepare_cell_glyphs(
+    cell: &Cell,
+    cluster: Option<&str>,
+    fonts: &FontManager,
+    atlas: &mut GlyphAtlas,
+) -> bool {
+    if !visible_glyph(cell) {
+        return false;
+    }
+    let mut full = false;
+    if !is_procedural_glyph(cell.c) {
+        full |= atlas.get_or_insert(cell.c, cell.flags, fonts).is_none();
+    }
+    if let Some(cluster_text) = cluster {
+        for extra in cluster_text.chars().skip(1) {
+            if !is_cluster_format(extra) {
+                full |= atlas.get_or_insert(extra, cell.flags, fonts).is_none();
+            }
+        }
+    }
+    full
+}
+
+fn prepare_row_glyphs(
+    grid: &Grid,
+    row: usize,
+    attempt: usize,
+    repacked: bool,
+    fonts: &FontManager,
+    atlas: &mut GlyphAtlas,
+) -> bool {
+    let line = grid.visible_line(row);
+    if !line.dirty.get() && attempt == 0 && !repacked {
+        return false;
+    }
+    let mut full = false;
+    for (col, cell) in line.cells.iter().enumerate() {
+        full |= prepare_cell_glyphs(cell, line.cluster_text(col), fonts, atlas);
+    }
+    full
+}
+
+fn prepare_grid_rows(
+    grid: &Grid,
+    attempt: usize,
+    repacked: bool,
+    fonts: &FontManager,
+    atlas: &mut GlyphAtlas,
+) -> bool {
+    let mut full = false;
+    for row in 0..grid.rows {
+        full |= prepare_row_glyphs(grid, row, attempt, repacked, fonts, atlas);
+    }
+    full
+}
+
 pub fn prepare_atlas(
     grid: &Grid,
     fonts: &FontManager,
@@ -38,37 +107,9 @@ pub fn prepare_atlas(
         // Pre-cache fallback glyph '?' so it is guaranteed available if the atlas fills.
         let _ = atlas.get_or_insert('?', CellFlags::empty(), fonts);
         if let Some(p) = preedit {
-            for c in p.text.chars() {
-                if is_procedural_glyph(c) {
-                    continue;
-                }
-                full |= atlas
-                    .get_or_insert(c, CellFlags::UNDERLINE, fonts)
-                    .is_none();
-            }
+            full |= prepare_preedit_glyphs(p, fonts, atlas);
         }
-        for row in 0..grid.rows {
-            let line = grid.visible_line(row);
-            if !line.dirty.get() && attempt == 0 && !repacked {
-                continue;
-            }
-            for (col, cell) in line.cells.iter().enumerate() {
-                if !visible_glyph(cell) {
-                    continue;
-                }
-                if !is_procedural_glyph(cell.c) {
-                    full |= atlas.get_or_insert(cell.c, cell.flags, fonts).is_none();
-                }
-                if let Some(cluster) = line.cluster_text(col) {
-                    for extra in cluster.chars().skip(1) {
-                        if is_cluster_format(extra) {
-                            continue;
-                        }
-                        full |= atlas.get_or_insert(extra, cell.flags, fonts).is_none();
-                    }
-                }
-            }
-        }
+        full |= prepare_grid_rows(grid, attempt, repacked, fonts, atlas);
         if !full || attempt == 1 {
             break;
         }
@@ -158,6 +199,41 @@ pub struct RenderContext<'a> {
     pub cursor: Option<(usize, usize, usize)>,
 }
 
+fn find_bg_span_end(cells: &[Cell], mut col: usize, bg: Rgb, colors: ColorScheme<'_>) -> usize {
+    while col < cells.len() {
+        let (_, next_bg) = cell_colors(&cells[col], colors);
+        if next_bg != bg {
+            break;
+        }
+        col += 1;
+    }
+    col
+}
+
+fn build_merged_background_spans(
+    vertices: &mut Vec<f32>,
+    line: &Row,
+    colors: ColorScheme<'_>,
+    pad_x: f32,
+    y: f32,
+    cw: f32,
+    ch: f32,
+) {
+    let mut col = 0;
+    while col < line.cells.len() {
+        let (_, bg) = cell_colors(&line.cells[col], colors);
+        if bg == colors.background {
+            col += 1;
+            continue;
+        }
+        let start_col = col;
+        col = find_bg_span_end(&line.cells, col + 1, bg, colors);
+        let sx = pad_x + start_col as f32 * cw;
+        let ex = pad_x + col as f32 * cw;
+        push_quad(vertices, [sx, y, ex, y + ch], SOLID_UV, rgba(bg));
+    }
+}
+
 pub fn build_row_backgrounds(vertices: &mut Vec<f32>, row: usize, ctx: &RenderContext<'_>) {
     vertices.clear();
     let grid = ctx.grid;
@@ -189,26 +265,7 @@ pub fn build_row_backgrounds(vertices: &mut Vec<f32>, row: usize, ctx: &RenderCo
     let y = pad_y + row as f32 * ch;
 
     // Draw background and selection on this row with contiguous span merging
-    let mut col = 0;
-    while col < line.cells.len() {
-        let (_, bg) = cell_colors(&line.cells[col], colors);
-        if bg == colors.background {
-            col += 1;
-            continue;
-        }
-        let start_col = col;
-        col += 1;
-        while col < line.cells.len() {
-            let (_, next_bg) = cell_colors(&line.cells[col], colors);
-            if next_bg != bg {
-                break;
-            }
-            col += 1;
-        }
-        let sx = pad_x + start_col as f32 * cw;
-        let ex = pad_x + col as f32 * cw;
-        push_quad(vertices, [sx, y, ex, y + ch], SOLID_UV, rgba(bg));
-    }
+    build_merged_background_spans(vertices, line, colors, pad_x, y, cw, ch);
     if let Some(selection) = options.selection
         && let Some((start_col, end_col)) = selection.line_span(abs_line, grid.cols)
     {
@@ -232,23 +289,325 @@ pub fn build_row_backgrounds(vertices: &mut Vec<f32>, row: usize, ctx: &RenderCo
     }
 }
 
+#[derive(Clone, Copy)]
+struct CellBox {
+    x: f32,
+    y: f32,
+    width: f32,
+    ch: f32,
+    cw: f32,
+}
+
+#[derive(Clone, Copy)]
+struct ViewportLayout {
+    pad_x: f32,
+    pad_y: f32,
+    cw: f32,
+    ch: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UnderlineStyle {
+    Double,
+    Curly,
+    Dotted,
+    Dashed,
+    Single,
+}
+
+impl UnderlineStyle {
+    fn from_flags(flags: CellFlags) -> Self {
+        if flags.contains(CellFlags::UNDERLINE_DOUBLE) {
+            return Self::Double;
+        }
+        if flags.contains(CellFlags::UNDERLINE_CURLY) {
+            return Self::Curly;
+        }
+        if flags.contains(CellFlags::UNDERLINE_DOTTED) {
+            return Self::Dotted;
+        }
+        if flags.contains(CellFlags::UNDERLINE_DASHED) {
+            return Self::Dashed;
+        }
+        Self::Single
+    }
+}
+
+fn cell_foreground_color(cell: &Cell, colors: ColorScheme<'_>, under_block: bool) -> [f32; 4] {
+    let (fg, _) = cell_colors(cell, colors);
+    let mut color = rgba(if under_block { colors.background } else { fg });
+    if cell.flags.contains(CellFlags::DIM) {
+        color[3] = 0.6;
+    }
+    color
+}
+
+fn emit_positioned_glyph(
+    vertices: &mut Vec<f32>,
+    glyph: &CachedGlyph,
+    cbox: CellBox,
+    color: [f32; 4],
+    ascent: f32,
+) {
+    let (gx, gy) = if glyph.colored {
+        let pad_x = (cbox.width - glyph.width as f32).max(0.0) / 2.0;
+        let pad_y = (cbox.ch - glyph.height as f32).max(0.0) / 2.0;
+        ((cbox.x + pad_x).round(), (cbox.y + pad_y).round())
+    } else {
+        let gx = (cbox.x + glyph.offset_x as f32).round();
+        let gy = (cbox.y + ascent - glyph.offset_y as f32 - glyph.height as f32).round();
+        (gx, gy)
+    };
+    let [u, v] = glyph.position.map(|value| value as f32);
+    let w = glyph.width as f32;
+    let h = glyph.height as f32;
+    let glyph_color = if glyph.colored {
+        [color[0], color[1], color[2], -color[3].abs().max(0.001)]
+    } else {
+        color
+    };
+    push_quad(
+        vertices,
+        [gx, gy, gx + w, gy + h],
+        [[u, v], [u + w, v + h]],
+        glyph_color,
+    );
+}
+
+fn emit_exhausted_placeholder(vertices: &mut Vec<f32>, cbox: CellBox, color: [f32; 4]) {
+    let box_top = cbox.y + 2.0;
+    let box_bot = cbox.y + cbox.ch - 2.0;
+    if box_bot > box_top {
+        push_quad(
+            vertices,
+            [cbox.x + 1.0, box_top, cbox.x + cbox.cw - 1.0, box_bot],
+            SOLID_UV,
+            [color[0], color[1], color[2], color[3] * 0.5],
+        );
+    }
+}
+
+fn emit_glyph_quad(
+    vertices: &mut Vec<f32>,
+    cell: &Cell,
+    cbox: CellBox,
+    color: [f32; 4],
+    ctx: &RenderContext<'_>,
+) {
+    if is_procedural_glyph(cell.c)
+        && render_procedural_glyph(vertices, cell.c, cbox.x, cbox.y, cbox.width, cbox.ch, color)
+    {
+        return;
+    }
+    if let Some(glyph) = ctx.atlas.get(cell.c, cell.flags, ctx.fonts) {
+        if glyph.width > 0 && glyph.height > 0 {
+            emit_positioned_glyph(vertices, &glyph, cbox, color, ctx.metrics.ascent as f32);
+        }
+    } else if let Some(fallback) = ctx.atlas.get('?', CellFlags::empty(), ctx.fonts) {
+        // Fallback to '?' when the primary character does not fit in the atlas.
+        if fallback.width > 0 && fallback.height > 0 {
+            emit_positioned_glyph(vertices, &fallback, cbox, color, ctx.metrics.ascent as f32);
+        }
+    } else {
+        // Solid placeholder quad if the atlas is entirely exhausted.
+        emit_exhausted_placeholder(vertices, cbox, color);
+    }
+}
+
+fn emit_cluster_extras(
+    vertices: &mut Vec<f32>,
+    cluster: &str,
+    cell: &Cell,
+    cbox: CellBox,
+    color: [f32; 4],
+    ctx: &RenderContext<'_>,
+) {
+    for extra in cluster.chars().skip(1) {
+        if is_cluster_format(extra) {
+            continue;
+        }
+        let extra_width = crate::width::wcwidth(extra, ctx.grid.ambiguous_width);
+        if extra_width >= 2 {
+            continue;
+        }
+        let Some(glyph) = ctx.atlas.get(extra, cell.flags, ctx.fonts) else {
+            continue;
+        };
+        if glyph.width == 0 || glyph.height == 0 {
+            continue;
+        }
+        let origin = if extra_width <= 0 {
+            cbox.x + cbox.width * 0.5
+        } else {
+            cbox.x + cbox.cw
+        };
+        let gx = (origin + glyph.offset_x as f32).round();
+        let gy = (cbox.y + ctx.metrics.ascent as f32 - glyph.offset_y as f32 - glyph.height as f32)
+            .round();
+        let [u, v] = glyph.position.map(|value| value as f32);
+        let w = glyph.width as f32;
+        let h = glyph.height as f32;
+        push_quad(
+            vertices,
+            [gx, gy, gx + w, gy + h],
+            [[u, v], [u + w, v + h]],
+            color,
+        );
+    }
+}
+
+fn emit_curly_underline(vertices: &mut Vec<f32>, cbox: CellBox, base_top: f32, ul_color: [f32; 4]) {
+    let steps = (cbox.width * 2.0).round().max(4.0) as usize;
+    let step_w = cbox.width / steps as f32;
+    let amplitude = 1.5_f32;
+    let period = cbox.cw.max(4.0);
+    for step in 0..steps {
+        let seg_x = cbox.x + step as f32 * step_w;
+        let wave = ((seg_x - cbox.x) / period * std::f32::consts::TAU).sin() * amplitude;
+        let seg_y = (base_top + wave).clamp(cbox.y, cbox.y + cbox.ch - 1.0);
+        push_quad(
+            vertices,
+            [seg_x, seg_y, seg_x + step_w, seg_y + 1.0],
+            SOLID_UV,
+            ul_color,
+        );
+    }
+}
+
+fn emit_dotted_underline(
+    vertices: &mut Vec<f32>,
+    cbox: CellBox,
+    base_top: f32,
+    ul_color: [f32; 4],
+) {
+    let dot_size = 2.0_f32;
+    let mut dot_x = cbox.x;
+    while dot_x < cbox.x + cbox.width {
+        let cur_w = dot_size.min(cbox.x + cbox.width - dot_x);
+        push_quad(
+            vertices,
+            [dot_x, base_top, dot_x + cur_w, base_top + 1.0],
+            SOLID_UV,
+            ul_color,
+        );
+        dot_x += dot_size * 2.0;
+    }
+}
+
+fn emit_dashed_underline(
+    vertices: &mut Vec<f32>,
+    cbox: CellBox,
+    base_top: f32,
+    ul_color: [f32; 4],
+) {
+    let dash_len = 4.0_f32;
+    let gap = 3.0_f32;
+    let mut dash_x = cbox.x;
+    while dash_x < cbox.x + cbox.width {
+        let cur_w = dash_len.min(cbox.x + cbox.width - dash_x);
+        push_quad(
+            vertices,
+            [dash_x, base_top, dash_x + cur_w, base_top + 1.0],
+            SOLID_UV,
+            ul_color,
+        );
+        dash_x += dash_len + gap;
+    }
+}
+
+fn emit_underline_style(
+    vertices: &mut Vec<f32>,
+    flags: CellFlags,
+    cbox: CellBox,
+    ascent: f32,
+    ul_color: [f32; 4],
+) {
+    let base_top = cbox.y + (ascent + 1.0).min(cbox.ch - 1.0);
+
+    match UnderlineStyle::from_flags(flags) {
+        UnderlineStyle::Double => {
+            let top1 = cbox.y + ascent.min(cbox.ch - 3.0);
+            let top2 = top1 + 2.0;
+            push_quad(
+                vertices,
+                [cbox.x, top1, cbox.x + cbox.width, top1 + 1.0],
+                SOLID_UV,
+                ul_color,
+            );
+            push_quad(
+                vertices,
+                [cbox.x, top2, cbox.x + cbox.width, top2 + 1.0],
+                SOLID_UV,
+                ul_color,
+            );
+        }
+        UnderlineStyle::Curly => emit_curly_underline(vertices, cbox, base_top, ul_color),
+        UnderlineStyle::Dotted => emit_dotted_underline(vertices, cbox, base_top, ul_color),
+        UnderlineStyle::Dashed => emit_dashed_underline(vertices, cbox, base_top, ul_color),
+        UnderlineStyle::Single => {
+            push_quad(
+                vertices,
+                [cbox.x, base_top, cbox.x + cbox.width, base_top + 1.0],
+                SOLID_UV,
+                ul_color,
+            );
+        }
+    }
+}
+
+fn emit_decorations(
+    vertices: &mut Vec<f32>,
+    cell: &Cell,
+    col: usize,
+    abs_line: usize,
+    cbox: CellBox,
+    color: [f32; 4],
+    ctx: &RenderContext<'_>,
+) {
+    let has_explicit_underline = cell.flags.contains(CellFlags::UNDERLINE);
+    let has_hover_underline = (cell.hyperlink_id.is_some() || cell.c != ' ')
+        && ctx.options.hovered_span.is_some_and(|span| {
+            span.line == abs_line && col >= span.start_col && col <= span.end_col
+        });
+    if has_explicit_underline || has_hover_underline {
+        let ul_color = if cell.underline_color != Color::DefaultForeground {
+            let resolved = cell.underline_color.to_rgb(
+                ctx.colors.palette,
+                ctx.colors.foreground,
+                ctx.colors.background,
+            );
+            rgba(resolved)
+        } else {
+            color
+        };
+        emit_underline_style(
+            vertices,
+            cell.flags,
+            cbox,
+            ctx.metrics.ascent as f32,
+            ul_color,
+        );
+    }
+    if cell.flags.contains(CellFlags::STRIKETHROUGH) {
+        let top = cbox.y + (ctx.metrics.ascent as f32 * 0.65).floor();
+        push_quad(
+            vertices,
+            [cbox.x, top, cbox.x + cbox.width, top + 1.0],
+            SOLID_UV,
+            color,
+        );
+    }
+}
+
 pub fn build_row_foregrounds(vertices: &mut Vec<f32>, row: usize, ctx: &RenderContext<'_>) {
     vertices.clear();
-    let grid = ctx.grid;
-    let colors = ctx.colors;
-    let metrics = ctx.metrics;
-    let fonts = ctx.fonts;
-    let atlas = ctx.atlas;
-    let options = ctx.options;
-    let cursor = ctx.cursor;
+    let cw = ctx.metrics.cell_width as f32;
+    let ch = ctx.metrics.cell_height as f32;
+    let pad_x = f32::from(ctx.options.padding[0]);
+    let pad_y = f32::from(ctx.options.padding[1]);
 
-    let cw = metrics.cell_width as f32;
-    let ch = metrics.cell_height as f32;
-    let pad_x = f32::from(options.padding[0]);
-    let pad_y = f32::from(options.padding[1]);
-
-    let abs_line = grid.scrollback.len() + row - grid.viewport_offset();
-    let line = grid.visible_line(row);
+    let abs_line = ctx.grid.scrollback.len() + row - ctx.grid.viewport_offset();
+    let line = ctx.grid.visible_line(row);
     let y = pad_y + row as f32 * ch;
 
     // Draw text glyphs and underlines on this row
@@ -260,322 +619,175 @@ pub fn build_row_foregrounds(vertices: &mut Vec<f32>, row: usize, ctx: &RenderCo
             continue;
         }
         let x = pad_x + col as f32 * cw;
-        let (fg, _) = cell_colors(cell, colors);
-        let under_block = grid.cursor.shape == CursorShape::Block
-            && cursor.is_some_and(|(r, c, width)| row == r && col >= c && col < c + width);
-        let mut color = rgba(if under_block { colors.background } else { fg });
-        if cell.flags.contains(CellFlags::DIM) {
-            color[3] = 0.6;
-        }
+        let under_block = ctx.grid.cursor.shape == CursorShape::Block
+            && ctx
+                .cursor
+                .is_some_and(|(r, c, width)| row == r && col >= c && col < c + width);
+        let color = cell_foreground_color(cell, ctx.colors, under_block);
         let width = if cell.flags.contains(CellFlags::WIDE_CHAR) {
             2.0 * cw
         } else {
             cw
         };
+        let cbox = CellBox {
+            x,
+            y,
+            width,
+            ch,
+            cw,
+        };
+
         if visible_glyph(cell) {
-            if is_procedural_glyph(cell.c)
-                && render_procedural_glyph(vertices, cell.c, x, y, width, ch, color)
-            {
-                // Procedural box drawing and block elements glyph
-            } else if let Some(glyph) = atlas.get(cell.c, cell.flags, fonts) {
-                if glyph.width > 0 && glyph.height > 0 {
-                    let (gx, gy) = if glyph.colored {
-                        let pad_x = (width - glyph.width as f32).max(0.0) / 2.0;
-                        let pad_y = (ch - glyph.height as f32).max(0.0) / 2.0;
-                        ((x + pad_x).round(), (y + pad_y).round())
-                    } else {
-                        let gx = (x + glyph.offset_x as f32).round();
-                        let gy = (y + metrics.ascent as f32
-                            - glyph.offset_y as f32
-                            - glyph.height as f32)
-                            .round();
-                        (gx, gy)
-                    };
-                    let [u, v] = glyph.position.map(|value| value as f32);
-                    let w = glyph.width as f32;
-                    let h = glyph.height as f32;
-                    let glyph_color = if glyph.colored {
-                        [color[0], color[1], color[2], -color[3].abs().max(0.001)]
-                    } else {
-                        color
-                    };
-                    push_quad(
-                        vertices,
-                        [gx, gy, gx + w, gy + h],
-                        [[u, v], [u + w, v + h]],
-                        glyph_color,
-                    );
-                }
-            } else if let Some(fallback) = atlas.get('?', CellFlags::empty(), fonts) {
-                // Fallback to '?' when the primary character does not fit in the atlas.
-                if fallback.width > 0 && fallback.height > 0 {
-                    let gx = (x + fallback.offset_x as f32).round();
-                    let gy = (y + metrics.ascent as f32
-                        - fallback.offset_y as f32
-                        - fallback.height as f32)
-                        .round();
-                    let [u, v] = fallback.position.map(|value| value as f32);
-                    let w = fallback.width as f32;
-                    let h = fallback.height as f32;
-                    push_quad(
-                        vertices,
-                        [gx, gy, gx + w, gy + h],
-                        [[u, v], [u + w, v + h]],
-                        color,
-                    );
-                }
-            } else {
-                // Solid placeholder quad if the atlas is entirely exhausted.
-                let box_top = y + 2.0;
-                let box_bot = y + ch - 2.0;
-                if box_bot > box_top {
-                    push_quad(
-                        vertices,
-                        [x + 1.0, box_top, x + cw - 1.0, box_bot],
-                        SOLID_UV,
-                        [color[0], color[1], color[2], color[3] * 0.5],
-                    );
-                }
-            }
+            emit_glyph_quad(vertices, cell, cbox, color, ctx);
         }
         if let Some(cluster) = line.cluster_text(col) {
-            for extra in cluster.chars().skip(1) {
-                if is_cluster_format(extra) {
-                    continue;
-                }
-                let extra_width = crate::width::wcwidth(extra, grid.ambiguous_width);
-                if extra_width >= 2 {
-                    continue;
-                }
-                let Some(glyph) = atlas.get(extra, cell.flags, fonts) else {
-                    continue;
-                };
-                if glyph.width == 0 || glyph.height == 0 {
-                    continue;
-                }
-                let origin = if extra_width <= 0 {
-                    x + width * 0.5
-                } else {
-                    x + cw
-                };
-                let gx = (origin + glyph.offset_x as f32).round();
-                let gy = (y + metrics.ascent as f32 - glyph.offset_y as f32 - glyph.height as f32)
-                    .round();
-                let [u, v] = glyph.position.map(|value| value as f32);
-                let w = glyph.width as f32;
-                let h = glyph.height as f32;
-                push_quad(
-                    vertices,
-                    [gx, gy, gx + w, gy + h],
-                    [[u, v], [u + w, v + h]],
-                    color,
-                );
-            }
+            emit_cluster_extras(vertices, cluster, cell, cbox, color, ctx);
         }
-        let has_explicit_underline = cell.flags.contains(CellFlags::UNDERLINE);
-        let has_hover_underline = (cell.hyperlink_id.is_some() || cell.c != ' ')
-            && options.hovered_span.is_some_and(|span| {
-                span.line == abs_line && col >= span.start_col && col <= span.end_col
-            });
-        if has_explicit_underline || has_hover_underline {
-            let ul_color = if cell.underline_color != Color::DefaultForeground {
-                let resolved = cell.underline_color.to_rgb(
-                    colors.palette,
-                    colors.foreground,
-                    colors.background,
-                );
-                rgba(resolved)
-            } else {
-                color
-            };
-            let base_top = y + (metrics.ascent as f32 + 1.0).min(ch - 1.0);
+        emit_decorations(vertices, cell, col, abs_line, cbox, color, ctx);
+    }
+}
 
-            if cell.flags.contains(CellFlags::UNDERLINE_DOUBLE) {
-                let top1 = y + (metrics.ascent as f32).min(ch - 3.0);
-                let top2 = top1 + 2.0;
-                push_quad(
-                    vertices,
-                    [x, top1, x + width, top1 + 1.0],
-                    SOLID_UV,
-                    ul_color,
-                );
-                push_quad(
-                    vertices,
-                    [x, top2, x + width, top2 + 1.0],
-                    SOLID_UV,
-                    ul_color,
-                );
-            } else if cell.flags.contains(CellFlags::UNDERLINE_CURLY) {
-                let steps = (width * 2.0).round().max(4.0) as usize;
-                let step_w = width / steps as f32;
-                let amplitude = 1.5_f32;
-                let period = cw.max(4.0);
-                for step in 0..steps {
-                    let seg_x = x + step as f32 * step_w;
-                    let wave = ((seg_x - x) / period * std::f32::consts::TAU).sin() * amplitude;
-                    let seg_y = (base_top + wave).clamp(y, y + ch - 1.0);
-                    push_quad(
-                        vertices,
-                        [seg_x, seg_y, seg_x + step_w, seg_y + 1.0],
-                        SOLID_UV,
-                        ul_color,
-                    );
-                }
-            } else if cell.flags.contains(CellFlags::UNDERLINE_DOTTED) {
-                let dot_size = 2.0_f32;
-                let mut dot_x = x;
-                while dot_x < x + width {
-                    let cur_w = dot_size.min(x + width - dot_x);
-                    push_quad(
-                        vertices,
-                        [dot_x, base_top, dot_x + cur_w, base_top + 1.0],
-                        SOLID_UV,
-                        ul_color,
-                    );
-                    dot_x += dot_size * 2.0;
-                }
-            } else if cell.flags.contains(CellFlags::UNDERLINE_DASHED) {
-                let dash_len = 4.0_f32;
-                let gap = 3.0_f32;
-                let mut dash_x = x;
-                while dash_x < x + width {
-                    let cur_w = dash_len.min(x + width - dash_x);
-                    push_quad(
-                        vertices,
-                        [dash_x, base_top, dash_x + cur_w, base_top + 1.0],
-                        SOLID_UV,
-                        ul_color,
-                    );
-                    dash_x += dash_len + gap;
-                }
-            } else {
-                push_quad(
-                    vertices,
-                    [x, base_top, x + width, base_top + 1.0],
-                    SOLID_UV,
-                    ul_color,
-                );
-            }
+fn emit_cursor_overlay(
+    vertices: &mut Vec<f32>,
+    layout: ViewportLayout,
+    grid: &Grid,
+    colors: ColorScheme<'_>,
+    cursor: (usize, usize, usize),
+) {
+    let (row, col, width) = cursor;
+    let x = layout.pad_x + col as f32 * layout.cw;
+    let y = layout.pad_y + row as f32 * layout.ch;
+    let rect = match grid.cursor.shape {
+        CursorShape::Block => [x, y, x + width as f32 * layout.cw, y + layout.ch],
+        CursorShape::Beam => [x, y, x + 2.0_f32.min(layout.cw), y + layout.ch],
+        CursorShape::Underline => [
+            x,
+            y + (layout.ch - 2.0).max(0.0),
+            x + width as f32 * layout.cw,
+            y + layout.ch,
+        ],
+    };
+    if grid.cursor.shape != CursorShape::Block {
+        push_quad(vertices, rect, SOLID_UV, rgba(colors.foreground));
+    }
+}
+
+fn emit_preedit_char(
+    vertices: &mut Vec<f32>,
+    c: char,
+    (px, py, span_w): (f32, f32, f32),
+    layout: ViewportLayout,
+    fg_color: [f32; 4],
+    ctx: &RenderContext<'_>,
+) {
+    // Draw preedit cell background
+    push_quad(
+        vertices,
+        [px, py, px + span_w, py + layout.ch],
+        SOLID_UV,
+        [0.2, 0.25, 0.35, 0.95],
+    );
+
+    // Draw preedit glyph
+    let span_right = px + span_w;
+    if render_procedural_glyph(vertices, c, px, py, span_w, layout.ch, fg_color) {
+        // Procedural box drawing / block elements glyph
+    } else if let Some(glyph) = ctx.atlas.get(c, CellFlags::UNDERLINE, ctx.fonts)
+        && glyph.width > 0
+        && glyph.height > 0
+    {
+        let gx = px + glyph.offset_x as f32;
+        let gy = py + ctx.metrics.ascent as f32 - glyph.offset_y as f32 - glyph.height as f32;
+        let [u, v] = glyph.position.map(|value| value as f32);
+        let w = glyph.width as f32;
+        let h = glyph.height as f32;
+        let left = gx.max(px);
+        let right = (gx + w).min(span_right);
+        if right > left {
+            let u_left = u + (left - gx);
+            let u_right = u + (right - gx);
+            push_quad(
+                vertices,
+                [left, gy, right, gy + h],
+                [[u_left, v], [u_right, v + h]],
+                fg_color,
+            );
         }
-        if cell.flags.contains(CellFlags::STRIKETHROUGH) {
-            let top = y + (metrics.ascent as f32 * 0.65).floor();
-            push_quad(vertices, [x, top, x + width, top + 1.0], SOLID_UV, color);
+    }
+
+    // Draw preedit underline
+    let top = py + (ctx.metrics.ascent as f32 + 1.0).min(layout.ch - 1.0);
+    push_quad(
+        vertices,
+        [px, top, px + span_w, top + 1.0],
+        SOLID_UV,
+        fg_color,
+    );
+}
+
+fn emit_preedit_overlay(
+    vertices: &mut Vec<f32>,
+    preedit: &Preedit,
+    layout: ViewportLayout,
+    ctx: &RenderContext<'_>,
+) {
+    let grid = ctx.grid;
+    let crow_opt = if grid.viewport_offset == 0 {
+        Some(grid.cursor.row)
+    } else if grid.cursor.row + grid.viewport_offset < grid.rows {
+        Some(grid.cursor.row + grid.viewport_offset)
+    } else {
+        None
+    };
+    let Some(crow) = crow_opt else {
+        return;
+    };
+
+    let mut ccol = grid.cursor.col.min(grid.cols.saturating_sub(1));
+    let line = grid.visible_line(crow);
+    if ccol > 0
+        && ccol < line.cells.len()
+        && line.cells[ccol].flags.contains(CellFlags::WIDE_CHAR_SPACER)
+    {
+        ccol -= 1;
+    }
+    let mut cur_col = ccol;
+    let fg_color = rgba(ctx.colors.foreground);
+
+    for c in preedit.text.chars() {
+        let remaining_cols = grid.cols.saturating_sub(cur_col);
+        if remaining_cols == 0 {
+            break;
         }
+        let char_width = crate::width::wcwidth(c, grid.ambiguous_width).clamp(0, 2) as usize;
+        let visible_cols = char_width.min(remaining_cols);
+        let px = layout.pad_x + cur_col as f32 * layout.cw;
+        let py = layout.pad_y + crow as f32 * layout.ch;
+        let span_w = visible_cols as f32 * layout.cw;
+
+        emit_preedit_char(vertices, c, (px, py, span_w), layout, fg_color, ctx);
+
+        cur_col += char_width;
     }
 }
 
 pub fn build_dynamic_overlays(vertices: &mut Vec<f32>, ctx: &RenderContext<'_>) {
-    let grid = ctx.grid;
-    let colors = ctx.colors;
-    let metrics = ctx.metrics;
-    let fonts = ctx.fonts;
-    let atlas = ctx.atlas;
-    let options = ctx.options;
-    let cursor = ctx.cursor;
+    let layout = ViewportLayout {
+        pad_x: f32::from(ctx.options.padding[0]),
+        pad_y: f32::from(ctx.options.padding[1]),
+        cw: ctx.metrics.cell_width as f32,
+        ch: ctx.metrics.cell_height as f32,
+    };
 
-    let cw = metrics.cell_width as f32;
-    let ch = metrics.cell_height as f32;
-    let pad_x = f32::from(options.padding[0]);
-    let pad_y = f32::from(options.padding[1]);
-
-    if let Some((row, col, width)) = cursor {
-        let x = pad_x + col as f32 * cw;
-        let y = pad_y + row as f32 * ch;
-        let rect = match grid.cursor.shape {
-            CursorShape::Block => [x, y, x + width as f32 * cw, y + ch],
-            CursorShape::Beam => [x, y, x + 2.0_f32.min(cw), y + ch],
-            CursorShape::Underline => [x, y + (ch - 2.0).max(0.0), x + width as f32 * cw, y + ch],
-        };
-        if grid.cursor.shape != CursorShape::Block {
-            push_quad(vertices, rect, SOLID_UV, rgba(colors.foreground));
-        }
+    if let Some(cursor) = ctx.cursor {
+        emit_cursor_overlay(vertices, layout, ctx.grid, ctx.colors, cursor);
     }
 
-    // If an IME pre-edit string is active, render it inline starting at cursor position.
-    // Aligns with Kitty (`kitty/screen.c`): preedit is rendered as an overlay at the active
-    // grid cursor row and column even if the hardware cursor is hidden by the terminal application.
-    if let Some(preedit) = options.preedit
+    if let Some(preedit) = ctx.options.preedit
         && !preedit.text.is_empty()
-        && grid.cursor.row < grid.rows
+        && ctx.grid.cursor.row < ctx.grid.rows
     {
-        let crow_opt = if grid.viewport_offset == 0 {
-            Some(grid.cursor.row)
-        } else if grid.cursor.row + grid.viewport_offset < grid.rows {
-            Some(grid.cursor.row + grid.viewport_offset)
-        } else {
-            None
-        };
-        if let Some(crow) = crow_opt {
-            let mut ccol = grid.cursor.col.min(grid.cols.saturating_sub(1));
-            let line = grid.visible_line(crow);
-            if ccol > 0
-                && ccol < line.cells.len()
-                && line.cells[ccol].flags.contains(CellFlags::WIDE_CHAR_SPACER)
-            {
-                ccol -= 1;
-            }
-            let mut cur_col = ccol;
-            for c in preedit.text.chars() {
-                let remaining_cols = grid.cols.saturating_sub(cur_col);
-                if remaining_cols == 0 {
-                    break;
-                }
-                let char_width =
-                    crate::width::wcwidth(c, grid.ambiguous_width).clamp(0, 2) as usize;
-                let visible_cols = char_width.min(remaining_cols);
-                let px = pad_x + cur_col as f32 * cw;
-                let py = pad_y + crow as f32 * ch;
-                let span_w = visible_cols as f32 * cw;
-
-                // Draw preedit cell background
-                push_quad(
-                    vertices,
-                    [px, py, px + span_w, py + ch],
-                    SOLID_UV,
-                    [0.2, 0.25, 0.35, 0.95],
-                );
-
-                // Draw preedit glyph
-                let span_right = px + span_w;
-                if render_procedural_glyph(vertices, c, px, py, span_w, ch, rgba(colors.foreground))
-                {
-                    // Procedural box drawing / block elements glyph
-                } else if let Some(glyph) = atlas.get(c, CellFlags::UNDERLINE, fonts)
-                    && glyph.width > 0
-                    && glyph.height > 0
-                {
-                    let gx = px + glyph.offset_x as f32;
-                    let gy =
-                        py + metrics.ascent as f32 - glyph.offset_y as f32 - glyph.height as f32;
-                    let [u, v] = glyph.position.map(|value| value as f32);
-                    let w = glyph.width as f32;
-                    let h = glyph.height as f32;
-                    let left = gx.max(px);
-                    let right = (gx + w).min(span_right);
-                    if right > left {
-                        let u_left = u + (left - gx);
-                        let u_right = u + (right - gx);
-                        push_quad(
-                            vertices,
-                            [left, gy, right, gy + h],
-                            [[u_left, v], [u_right, v + h]],
-                            rgba(colors.foreground),
-                        );
-                    }
-                }
-
-                // Draw preedit underline
-                let top = py + (metrics.ascent as f32 + 1.0).min(ch - 1.0);
-                push_quad(
-                    vertices,
-                    [px, top, px + span_w, top + 1.0],
-                    SOLID_UV,
-                    rgba(colors.foreground),
-                );
-
-                cur_col += char_width;
-            }
-        }
+        emit_preedit_overlay(vertices, preedit, layout, ctx);
     }
 }
 
