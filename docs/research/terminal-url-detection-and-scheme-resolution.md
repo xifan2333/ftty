@@ -25,7 +25,7 @@ This document surveys high-trust primary sources (IETF RFC specifications and pr
    - `gen-delims` = `":" / "/" / "?" / "#" / "[" / "]" / "@"` (§2.2)
    - `sub-delims` = `"!" / "$" / "&" / "'" / "(" / ")" / "*" / "+" / "," / ";" / "="` (§2.2)
    - `pct-encoded` = `"%" HEXDIG HEXDIG` (§2.1)
-   
+
    **Critical Implication**: Any non-ASCII character (including Unicode code points `> U+007F`, CJK ideographs `U+4E00..U+9FFF`, full-width punctuation like `，` `U+FF0C`, and emojis) is **never** a valid raw character in a URI. A compliant URL scanner must terminate immediately upon encountering any non-ASCII character or whitespace.
 
 2. **Scheme Syntax (§3.1)**:
@@ -33,7 +33,7 @@ This document surveys high-trust primary sources (IETF RFC specifications and pr
    scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )
    ```
    For hierarchical URIs with an authority (network or application protocols), the scheme is delimited from the rest of the URI by the sequence `://`.
-   
+
    **Critical Implication**: Any protocol conforming to URI standards starts with an ASCII letter, contains only ASCII alphanumerics, `+`, `-`, or `.`, and connects to the authority component via `://`. Rather than enumerating protocol names, looking for the `://` delimiter and validating the scheme backward naturally covers all hierarchical URIs and DeepLinks.
 
 ---

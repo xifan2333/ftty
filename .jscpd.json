@@ -1,10 +1,11 @@
 {
   "threshold": 3.0,
+  "minTokens": 70,
+  "minLines": 6,
   "reporters": ["console"],
+  "path": ["src"],
   "ignore": [
-    "target/**",
     "**/tests/**"
   ],
-  "format": ["rust"],
-  "path": ["src/"]
+  "format": ["rust"]
 }

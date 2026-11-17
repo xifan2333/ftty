@@ -2,7 +2,7 @@
 
 ## Context
 
-While ADR 0011 established an honest module layout by turning fake shim namespaces into real files, the test suites remained in `tests/` as separate compilation units. Because external integration test binaries can only access `pub` items, dozens of internal implementation details—such as `build_vertices`, `wcswidth`, `load_font_bytes`, `find_url_at_col`, and internal pipeline accessors—were forced to be marked `pub #[doc(hidden)]`. 
+While ADR 0011 established an honest module layout by turning fake shim namespaces into real files, the test suites remained in `tests/` as separate compilation units. Because external integration test binaries can only access `pub` items, dozens of internal implementation details—such as `build_vertices`, `wcswidth`, `load_font_bytes`, `find_url_at_col`, and internal pipeline accessors—were forced to be marked `pub #[doc(hidden)]`.
 
 Furthermore, `src/lib.rs` had accumulated 77 re-exports at the crate root, 68 of which were redundant aliases to items already reachable via their respective modules. The integration tests' need for visibility was artificially driving the crate's public API surface and leaking internal abstractions.
 

@@ -161,4 +161,3 @@ Then squash-merge and delete the branch:
 ```bash
 gh pr merge <pr_id> --squash --delete-branch
 ```
-
