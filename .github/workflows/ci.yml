@@ -20,11 +20,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history so `git merge-base HEAD origin/main` works for the changed-file ratchets.
+          fetch-depth: 0
 
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libwayland-dev wayland-protocols libxkbcommon-dev libfontconfig1-dev libfreetype6-dev libegl1-mesa-dev libgles2-mesa-dev fonts-dejavu-core
+
+      - name: Install quality gate tools via mise
+        uses: jdx/mise-action@v5
+        with:
+          # Only the ratchet tools; the Rust toolchain (with rustfmt/clippy) is provisioned
+          # by dtolnay/rust-toolchain below, so mise does not reinstall it.
+          install_args: "github:ast-grep/ast-grep github:kucherenko/jscpd github:crate-ci/typos pipx:lizard"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -38,6 +48,18 @@ jobs:
 
       - name: Run clippy
         run: cargo clippy --all-targets -- -D warnings
+
+      - name: Enforce AST ratchet on changed files
+        run: mise run check:ast:changed
+
+      - name: Enforce complexity ratchet (CCN/CogC <= 15)
+        run: mise run check:complexity
+
+      - name: Check code duplication (jscpd <= 3.0%)
+        run: mise run check:dup
+
+      - name: Check typos
+        run: mise run check:typos
 
       - name: Build debug binary
         run: cargo build --verbose
