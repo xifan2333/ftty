@@ -2,9 +2,9 @@
 
 use std::cell::RefCell;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use freetype::RenderMode;
 use freetype::face::LoadFlag;
@@ -67,6 +67,9 @@ impl RasterizedGlyph {
 
 struct FaceWrapper {
     face: Option<freetype::Face>,
+    path: Option<PathBuf>,
+    index: u32,
+    data: Option<Arc<Vec<u8>>>,
 }
 
 impl Drop for FaceWrapper {
@@ -108,7 +111,12 @@ impl Font {
             )
         })?;
         Ok(Self {
-            inner: Rc::new(RefCell::new(FaceWrapper { face: Some(face) })),
+            inner: Rc::new(RefCell::new(FaceWrapper {
+                face: Some(face),
+                path: Some(path.to_path_buf()),
+                index: collection_index,
+                data: None,
+            })),
         })
     }
 
@@ -129,8 +137,39 @@ impl Font {
             )
         })?;
         Ok(Self {
-            inner: Rc::new(RefCell::new(FaceWrapper { face: Some(face) })),
+            inner: Rc::new(RefCell::new(FaceWrapper {
+                face: Some(face),
+                path: None,
+                index: collection_index,
+                data: Some(Arc::new(bytes.to_vec())),
+            })),
         })
+    }
+
+    /// Shapes a multi-codepoint grapheme cluster with rustybuzz (HarfBuzz).
+    ///
+    /// If the font composes the cluster into a single ligature glyph via OpenType GSUB,
+    /// returns `Some(glyph_index)`. Otherwise returns `None`.
+    #[must_use]
+    pub fn shape_cluster(&self, text: &str) -> Option<u16> {
+        let mut guard = self.inner.borrow_mut();
+        if guard.data.is_none()
+            && let Some(path) = &guard.path
+        {
+            guard.data = std::fs::read(path).ok().map(Arc::new);
+        }
+        let data = guard.data.as_ref()?;
+        let index = guard.index;
+        let face = rustybuzz::Face::from_slice(data, index)?;
+        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        buffer.push_str(text);
+        let output = rustybuzz::shape(&face, &[], buffer);
+        let infos = output.glyph_infos();
+        if infos.len() == 1 && infos[0].glyph_id != 0 {
+            u16::try_from(infos[0].glyph_id).ok()
+        } else {
+            None
+        }
     }
 
     /// Looks up the glyph index in the font's character map (`cmap`).

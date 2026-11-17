@@ -49,15 +49,21 @@ fn prepare_cell_glyphs(
         return false;
     }
     let mut full = false;
-    if !is_procedural_glyph(cell.c) {
-        full |= atlas.get_or_insert(cell.c, cell.flags, fonts).is_none();
-    }
     if let Some(cluster_text) = cluster {
+        if atlas
+            .get_or_insert_cluster(cluster_text, cell.flags, fonts)
+            .is_some()
+        {
+            return false;
+        }
         for extra in cluster_text.chars().skip(1) {
             if !is_cluster_format(extra) {
                 full |= atlas.get_or_insert(extra, cell.flags, fonts).is_none();
             }
         }
+    }
+    if !is_procedural_glyph(cell.c) {
+        full |= atlas.get_or_insert(cell.c, cell.flags, fonts).is_none();
     }
     full
 }
@@ -414,6 +420,23 @@ fn emit_glyph_quad(
     }
 }
 
+fn emit_cluster_glyph(
+    vertices: &mut Vec<f32>,
+    cluster: &str,
+    cbox: CellBox,
+    color: [f32; 4],
+    ctx: &RenderContext<'_>,
+) -> bool {
+    let Some(glyph) = ctx.atlas.get_cluster(cluster) else {
+        return false;
+    };
+    if glyph.width == 0 || glyph.height == 0 {
+        return false;
+    }
+    emit_positioned_glyph(vertices, &glyph, cbox, color, ctx.metrics.ascent as f32);
+    true
+}
+
 fn emit_cluster_extras(
     vertices: &mut Vec<f32>,
     cluster: &str,
@@ -599,6 +622,28 @@ fn emit_decorations(
     }
 }
 
+fn emit_cell_foreground(
+    vertices: &mut Vec<f32>,
+    cell: &Cell,
+    cluster: Option<&str>,
+    cbox: CellBox,
+    color: [f32; 4],
+    ctx: &RenderContext<'_>,
+) {
+    let cluster_rendered = if let Some(text) = cluster {
+        emit_cluster_glyph(vertices, text, cbox, color, ctx)
+    } else {
+        false
+    };
+
+    if !cluster_rendered && visible_glyph(cell) {
+        emit_glyph_quad(vertices, cell, cbox, color, ctx);
+        if let Some(text) = cluster {
+            emit_cluster_extras(vertices, text, cell, cbox, color, ctx);
+        }
+    }
+}
+
 pub fn build_row_foregrounds(vertices: &mut Vec<f32>, row: usize, ctx: &RenderContext<'_>) {
     vertices.clear();
     let cw = ctx.metrics.cell_width as f32;
@@ -637,12 +682,7 @@ pub fn build_row_foregrounds(vertices: &mut Vec<f32>, row: usize, ctx: &RenderCo
             cw,
         };
 
-        if visible_glyph(cell) {
-            emit_glyph_quad(vertices, cell, cbox, color, ctx);
-        }
-        if let Some(cluster) = line.cluster_text(col) {
-            emit_cluster_extras(vertices, cluster, cell, cbox, color, ctx);
-        }
+        emit_cell_foreground(vertices, cell, line.cluster_text(col), cbox, color, ctx);
         emit_decorations(vertices, cell, col, abs_line, cbox, color, ctx);
     }
 }
@@ -826,4 +866,67 @@ pub fn build_vertices(
     vertices.extend_from_slice(&bgs);
     vertices.extend_from_slice(&fgs);
     build_dynamic_overlays(vertices, &ctx);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::color::{Color, Rgb, default_256_palette};
+    use crate::font::FontManager;
+    use crate::grid::{CellFlags, Grid};
+    use crate::render::{ColorScheme, RenderOptions};
+
+    fn write_cluster(grid: &mut Grid, cluster: &str) {
+        for c in cluster.chars() {
+            grid.write_char(
+                c,
+                Color::DefaultForeground,
+                Color::DefaultBackground,
+                CellFlags::empty(),
+            );
+        }
+    }
+
+    #[test]
+    fn test_emoji_clusters_emit_single_composed_quad() {
+        let path = std::path::Path::new("/usr/share/fonts/noto/NotoColorEmoji.ttf");
+        if !path.exists() {
+            return;
+        }
+        let fonts = FontManager::load(14.0).expect("load fonts");
+
+        for cluster in ["🇨🇳", "👨‍👩‍👧‍👦", "1️⃣"] {
+            let mut grid = Grid::new(4, 1, 0);
+            grid.cursor.visible = false;
+            write_cluster(&mut grid, cluster);
+
+            let mut atlas = GlyphAtlas::new(256, 256);
+            prepare_atlas(&grid, &fonts, &mut atlas, None);
+
+            let mut fg_vertices = Vec::new();
+            let palette = default_256_palette();
+            let colors = ColorScheme::new(&palette, Rgb::new(220, 220, 220), Rgb::new(24, 24, 24));
+            let ctx = RenderContext {
+                grid: &grid,
+                colors,
+                metrics: fonts.metrics,
+                fonts: &fonts,
+                atlas: &atlas,
+                options: RenderOptions::default(),
+                cursor: None,
+            };
+            build_row_foregrounds(&mut fg_vertices, 0, &ctx);
+
+            let color_quads: Vec<_> = fg_vertices.chunks(8).filter(|v| v[7] < 0.0).collect();
+            assert!(
+                !color_quads.is_empty(),
+                "cluster {cluster} must emit colored vertices"
+            );
+            assert_eq!(
+                color_quads.len(),
+                6,
+                "cluster {cluster} must emit exactly 1 composed quad (6 vertices)"
+            );
+        }
+    }
 }
