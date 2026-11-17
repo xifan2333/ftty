@@ -2,7 +2,10 @@
 
 // `unwrap`/`expect` are only acceptable inside the test suite; production paths must
 // propagate errors. Cargo.toml enables `clippy::unwrap_used`/`expect_used` crate-wide.
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![cfg_attr(
+    test,
+    allow(clippy::unwrap_used, clippy::expect_used, clippy::needless_range_loop)
+)]
 
 mod color;
 mod config;

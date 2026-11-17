@@ -33,6 +33,83 @@ pub struct Modifiers {
     pub logo: bool,
 }
 
+const NAMED_KEYS: &[(&[&str], u32)] = &[
+    (&["pageup", "page_up"], keysyms::KEY_Page_Up),
+    (&["pagedown", "page_down"], keysyms::KEY_Page_Down),
+    (&["kp_pageup", "kp_page_up"], keysyms::KEY_KP_Page_Up),
+    (&["kp_pagedown", "kp_page_down"], keysyms::KEY_KP_Page_Down),
+    (&["home"], keysyms::KEY_Home),
+    (&["end"], keysyms::KEY_End),
+    (&["up"], keysyms::KEY_Up),
+    (&["down"], keysyms::KEY_Down),
+    (&["left"], keysyms::KEY_Left),
+    (&["right"], keysyms::KEY_Right),
+    (&["insert"], keysyms::KEY_Insert),
+    (&["+", "plus", "kp_add"], keysyms::KEY_plus),
+    (&["=", "equal"], keysyms::KEY_equal),
+    (&["-", "minus", "kp_subtract"], keysyms::KEY_minus),
+    (&["0", "kp_0"], keysyms::KEY_0),
+];
+
+fn lookup_well_known_key(name: &str) -> Option<xkb::Keysym> {
+    for &(aliases, sym) in NAMED_KEYS {
+        if aliases.contains(&name) {
+            return Some(xkb::Keysym::new(sym));
+        }
+    }
+    None
+}
+
+fn split_key_combo(s: &str) -> (&str, &str) {
+    if let Some(prefix) = s.strip_suffix("++") {
+        (prefix, "+")
+    } else {
+        match s.rfind('+') {
+            Some(idx) => (&s[..idx], &s[idx + 1..]),
+            None => ("", s),
+        }
+    }
+}
+
+fn parse_modifiers(mod_part: &str) -> Option<Modifiers> {
+    if mod_part.is_empty() {
+        return Some(Modifiers::default());
+    }
+
+    let mut mods = Modifiers::default();
+    for part in mod_part.split('+') {
+        match part.trim().to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => mods.ctrl = true,
+            "alt" | "mod1" => mods.alt = true,
+            "shift" => mods.shift = true,
+            "super" | "mod4" | "logo" => mods.logo = true,
+            _ => return None,
+        }
+    }
+
+    Some(mods)
+}
+
+fn parse_keysym(key_str: &str) -> Option<xkb::Keysym> {
+    let lower = key_str.trim().to_ascii_lowercase();
+    if let Some(sym) = lookup_well_known_key(&lower) {
+        return Some(sym);
+    }
+
+    let sym = if lower.len() == 1 {
+        let ch = lower.chars().next()?;
+        xkb::utf32_to_keysym(ch as u32)
+    } else {
+        xkb::keysym_from_name(&lower, xkb::KEYSYM_CASE_INSENSITIVE)
+    };
+
+    if sym == xkb::Keysym::new(keysyms::KEY_NoSymbol) {
+        None
+    } else {
+        Some(sym)
+    }
+}
+
 /// Parses a key combination string (e.g. `"Shift+PageUp"` or `"Ctrl+Shift+C"`).
 #[must_use]
 pub fn parse_key_combo(s: &str) -> Option<(Modifiers, xkb::Keysym)> {
@@ -41,81 +118,11 @@ pub fn parse_key_combo(s: &str) -> Option<(Modifiers, xkb::Keysym)> {
         return None;
     }
 
-    let mut ctrl = false;
-    let mut alt = false;
-    let mut shift = false;
-    let mut logo = false;
+    let (mod_part, key_str) = split_key_combo(s);
+    let modifiers = parse_modifiers(mod_part)?;
+    let sym = parse_keysym(key_str)?;
 
-    // Handle trailing '+' in combo like "Ctrl++"
-    let (mod_part, key_str) = if let Some(prefix) = s.strip_suffix("++") {
-        (prefix, "+")
-    } else {
-        match s.rfind('+') {
-            Some(idx) => (&s[..idx], &s[idx + 1..]),
-            None => ("", s),
-        }
-    };
-
-    if !mod_part.is_empty() {
-        for part in mod_part.split('+') {
-            let p = part.trim();
-            if p.eq_ignore_ascii_case("ctrl") || p.eq_ignore_ascii_case("control") {
-                ctrl = true;
-            } else if p.eq_ignore_ascii_case("alt") || p.eq_ignore_ascii_case("mod1") {
-                alt = true;
-            } else if p.eq_ignore_ascii_case("shift") {
-                shift = true;
-            } else if p.eq_ignore_ascii_case("super")
-                || p.eq_ignore_ascii_case("mod4")
-                || p.eq_ignore_ascii_case("logo")
-            {
-                logo = true;
-            } else {
-                return None;
-            }
-        }
-    }
-
-    let key_trimmed = key_str.trim();
-    let sym = match key_trimmed.to_ascii_lowercase().as_str() {
-        "pageup" | "page_up" => xkb::Keysym::new(keysyms::KEY_Page_Up),
-        "pagedown" | "page_down" => xkb::Keysym::new(keysyms::KEY_Page_Down),
-        "kp_pageup" | "kp_page_up" => xkb::Keysym::new(keysyms::KEY_KP_Page_Up),
-        "kp_pagedown" | "kp_page_down" => xkb::Keysym::new(keysyms::KEY_KP_Page_Down),
-        "home" => xkb::Keysym::new(keysyms::KEY_Home),
-        "end" => xkb::Keysym::new(keysyms::KEY_End),
-        "up" => xkb::Keysym::new(keysyms::KEY_Up),
-        "down" => xkb::Keysym::new(keysyms::KEY_Down),
-        "left" => xkb::Keysym::new(keysyms::KEY_Left),
-        "right" => xkb::Keysym::new(keysyms::KEY_Right),
-        "insert" => xkb::Keysym::new(keysyms::KEY_Insert),
-        "+" | "plus" | "kp_add" => xkb::Keysym::new(keysyms::KEY_plus),
-        "=" | "equal" => xkb::Keysym::new(keysyms::KEY_equal),
-        "-" | "minus" | "kp_subtract" => xkb::Keysym::new(keysyms::KEY_minus),
-        "0" | "kp_0" => xkb::Keysym::new(keysyms::KEY_0),
-        other => {
-            if other.len() == 1 {
-                let ch = other.chars().next()?;
-                xkb::utf32_to_keysym(ch as u32)
-            } else {
-                xkb::keysym_from_name(other, xkb::KEYSYM_CASE_INSENSITIVE)
-            }
-        }
-    };
-
-    if sym == xkb::Keysym::new(keysyms::KEY_NoSymbol) {
-        None
-    } else {
-        Some((
-            Modifiers {
-                ctrl,
-                alt,
-                shift,
-                logo,
-            },
-            sym,
-        ))
-    }
+    Some((modifiers, sym))
 }
 
 #[must_use]
@@ -169,4 +176,44 @@ impl KittyKeyboardFlags {
         | KittyKeyboardFlags::REPORT_ALTERNATE_KEYS
         | KittyKeyboardFlags::REPORT_ALL_KEYS_AS_ESC
         | KittyKeyboardFlags::REPORT_ASSOCIATED_TEXT;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_key_combo_modifiers() {
+        let (mods, sym) = parse_key_combo("Shift+PageUp").unwrap();
+        assert!(mods.shift);
+        assert!(!mods.ctrl);
+        assert_eq!(sym, xkb::Keysym::new(keysyms::KEY_Page_Up));
+
+        let (mods, sym) = parse_key_combo("Ctrl+Shift+c").unwrap();
+        assert!(mods.ctrl);
+        assert!(mods.shift);
+        assert_eq!(sym, xkb::Keysym::new(keysyms::KEY_c));
+
+        let (mods, sym) = parse_key_combo("Control+Plus").unwrap();
+        assert!(mods.ctrl);
+        assert_eq!(sym, xkb::Keysym::new(keysyms::KEY_plus));
+
+        let (mods, sym) = parse_key_combo("Ctrl++").unwrap();
+        assert!(mods.ctrl);
+        assert_eq!(sym, xkb::Keysym::new(keysyms::KEY_plus));
+
+        let (mods, sym) = parse_key_combo("Alt+Mod4+Return").unwrap();
+        assert!(mods.alt);
+        assert!(mods.logo);
+        assert_eq!(sym, xkb::Keysym::new(keysyms::KEY_Return));
+
+        let (mods, sym) = parse_key_combo("Super+Mod1+Space").unwrap();
+        assert!(mods.alt);
+        assert!(mods.logo);
+        assert_eq!(sym, xkb::Keysym::new(keysyms::KEY_space));
+
+        assert!(parse_key_combo("none").is_none());
+        assert!(parse_key_combo("").is_none());
+        assert!(parse_key_combo("UnknownMod+C").is_none());
+    }
 }
