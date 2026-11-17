@@ -6,7 +6,8 @@ use glow::HasContext;
 
 use crate::color::Color;
 use crate::font::CellMetrics;
-use crate::grid::Grid;
+use crate::grid::{Grid, Row};
+use crate::kitty::model::ImagePlacement;
 
 use super::colors::RenderOptions;
 use super::text::push_quad;
@@ -41,6 +42,140 @@ pub fn build_low24_index(texture_ids: impl Iterator<Item = u32>) -> HashMap<u32,
     index
 }
 
+/// Scans one row for placeholder cells and groups consecutively matched ids into horizontal
+/// `(id, col_start, col_end)` segments. Unmatched or non-placeholder cells break a run.
+/// Returns an empty vec when the row has no placeholders at all.
+#[must_use]
+fn row_placeholder_segments(
+    row: &Row,
+    low24_index: &HashMap<u32, u32>,
+) -> Vec<(u32, usize, usize)> {
+    if row.placeholders.is_none() {
+        return Vec::new();
+    }
+    let mut segments: Vec<(u32, usize, usize)> = Vec::new();
+    let mut current_run: Option<(u32, usize, usize)> = None;
+
+    for (col, cell) in row.cells.iter().enumerate() {
+        let matched = (cell.c == KITTY_PLACEHOLDER)
+            .then(|| placeholder_image_id(cell.fg) & 0x00FF_FFFF)
+            .filter(|&id| id != 0)
+            .and_then(|id| low24_index.get(&id).copied());
+        match (current_run, matched) {
+            (Some((cur_id, start, end)), Some(next)) if cur_id == next && end + 1 == col => {
+                current_run = Some((cur_id, start, col));
+            }
+            (Some(prev), _) => {
+                segments.push(prev);
+                current_run = matched.map(|id| (id, col, col));
+            }
+            (None, Some(id)) => {
+                current_run = Some((id, col, col));
+            }
+            (None, None) => {}
+        }
+    }
+    if let Some(prev) = current_run {
+        segments.push(prev);
+    }
+    segments
+}
+
+/// A maximal rectangle of placeholder cells backed by one image texture.
+struct RectBox {
+    id: u32,
+    col_start: usize,
+    col_end: usize,
+    row_start: usize,
+    row_end: usize,
+}
+
+/// Folds one row of horizontal segments into the boxes still open from the previous row.
+///
+/// A box whose span matches a segment sitting exactly one row below it is grown downward;
+/// every other open box is closed and appended to `completed`. The returned vec becomes the
+/// new set of open boxes.
+#[must_use]
+fn accumulate_placeholder_boxes(
+    row: usize,
+    row_segments: Vec<(u32, usize, usize)>,
+    active_boxes: &mut Vec<RectBox>,
+    completed_boxes: &mut Vec<RectBox>,
+) -> Vec<RectBox> {
+    let mut next_active: Vec<RectBox> = Vec::new();
+    for (id, col_start, col_end) in row_segments {
+        if let Some(pos) = active_boxes.iter().position(|b| {
+            b.id == id && b.col_start == col_start && b.col_end == col_end && b.row_end + 1 == row
+        }) {
+            let mut b = active_boxes.swap_remove(pos);
+            b.row_end = row;
+            next_active.push(b);
+        } else {
+            next_active.push(RectBox {
+                id,
+                col_start,
+                col_end,
+                row_start: row,
+                row_end: row,
+            });
+        }
+    }
+    completed_boxes.append(active_boxes);
+    next_active
+}
+
+/// Appends one quad per cell of `b` to `vertices`, mapping each cell to its source pixel
+/// region through the sparse placeholder coordinate map (falling back to box-local offsets)
+/// and scaling by the virtual placement dimensions.
+#[allow(clippy::too_many_arguments)]
+fn push_sliced_placeholder_quads(
+    grid: &Grid,
+    b: &RectBox,
+    virt_cols: usize,
+    virt_rows: usize,
+    img_w: f32,
+    img_h: f32,
+    cw: f32,
+    ch: f32,
+    pad_x: f32,
+    pad_y: f32,
+    vertices: &mut Vec<f32>,
+) {
+    let total_c = virt_cols.max(1) as f32;
+    let total_r = virt_rows.max(1) as f32;
+    let box_w = b.col_end - b.col_start + 1;
+    let cell_count = (b.row_end - b.row_start + 1) * box_w;
+
+    for cell in 0..cell_count {
+        let row = b.row_start + cell / box_w;
+        let col = b.col_start + cell % box_w;
+        let (img_row, img_col) = if let Some(coords) = &grid.visible_line(row).placeholders
+            && let Some(&(ir, ic, _)) = coords.get(&col)
+        {
+            (ir as usize, ic as usize)
+        } else {
+            (row - b.row_start, col - b.col_start)
+        };
+
+        let x0 = pad_x + col as f32 * cw;
+        let y0 = pad_y + row as f32 * ch;
+        let x1 = x0 + cw;
+        let y1 = y0 + ch;
+
+        let u0 = (img_col as f32 / total_c) * img_w;
+        let u1 = ((img_col + 1) as f32 / total_c) * img_w;
+        let v0 = (img_row as f32 / total_r) * img_h;
+        let v1 = ((img_row + 1) as f32 / total_r) * img_h;
+
+        push_quad(
+            vertices,
+            [x0, y0, x1, y1],
+            [[u0, v0], [u1, v1]],
+            [1.0, 1.0, 1.0, 1.0],
+        );
+    }
+}
+
 /// Returns `buffer` unchanged when its capacity is within the retention cap, otherwise a fresh
 /// small vector so oversized transient allocations are deterministically released.
 #[must_use]
@@ -50,6 +185,85 @@ pub fn bounded_image_vertex_buffer(buffer: Vec<f32>) -> Vec<f32> {
     } else {
         Vec::with_capacity(64)
     }
+}
+
+/// Returns the clipped destination rectangle and matching source crop for one placement,
+/// or `None` when the placement is entirely outside the draw area.
+///
+/// Pixel-based clipping: the destination rectangle is intersected with the draw bounds
+/// (scroll-margin-aware on the live screen) and the source UVs are derived from the
+/// clipped fractions so images never stretch past the visible area.
+#[allow(clippy::too_many_arguments)]
+fn placement_crop(
+    placement: &ImagePlacement,
+    grid: &Grid,
+    cw: f32,
+    ch: f32,
+    pad_x: f32,
+    pad_y: f32,
+    viewport_start: usize,
+    img_w: f32,
+    img_h: f32,
+) -> Option<([f32; 4], [[f32; 2]; 2])> {
+    let screen_row_f = placement.line as f32 - viewport_start as f32;
+
+    let orig_x0 = pad_x + placement.col as f32 * cw + placement.offset_x as f32;
+    let orig_y0 = pad_y + screen_row_f * ch + placement.offset_y as f32;
+    let orig_w = (placement.cols as f32 * cw).max(1.0);
+    let orig_h = (placement.rows as f32 * ch).max(1.0);
+    let orig_x1 = orig_x0 + orig_w;
+    let orig_y1 = orig_y0 + orig_h;
+
+    let clip_min_x = pad_x;
+    let clip_max_x = pad_x + grid.cols as f32 * cw;
+    // When at the bottom of scrollback (live screen), clip against active scroll margins
+    // (DECSTBM) so images never overflow into fixed status footers. When viewing
+    // historical scrollback, clip against the visible viewport.
+    let (clip_min_y, clip_max_y) = if grid.viewport_offset == 0
+        && (grid.scroll_region_top > 0 || grid.scroll_region_bottom < grid.rows.saturating_sub(1))
+    {
+        (
+            pad_y + grid.scroll_region_top as f32 * ch,
+            pad_y + (grid.scroll_region_bottom + 1) as f32 * ch,
+        )
+    } else {
+        (pad_y, pad_y + grid.rows as f32 * ch)
+    };
+
+    // Intersect destination rectangle with clipping bounds
+    let x0 = orig_x0.clamp(clip_min_x, clip_max_x);
+    let x1 = orig_x1.clamp(clip_min_x, clip_max_x);
+    let y0 = orig_y0.clamp(clip_min_y, clip_max_y);
+    let y1 = orig_y1.clamp(clip_min_y, clip_max_y);
+
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+
+    let sx0 = placement.src_x as f32;
+    let sy0 = placement.src_y as f32;
+    let full_src_w = placement
+        .src_w
+        .map_or(img_w - sx0, |w| (w as f32).min(img_w - sx0));
+    let full_src_h = placement
+        .src_h
+        .map_or(img_h - sy0, |h| (h as f32).min(img_h - sy0));
+
+    // Derive UV crop coordinates precisely from the clipped pixel fractions
+    let left_ratio = (x0 - orig_x0) / orig_w;
+    let right_ratio = (x1 - orig_x0) / orig_w;
+    let top_ratio = (y0 - orig_y0) / orig_h;
+    let bottom_ratio = (y1 - orig_y0) / orig_h;
+
+    let crop_sx0 = sx0 + full_src_w * left_ratio;
+    let crop_sx1 = sx0 + full_src_w * right_ratio;
+    let crop_sy0 = sy0 + full_src_h * top_ratio;
+    let crop_sy1 = sy0 + full_src_h * bottom_ratio;
+
+    Some((
+        [x0, y0, x1, y1],
+        [[crop_sx0, crop_sy0], [crop_sx1, crop_sy1]],
+    ))
 }
 
 impl Renderer {
@@ -168,72 +382,21 @@ impl Renderer {
             let Some(&(tex, img_w, img_h, _)) = self.image_textures.get(&placement.image_id) else {
                 continue;
             };
-
-            let screen_row_f = placement.line as f32 - viewport_start as f32;
-
-            // Pixel-based clipping: compute the placement's destination rectangle on screen.
-            let orig_x0 = pad_x + placement.col as f32 * cw + placement.offset_x as f32;
-            let orig_y0 = pad_y + screen_row_f * ch + placement.offset_y as f32;
-            let orig_w = (placement.cols as f32 * cw).max(1.0);
-            let orig_h = (placement.rows as f32 * ch).max(1.0);
-            let orig_x1 = orig_x0 + orig_w;
-            let orig_y1 = orig_y0 + orig_h;
-
-            // Determine vertical clipping range:
-            // When at the bottom of scrollback (live screen), clip against active scroll margins (DECSTBM)
-            // so images never overflow into fixed status footers. When viewing historical scrollback,
-            // clip against the visible viewport.
-            let (clip_min_y, clip_max_y) = if grid.viewport_offset == 0
-                && (grid.scroll_region_top > 0
-                    || grid.scroll_region_bottom < grid.rows.saturating_sub(1))
-            {
-                (
-                    pad_y + grid.scroll_region_top as f32 * ch,
-                    pad_y + (grid.scroll_region_bottom + 1) as f32 * ch,
-                )
-            } else {
-                (pad_y, pad_y + grid.rows as f32 * ch)
-            };
-            let clip_min_x = pad_x;
-            let clip_max_x = pad_x + grid.cols as f32 * cw;
-
-            // Intersect destination rectangle with clipping bounds
-            let x0 = orig_x0.clamp(clip_min_x, clip_max_x);
-            let x1 = orig_x1.clamp(clip_min_x, clip_max_x);
-            let y0 = orig_y0.clamp(clip_min_y, clip_max_y);
-            let y1 = orig_y1.clamp(clip_min_y, clip_max_y);
-
-            if x1 <= x0 || y1 <= y0 {
-                continue;
-            }
-
-            let sx0 = placement.src_x as f32;
-            let sy0 = placement.src_y as f32;
-            let full_src_w = placement
-                .src_w
-                .map_or(img_w as f32 - sx0, |w| (w as f32).min(img_w as f32 - sx0));
-            let full_src_h = placement
-                .src_h
-                .map_or(img_h as f32 - sy0, |h| (h as f32).min(img_h as f32 - sy0));
-
-            // Derive UV crop coordinates precisely from the clipped pixel fractions
-            let left_ratio = (x0 - orig_x0) / orig_w;
-            let right_ratio = (x1 - orig_x0) / orig_w;
-            let top_ratio = (y0 - orig_y0) / orig_h;
-            let bottom_ratio = (y1 - orig_y0) / orig_h;
-
-            let crop_sx0 = sx0 + full_src_w * left_ratio;
-            let crop_sx1 = sx0 + full_src_w * right_ratio;
-            let crop_sy0 = sy0 + full_src_h * top_ratio;
-            let crop_sy1 = sy0 + full_src_h * bottom_ratio;
-
-            self.render_single_cropped_image(
-                tex,
+            let Some((dest, crop)) = placement_crop(
+                placement,
+                grid,
+                cw,
+                ch,
+                pad_x,
+                pad_y,
+                viewport_start,
                 img_w as f32,
                 img_h as f32,
-                [x0, y0, x1, y1],
-                [[crop_sx0, crop_sy0], [crop_sx1, crop_sy1]],
-            );
+            ) else {
+                continue;
+            };
+
+            self.render_single_cropped_image(tex, img_w as f32, img_h as f32, dest, crop);
         }
     }
 
@@ -332,14 +495,6 @@ impl Renderer {
         let pad_x = f32::from(options.padding[0]);
         let pad_y = f32::from(options.padding[1]);
 
-        struct RectBox {
-            id: u32,
-            col_start: usize,
-            col_end: usize,
-            row_start: usize,
-            row_end: usize,
-        }
-
         let mut completed_boxes: Vec<RectBox> = Vec::new();
         let mut active_boxes: Vec<RectBox> = Vec::new();
 
@@ -349,70 +504,20 @@ impl Renderer {
 
         for row in 0..grid.rows {
             let line = grid.visible_line(row);
-            let mut row_segments: Vec<(u32, usize, usize)> = Vec::new();
-
-            if line.placeholders.is_some() {
+            let row_segments = if line.placeholders.is_some() {
                 let low24_index = low24_index
                     .get_or_insert_with(|| build_low24_index(self.image_textures.keys().copied()));
-                let mut current_run: Option<(u32, usize, usize)> = None;
+                row_placeholder_segments(line, low24_index)
+            } else {
+                Vec::new()
+            };
 
-                for (col, cell) in line.cells.iter().enumerate() {
-                    if cell.c == KITTY_PLACEHOLDER {
-                        let id_low24 = placeholder_image_id(cell.fg) & 0x00FF_FFFF;
-                        if id_low24 != 0 {
-                            let real_id = low24_index.get(&id_low24).copied();
-
-                            if let Some(matched_id) = real_id {
-                                match current_run {
-                                    Some((cur_id, start, end))
-                                        if cur_id == matched_id && end + 1 == col =>
-                                    {
-                                        current_run = Some((cur_id, start, col));
-                                    }
-                                    Some(prev) => {
-                                        row_segments.push(prev);
-                                        current_run = Some((matched_id, col, col));
-                                    }
-                                    None => {
-                                        current_run = Some((matched_id, col, col));
-                                    }
-                                }
-                                continue;
-                            }
-                        }
-                    }
-                    if let Some(prev) = current_run.take() {
-                        row_segments.push(prev);
-                    }
-                }
-                if let Some(prev) = current_run {
-                    row_segments.push(prev);
-                }
-            }
-
-            // Merge matching row segments with active boxes from the previous row
-            let mut next_active: Vec<RectBox> = Vec::new();
-            for (id, col_start, col_end) in row_segments {
-                if let Some(pos) = active_boxes.iter().position(|b| {
-                    b.id == id
-                        && b.col_start == col_start
-                        && b.col_end == col_end
-                        && b.row_end + 1 == row
-                }) {
-                    let mut b = active_boxes.swap_remove(pos);
-                    b.row_end = row;
-                    next_active.push(b);
-                } else {
-                    next_active.push(RectBox {
-                        id,
-                        col_start,
-                        col_end,
-                        row_start: row,
-                        row_end: row,
-                    });
-                }
-            }
-            completed_boxes.append(&mut active_boxes);
+            let next_active = accumulate_placeholder_boxes(
+                row,
+                row_segments,
+                &mut active_boxes,
+                &mut completed_boxes,
+            );
             active_boxes = next_active;
         }
         completed_boxes.extend(active_boxes);
@@ -439,41 +544,21 @@ impl Renderer {
 
                 self.render_single_image(tex, img_w as f32, img_h as f32, [x0, y0, x1, y1]);
             } else {
-                let total_c = virt_cols.max(1) as f32;
-                let total_r = virt_rows.max(1) as f32;
                 let mut img_vertices = std::mem::take(&mut self.image_vertices);
                 img_vertices.clear();
-
-                for row in b.row_start..=b.row_end {
-                    let line = grid.visible_line(row);
-                    for col in b.col_start..=b.col_end {
-                        let (img_row, img_col) = if let Some(coords) = &line.placeholders
-                            && let Some(&(ir, ic, _)) = coords.get(&col)
-                        {
-                            (ir as usize, ic as usize)
-                        } else {
-                            (row - b.row_start, col - b.col_start)
-                        };
-
-                        let x0 = pad_x + col as f32 * cw;
-                        let y0 = pad_y + row as f32 * ch;
-                        let x1 = x0 + cw;
-                        let y1 = y0 + ch;
-
-                        let u0 = (img_col as f32 / total_c) * img_w as f32;
-                        let u1 = ((img_col + 1) as f32 / total_c) * img_w as f32;
-                        let v0 = (img_row as f32 / total_r) * img_h as f32;
-                        let v1 = ((img_row + 1) as f32 / total_r) * img_h as f32;
-
-                        push_quad(
-                            &mut img_vertices,
-                            [x0, y0, x1, y1],
-                            [[u0, v0], [u1, v1]],
-                            [1.0, 1.0, 1.0, 1.0],
-                        );
-                    }
-                }
-
+                push_sliced_placeholder_quads(
+                    grid,
+                    &b,
+                    virt_cols,
+                    virt_rows,
+                    img_w as f32,
+                    img_h as f32,
+                    cw,
+                    ch,
+                    pad_x,
+                    pad_y,
+                    &mut img_vertices,
+                );
                 if !img_vertices.is_empty() {
                     self.render_image_quads(tex, img_w as f32, img_h as f32, &img_vertices);
                 }
