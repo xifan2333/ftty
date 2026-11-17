@@ -82,86 +82,108 @@ impl KittyParser {
         let mut text_start = 0;
 
         while i < bytes.len() {
-            if self.in_apc {
-                if self.apc_buffer.len() > MAX_APC_PAYLOAD {
-                    self.in_apc = false;
-                    self.apc_buffer.clear();
-                    self.chunked_payload.clear();
-                    self.chunked_command = None;
-                    i += 1;
-                    text_start = i;
-                    continue;
-                }
-
-                // Look for APC terminator: \x1b\ (ST) or \x07 (BEL)
-                let byte = bytes[i];
-                if byte == 0x07 {
-                    self.in_apc = false;
-                    if let Some(event) = self.finish_apc() {
-                        callback(KittyStreamChunk::Event(Box::new(event)));
-                    }
-                    self.apc_buffer.clear();
-                    i += 1;
-                    text_start = i;
-                } else if byte == 0x1b {
-                    if i + 1 < bytes.len() {
-                        if bytes[i + 1] == b'\\' {
-                            self.in_apc = false;
-                            if let Some(event) = self.finish_apc() {
-                                callback(KittyStreamChunk::Event(Box::new(event)));
-                            }
-                            self.apc_buffer.clear();
-                            i += 2;
-                            text_start = i;
-                        } else {
-                            self.apc_buffer.push(byte);
-                            i += 1;
-                        }
-                    } else {
-                        self.pending_stream.push(byte);
-                        return;
-                    }
-                } else {
-                    self.apc_buffer.push(byte);
-                    i += 1;
-                }
-            } else if bytes[i] == 0x1b {
-                if i + 2 < bytes.len() {
-                    if bytes[i + 1] == b'_' && bytes[i + 2] == b'G' {
-                        if i > text_start {
-                            callback(KittyStreamChunk::Text(&bytes[text_start..i]));
-                        }
-                        self.in_apc = true;
-                        self.apc_buffer.clear();
-                        i += 3;
-                    } else {
-                        i += 1;
-                    }
-                } else if i + 1 < bytes.len() {
-                    if bytes[i + 1] == b'_' {
-                        if i > text_start {
-                            callback(KittyStreamChunk::Text(&bytes[text_start..i]));
-                        }
-                        self.pending_stream.extend_from_slice(&bytes[i..]);
-                        return;
-                    } else {
-                        i += 1;
-                    }
-                } else {
-                    if i > text_start {
-                        callback(KittyStreamChunk::Text(&bytes[text_start..i]));
-                    }
-                    self.pending_stream.push(bytes[i]);
-                    return;
-                }
+            let next_i = if self.in_apc {
+                self.step_apc(bytes, i, &mut text_start, &mut callback)
             } else {
-                i += 1;
+                self.step_text(bytes, i, text_start, &mut callback)
+            };
+
+            match next_i {
+                Some(next) => i = next,
+                None => return,
             }
         }
 
         if !self.in_apc && i > text_start {
             callback(KittyStreamChunk::Text(&bytes[text_start..i]));
         }
+    }
+
+    fn step_apc<F>(
+        &mut self,
+        bytes: &[u8],
+        i: usize,
+        text_start: &mut usize,
+        callback: &mut F,
+    ) -> Option<usize>
+    where
+        F: FnMut(KittyStreamChunk<'_>),
+    {
+        if self.apc_buffer.len() > MAX_APC_PAYLOAD {
+            self.reset_apc_overflow();
+            *text_start = i + 1;
+            return Some(i + 1);
+        }
+
+        match &bytes[i..] {
+            [0x07, ..] => {
+                self.handle_apc_terminator(callback);
+                *text_start = i + 1;
+                Some(i + 1)
+            }
+            [0x1b, b'\\', ..] => {
+                self.handle_apc_terminator(callback);
+                *text_start = i + 2;
+                Some(i + 2)
+            }
+            [0x1b] => {
+                self.pending_stream.push(0x1b);
+                None
+            }
+            [byte, ..] => {
+                self.apc_buffer.push(*byte);
+                Some(i + 1)
+            }
+            [] => Some(i),
+        }
+    }
+
+    fn step_text<F>(
+        &mut self,
+        bytes: &[u8],
+        i: usize,
+        text_start: usize,
+        callback: &mut F,
+    ) -> Option<usize>
+    where
+        F: FnMut(KittyStreamChunk<'_>),
+    {
+        match &bytes[i..] {
+            [0x1b, b'_', b'G', ..] => {
+                if i > text_start {
+                    callback(KittyStreamChunk::Text(&bytes[text_start..i]));
+                }
+                self.in_apc = true;
+                self.apc_buffer.clear();
+                Some(i + 3)
+            }
+            [0x1b, b'_'] | [0x1b] => {
+                if i > text_start {
+                    callback(KittyStreamChunk::Text(&bytes[text_start..i]));
+                }
+                self.pending_stream.extend_from_slice(&bytes[i..]);
+                None
+            }
+            _ => Some(i + 1),
+        }
+    }
+
+    fn handle_apc_terminator<F>(&mut self, callback: &mut F)
+    where
+        F: FnMut(KittyStreamChunk<'_>),
+    {
+        self.in_apc = false;
+        if let Some(event) = self.finish_apc() {
+            callback(KittyStreamChunk::Event(Box::new(event)));
+        }
+        self.apc_buffer.clear();
+    }
+
+    fn reset_apc_overflow(&mut self) {
+        self.in_apc = false;
+        self.apc_buffer.clear();
+        self.chunked_payload.clear();
+        self.chunked_command = None;
     }
 
     /// Returns `true` if the incoming byte slice is guaranteed to contain no Kitty APC sequences
@@ -247,6 +269,110 @@ impl KittyParser {
         self.events_scratch = events;
     }
 
+    fn assemble_chunked(
+        chunked_command: &mut Option<KittyCommand>,
+        chunked_payload: &mut Vec<u8>,
+        command: KittyCommand,
+        payload_bytes: &[u8],
+    ) -> Option<(KittyCommand, Vec<u8>)> {
+        if command.more_chunks {
+            if chunked_command.is_none() {
+                *chunked_command = Some(command);
+            }
+            chunked_payload.extend_from_slice(payload_bytes);
+            None
+        } else if let Some(mut first_cmd) = chunked_command.take() {
+            chunked_payload.extend_from_slice(payload_bytes);
+            let full_payload = std::mem::take(chunked_payload);
+            first_cmd.more_chunks = false;
+            Some((first_cmd, full_payload))
+        } else {
+            Some((command, payload_bytes.to_vec()))
+        }
+    }
+
+    fn handle_query(command: &KittyCommand, raw_payload: &[u8]) -> Option<KittyEvent> {
+        let id = command.image_id?;
+        if let Some(error) = command.error {
+            return kitty_error_response(command, id, error);
+        }
+        match validate_capability_query(command, raw_payload) {
+            Ok(()) => kitty_success_response(command, id, "OK"),
+            Err(error) => kitty_error_response(command, id, &kitty_error_message(&error)),
+        }
+    }
+
+    fn resolve_delete_target(&self, target: DeleteTarget) -> DeleteTarget {
+        match target {
+            DeleteTarget::ByNumber {
+                number,
+                placement,
+                free,
+            } => match self.image_numbers.get(&number).copied() {
+                Some(id) => match (placement, free) {
+                    (Some(placement), true) => DeleteTarget::ByIdPlacementAndFree(id, placement),
+                    (Some(placement), false) => DeleteTarget::ByIdPlacement(id, placement),
+                    (None, true) => DeleteTarget::ByIdAndFree(id),
+                    (None, false) => DeleteTarget::ById(id),
+                },
+                None => DeleteTarget::ByNumber {
+                    number,
+                    placement,
+                    free,
+                },
+            },
+            other => other,
+        }
+    }
+
+    fn handle_place(&self, mut command: KittyCommand) -> Option<KittyEvent> {
+        if command.image_id.is_none()
+            && let Some(number) = command.image_number
+        {
+            command.image_id = self.image_numbers.get(&number).copied();
+        }
+        let Some(id) = command.image_id else {
+            return kitty_error_response(&command, 0, "ENOENT:image not found");
+        };
+        command.image_id = Some(id);
+        Some(KittyEvent::Place { command })
+    }
+
+    fn handle_transmit(
+        &mut self,
+        mut command: KittyCommand,
+        raw_payload: &[u8],
+    ) -> Option<KittyEvent> {
+        let image_id = command.image_id.unwrap_or_else(|| self.allocate_image_id());
+        command.image_id = Some(image_id);
+
+        match decode_image_data(image_id, &command, raw_payload) {
+            Ok(image) => {
+                if let Some(number) = command.image_number {
+                    self.image_numbers.insert(number, image_id);
+                }
+                Some(KittyEvent::Transmit { command, image })
+            }
+            Err(error) => kitty_error_response(&command, image_id, &kitty_error_message(&error)),
+        }
+    }
+
+    fn resolve_error_response(&self, command: &KittyCommand, error: &str) -> Option<KittyEvent> {
+        let id = command
+            .image_id
+            .or_else(|| {
+                command
+                    .image_number
+                    .and_then(|number| self.image_numbers.get(&number).copied())
+            })
+            .unwrap_or(0);
+        if id == 0 {
+            None
+        } else {
+            kitty_error_response(command, id, error)
+        }
+    }
+
     fn finish_apc(&mut self) -> Option<KittyEvent> {
         let buffer = &self.apc_buffer;
         let (keys_bytes, payload_bytes) = match buffer.iter().position(|&b| b == b';') {
@@ -257,106 +383,28 @@ impl KittyParser {
         let keys_str = std::str::from_utf8(keys_bytes).ok()?;
         let command = parse_control_keys(keys_str);
 
-        // Resolve chunked commands before dispatching so a chunked query is only
-        // validated once the complete payload has arrived.
-        let (full_command, raw_payload) = if command.more_chunks {
-            if self.chunked_command.is_none() {
-                self.chunked_command = Some(command);
-            }
-            self.chunked_payload.extend_from_slice(payload_bytes);
-            return None;
-        } else if let Some(mut first_cmd) = self.chunked_command.take() {
-            self.chunked_payload.extend_from_slice(payload_bytes);
-            let full_payload = std::mem::take(&mut self.chunked_payload);
-            first_cmd.more_chunks = false;
-            (first_cmd, full_payload)
-        } else {
-            (command, payload_bytes.to_vec())
-        };
+        let (full_command, raw_payload) = Self::assemble_chunked(
+            &mut self.chunked_command,
+            &mut self.chunked_payload,
+            command,
+            payload_bytes,
+        )?;
 
-        // Capability probing query (a=q): load and validate, but never store or display.
         if full_command.action == KittyAction::Query {
-            let Some(id) = full_command.image_id else {
-                // Kitty requires an image id to address the response.
-                return None;
-            };
-            if let Some(error) = full_command.error {
-                return kitty_error_response(&full_command, id, error);
-            }
-            return match validate_capability_query(&full_command, &raw_payload) {
-                Ok(()) => kitty_success_response(&full_command, id, "OK"),
-                Err(error) => kitty_error_response(&full_command, id, &kitty_error_message(&error)),
-            };
+            return Self::handle_query(&full_command, &raw_payload);
         }
 
         if let Some(error) = full_command.error {
-            let id = full_command
-                .image_id
-                .or_else(|| {
-                    full_command
-                        .image_number
-                        .and_then(|number| self.image_numbers.get(&number).copied())
-                })
-                .unwrap_or(0);
-            return if id == 0 {
-                None
-            } else {
-                kitty_error_response(&full_command, id, error)
-            };
+            return self.resolve_error_response(&full_command, error);
         }
 
-        if full_command.action == KittyAction::Delete {
-            let target = match full_command.delete_target {
-                DeleteTarget::ByNumber {
-                    number,
-                    placement,
-                    free,
-                } => match self.image_numbers.get(&number).copied() {
-                    Some(id) => match (placement, free) {
-                        (Some(placement), true) => {
-                            DeleteTarget::ByIdPlacementAndFree(id, placement)
-                        }
-                        (Some(placement), false) => DeleteTarget::ByIdPlacement(id, placement),
-                        (None, true) => DeleteTarget::ByIdAndFree(id),
-                        (None, false) => DeleteTarget::ById(id),
-                    },
-                    None => DeleteTarget::ByNumber {
-                        number,
-                        placement,
-                        free,
-                    },
-                },
-                other => other,
-            };
-            return Some(KittyEvent::Delete { target });
-        }
-
-        if full_command.action == KittyAction::Place {
-            let mut command = full_command;
-            if command.image_id.is_none()
-                && let Some(number) = command.image_number
-            {
-                command.image_id = self.image_numbers.get(&number).copied();
+        match full_command.action {
+            KittyAction::Delete => {
+                let target = self.resolve_delete_target(full_command.delete_target);
+                Some(KittyEvent::Delete { target })
             }
-            let Some(id) = command.image_id else {
-                return kitty_error_response(&command, 0, "ENOENT:image not found");
-            };
-            command.image_id = Some(id);
-            return Some(KittyEvent::Place { command });
-        }
-
-        let mut command = full_command;
-        let image_id = command.image_id.unwrap_or_else(|| self.allocate_image_id());
-        command.image_id = Some(image_id);
-
-        match decode_image_data(image_id, &command, &raw_payload) {
-            Ok(image) => {
-                if let Some(number) = command.image_number {
-                    self.image_numbers.insert(number, image_id);
-                }
-                Some(KittyEvent::Transmit { command, image })
-            }
-            Err(error) => kitty_error_response(&command, image_id, &kitty_error_message(&error)),
+            KittyAction::Place => self.handle_place(full_command),
+            _ => self.handle_transmit(full_command, &raw_payload),
         }
     }
 
