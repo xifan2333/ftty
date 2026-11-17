@@ -1,0 +1,8 @@
+id: no-dbg
+message: "禁止在代码中遗留 dbg! 宏调试打印。"
+severity: error
+language: Rust
+files:
+  - "src/**"
+rule:
+  pattern: dbg!($$$ARGS)

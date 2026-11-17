@@ -14,6 +14,33 @@ steps {
       effect = "write"
     }
   }
+
+  ["check-ast"] {
+    glob = List("src/**/*.rs")
+    check = "ast-grep scan --error {{files}}"
+  }
+
+  ["check-complexity"] {
+    glob = List("src/**/*.rs")
+    check = "bash scripts/check-complexity.sh"
+  }
+
+  ["check-dup"] {
+    glob = List("src/**/*.rs")
+    check = "jscpd --config .jscpd.json"
+  }
+
+  ["check-typos"] {
+    glob = List("src/**", "doc/**", "Cargo.toml", "scripts/**")
+    check = "typos"
+  }
+
+  ["trailing-whitespace"] = Builtins.trailing_whitespace
+  ["newlines"] = Builtins.newlines
+  ["check-merge-conflict"] = Builtins.check_merge_conflict
+  ["detect-private-key"] = Builtins.detect_private_key
+  ["check-case-conflict"] = Builtins.check_case_conflict
+  ["check-symlinks"] = Builtins.check_symlinks
 }
 
 hooks {

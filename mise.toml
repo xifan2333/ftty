@@ -2,12 +2,17 @@ min_version = "2026.9.4"
 
 [tools]
 hk = "latest"
+node = "latest"
 pandoc = "latest"
 rust = "latest"
+"github:ast-grep/ast-grep" = "latest"
+"github:crate-ci/typos" = "latest"
+"github:kucherenko/jscpd" = "latest"
+"pipx:lizard" = "latest"
 
 [tasks.hooks]
-description = "Install or refresh hk Git hooks"
-run = "hk install"
+description = "Install or refresh hk Git hooks with mise integration"
+run = "hk install --mise"
 
 [tasks.check]
 description = "Run hk check across modified or staged files"
@@ -20,6 +25,45 @@ run = "hk check --plan"
 [tasks."check:changed"]
 description = "Run hk check only on modified/staged/untracked files"
 run = "hk check"
+
+[tasks."check:ast"]
+description = "Audit Rust AST anti-patterns across the repo"
+run = "ast-grep scan"
+
+[tasks."check:ast:changed"]
+description = "Enforce AST ratchet on modified/staged/untracked Rust files"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+shopt -s globstar
+files=()
+while IFS= read -r path; do
+  case "$path" in
+    src/**/*.rs | src/*.rs) files+=("$path") ;;
+  esac
+done < <({
+  git diff --name-only
+  git diff --cached --name-only
+  git ls-files --others --exclude-standard
+} | sort -u)
+if [ -z "${files[0]:-}" ]; then
+  echo "[check:ast:changed] no touched Rust files"
+  exit 0
+fi
+ast-grep scan --error "${files[@]}"
+'''
+
+[tasks."check:complexity"]
+description = "Audit Rust cyclomatic & cognitive complexity via lizard (CCN <= 15, CogC <= 15)"
+run = "bash scripts/check-complexity.sh \"$@\""
+
+[tasks."check:dup"]
+description = "Analyze code duplication across src/ using jscpd"
+run = "jscpd --config .jscpd.json"
+
+[tasks."check:typos"]
+description = "Check spelling and identifier integrity via typos"
+run = "typos"
 
 [tasks.fix]
 description = "Run all hk fixers to format files"

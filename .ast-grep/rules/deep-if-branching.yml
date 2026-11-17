@@ -1,0 +1,17 @@
+id: deep-if-branching
+message: "代码块内部分支嵌套过深 (>= 4 层)。建议优先采用卫语句（Guard Clauses / Early Return / ? 运算符）提前返回、提取独立函数，保持主业务逻辑处于扁平缩进。"
+severity: warning
+language: Rust
+files:
+  - "src/**"
+rule:
+  kind: if_expression
+  inside:
+    kind: if_expression
+    stopBy: end
+    inside:
+      kind: if_expression
+      stopBy: end
+      inside:
+        kind: if_expression
+        stopBy: end

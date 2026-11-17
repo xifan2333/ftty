@@ -1,0 +1,5 @@
+[default.extend-words]
+ftty = "ftty"
+codepoints = "codepoints"
+codepoint = "codepoint"
+DED = "DED"
