@@ -63,6 +63,23 @@ pub struct Grid {
     pub(crate) ambiguous_width: u8,
 }
 
+/// Appends one row's printable text to `out`, skipping wide and wrapped
+/// spacer cells and preferring the composed grapheme cluster when present.
+fn append_row_text(row: &Row, out: &mut String) {
+    for (col, cell) in row.cells.iter().enumerate() {
+        if !cell
+            .flags
+            .intersects(CellFlags::WIDE_CHAR_SPACER | CellFlags::WRAP_SPACER)
+        {
+            if let Some(text) = row.cluster_text(col) {
+                out.push_str(text);
+            } else {
+                out.push(cell.c);
+            }
+        }
+    }
+}
+
 impl Grid {
     #[must_use]
     pub fn new(cols: usize, rows: usize, max_scrollback: usize) -> Self {
@@ -453,18 +470,7 @@ impl Grid {
         for r in 0..self.rows {
             let row = self.visible_line(r);
             line_str.clear();
-            for (col, cell) in row.cells.iter().enumerate() {
-                if !cell
-                    .flags
-                    .intersects(CellFlags::WIDE_CHAR_SPACER | CellFlags::WRAP_SPACER)
-                {
-                    if let Some(text) = row.cluster_text(col) {
-                        line_str.push_str(text);
-                    } else {
-                        line_str.push(cell.c);
-                    }
-                }
-            }
+            append_row_text(row, &mut line_str);
             if row.wrapped {
                 result.push_str(&line_str);
             } else {
@@ -482,18 +488,7 @@ impl Grid {
         let mut line_str = String::with_capacity(self.cols);
         for row in self.scrollback.iter().chain(self.lines.iter()) {
             line_str.clear();
-            for (col, cell) in row.cells.iter().enumerate() {
-                if !cell
-                    .flags
-                    .intersects(CellFlags::WIDE_CHAR_SPACER | CellFlags::WRAP_SPACER)
-                {
-                    if let Some(text) = row.cluster_text(col) {
-                        line_str.push_str(text);
-                    } else {
-                        line_str.push(cell.c);
-                    }
-                }
-            }
+            append_row_text(row, &mut line_str);
             if row.wrapped {
                 result.push_str(&line_str);
             } else {
@@ -539,36 +534,13 @@ impl Grid {
         let is_full_screen = self.scroll_region_top == 0
             && self.scroll_region_bottom == self.rows.saturating_sub(1)
             && self.alt_lines.is_none();
-        let can_push_scrollback = is_full_screen && self.max_scrollback > 0;
 
-        if can_push_scrollback {
-            for i in 0..count {
-                if self.scrollback.len() >= self.max_scrollback {
-                    if let Some(mut recycled) = self.evict_oldest_scrollback_row() {
-                        if recycled.cells.len() != self.cols {
-                            recycled.resize(self.cols);
-                        }
-                        recycled.reset_with_bg(bg);
-                        let old = std::mem::replace(&mut self.lines[i], recycled);
-                        self.scrollback.push_back(old);
-                        if self.viewport_offset > 0 {
-                            self.viewport_offset =
-                                (self.viewport_offset + 1).min(self.scrollback.len());
-                            self.mark_visible_dirty();
-                        }
-                    }
-                } else {
-                    let fresh = self.alloc_row_with_bg(self.cols, bg);
-                    let old = std::mem::replace(&mut self.lines[i], fresh);
-                    self.push_scrollback(old);
-                }
-            }
+        if is_full_screen && self.max_scrollback > 0 {
+            self.push_rows_to_scrollback(count, bg);
         } else {
-            self.shift_region_marks_up(self.scroll_region_top, self.scroll_region_bottom, count);
-            let top_line = self.scrollback.len() + self.scroll_region_top;
-            let bottom_line = self.scrollback.len() + self.scroll_region_bottom;
-            self.graphics.shift_region_up(top_line, bottom_line, count);
+            self.shift_region_up_marks(count);
         }
+
         self.lines[self.scroll_region_top..=self.scroll_region_bottom].rotate_left(count);
         for row in
             &mut self.lines[self.scroll_region_bottom + 1 - count..=self.scroll_region_bottom]
@@ -578,6 +550,41 @@ impl Grid {
         for row in &self.lines[self.scroll_region_top..=self.scroll_region_bottom] {
             row.dirty.set(true);
         }
+    }
+
+    /// Full-screen scroll: shoves the top `count` lines into scrollback,
+    /// recycling from the scrollback head when it is at capacity.
+    fn push_rows_to_scrollback(&mut self, count: usize, bg: Color) {
+        for i in 0..count {
+            if self.scrollback.len() >= self.max_scrollback {
+                if let Some(mut recycled) = self.evict_oldest_scrollback_row() {
+                    if recycled.cells.len() != self.cols {
+                        recycled.resize(self.cols);
+                    }
+                    recycled.reset_with_bg(bg);
+                    let old = std::mem::replace(&mut self.lines[i], recycled);
+                    self.scrollback.push_back(old);
+                    if self.viewport_offset > 0 {
+                        self.viewport_offset =
+                            (self.viewport_offset + 1).min(self.scrollback.len());
+                        self.mark_visible_dirty();
+                    }
+                }
+            } else {
+                let fresh = self.alloc_row_with_bg(self.cols, bg);
+                let old = std::mem::replace(&mut self.lines[i], fresh);
+                self.push_scrollback(old);
+            }
+        }
+    }
+
+    /// Region scroll (not full screen): shifts prompt marks and image
+    /// placements for the rows leaving the region from the top.
+    fn shift_region_up_marks(&mut self, count: usize) {
+        self.shift_region_marks_up(self.scroll_region_top, self.scroll_region_bottom, count);
+        let top_line = self.scrollback.len() + self.scroll_region_top;
+        let bottom_line = self.scrollback.len() + self.scroll_region_bottom;
+        self.graphics.shift_region_up(top_line, bottom_line, count);
     }
 
     /// Scrolls lines inside the active scroll region downward with default background.
@@ -667,21 +674,15 @@ impl Grid {
 
     /// Clears hyperlink references from all visible lines, scrollback, and parked alternate lines.
     pub fn clear_all_hyperlinks(&mut self) {
-        for line in &mut self.lines {
-            for cell in &mut line.cells {
-                cell.hyperlink_id = None;
-            }
+        for cell in self.lines.iter_mut().flat_map(|l| l.cells.iter_mut()) {
+            cell.hyperlink_id = None;
         }
-        for line in &mut self.scrollback {
-            for cell in &mut line.cells {
-                cell.hyperlink_id = None;
-            }
+        for cell in self.scrollback.iter_mut().flat_map(|l| l.cells.iter_mut()) {
+            cell.hyperlink_id = None;
         }
         if let Some(alt) = &mut self.alt_lines {
-            for line in alt {
-                for cell in &mut line.cells {
-                    cell.hyperlink_id = None;
-                }
+            for cell in alt.iter_mut().flat_map(|l| l.cells.iter_mut()) {
+                cell.hyperlink_id = None;
             }
         }
     }
@@ -765,44 +766,64 @@ impl Grid {
             let chunk = &rest[..take];
             rest = &rest[take..];
 
-            // Following Contour: cleanly sever wide characters touching the run boundaries.
-            // At the left boundary (col), any wide character or spacer being overwritten is severed.
-            // At the right boundary (col + take), only an orphaned spacer whose leading character
-            // was overwritten by the run is severed; intact wide characters starting at col + take are preserved.
-            let row_line = &mut self.lines[row];
-            row_line.sever_wide_at(col);
-            if col + take < self.cols
-                && row_line.cells[col + take]
-                    .flags
-                    .contains(CellFlags::WIDE_CHAR_SPACER)
-            {
-                row_line.sever_wide_at(col + take);
-            }
-
-            let target_cells = &mut row_line.cells[col..col + take];
-            for (cell, &byte) in target_cells.iter_mut().zip(chunk.iter()) {
-                *cell = Cell {
-                    c: byte as char,
-                    fg,
-                    bg,
-                    underline_color,
-                    flags,
-                    hyperlink_id: hl_id,
-                };
-            }
-            row_line.clear_clusters_range(col, col + take);
-            if let Some(coords) = &mut row_line.placeholders {
-                for c in col..col + take {
-                    coords.remove(&c);
-                }
-                if coords.is_empty() {
-                    row_line.placeholders = None;
-                }
-            }
-            row_line.dirty.set(true);
-            self.cursor.col += take;
-            self.cluster_anchor = Some((row, col + take - 1));
+            self.write_ascii_chunk(row, col, chunk, fg, bg, flags, underline_color, hl_id);
         }
+    }
+
+    /// Writes one in-bounds chunk of an ASCII run into row `row` at `col`.
+    ///
+    /// Following Contour: cleanly severs wide characters touching the chunk
+    /// boundaries. At the left boundary (`col`), any wide character or spacer
+    /// being overwritten is severed. At the right boundary (`col + take`), only
+    /// an orphaned spacer whose leading character was overwritten by the run is
+    /// severed; intact wide characters starting at the boundary are preserved.
+    #[allow(clippy::too_many_arguments)]
+    fn write_ascii_chunk(
+        &mut self,
+        row: usize,
+        col: usize,
+        chunk: &[u8],
+        fg: Color,
+        bg: Color,
+        flags: CellFlags,
+        underline_color: Color,
+        hl_id: Option<std::num::NonZeroU32>,
+    ) {
+        let take = chunk.len();
+
+        let row_line = &mut self.lines[row];
+        row_line.sever_wide_at(col);
+        if col + take < self.cols
+            && row_line.cells[col + take]
+                .flags
+                .contains(CellFlags::WIDE_CHAR_SPACER)
+        {
+            row_line.sever_wide_at(col + take);
+        }
+
+        let target_cells = &mut row_line.cells[col..col + take];
+        for (cell, &byte) in target_cells.iter_mut().zip(chunk.iter()) {
+            *cell = Cell {
+                c: byte as char,
+                fg,
+                bg,
+                underline_color,
+                flags,
+                hyperlink_id: hl_id,
+            };
+        }
+        row_line.clear_clusters_range(col, col + take);
+        if let Some(coords) = &mut row_line.placeholders {
+            for c in col..col + take {
+                coords.remove(&c);
+            }
+            if coords.is_empty() {
+                row_line.placeholders = None;
+            }
+        }
+        row_line.dirty.set(true);
+        self.cursor.col += take;
+        self.cluster_anchor = Some((row, col + take - 1));
     }
 
     /// Selects the width model for East Asian Ambiguous characters (1 or 2 cells).
@@ -856,21 +877,11 @@ impl Grid {
         hl_id: Option<std::num::NonZeroU32>,
     ) {
         let width = width.clamp(1, 2);
-        if self.cursor.row >= self.rows {
-            self.cluster_anchor = None;
+        let row = if !self.ensure_write_cursor(width, bg) {
             return;
-        }
-        if self.cursor.col >= self.cols || self.cursor.col + width > self.cols {
-            self.lines[self.cursor.row].wrapped = true;
-            self.newline_with_bg(bg);
-            self.cursor.col = 0;
-        }
-        if self.cursor.row >= self.rows || self.cursor.col >= self.cols {
-            self.cluster_anchor = None;
-            return;
-        }
-
-        let row = self.cursor.row;
+        } else {
+            self.cursor.row
+        };
         let col = self.cursor.col;
 
         // Sever any wide character relationship crossing the cells we are writing over
@@ -895,22 +906,71 @@ impl Grid {
         self.lines[row].dirty.set(true);
 
         if c == KITTY_PLACEHOLDER {
-            let (img_row, img_col) = if col > 0
-                && let Some(coords) = &self.lines[row].placeholders
-                && let Some(&(left_row, left_col, _)) = coords.get(&(col - 1))
-                && self.lines[row].cells[col - 1].fg == fg
-            {
-                (left_row, left_col + 1)
-            } else {
-                (0, 0)
-            };
+            let (img_row, img_col) = self.kitty_placeholder_origin(row, col, fg);
             self.lines[row]
                 .placeholders
                 .get_or_insert_with(|| Box::new(HashMap::new()))
                 .insert(col, (img_row, img_col, 0));
         }
 
-        if width == 2 && col + 1 < self.cols {
+        if width == 2 {
+            self.write_wide_spacer(row, col, fg, bg, flags, underline_color, hl_id);
+        }
+
+        self.cluster_anchor = Some((row, col));
+        self.cursor.col += width;
+        if self.cursor.col >= self.cols {
+            self.cursor.col = self.cols;
+        }
+    }
+
+    /// Returns `false` and clears the cluster anchor when the cursor is off the
+    /// screen; wraps to the next line when the write would overflow the row.
+    fn ensure_write_cursor(&mut self, width: usize, bg: Color) -> bool {
+        if self.cursor.row >= self.rows {
+            self.cluster_anchor = None;
+            return false;
+        }
+        if self.cursor.col >= self.cols || self.cursor.col + width > self.cols {
+            self.lines[self.cursor.row].wrapped = true;
+            self.newline_with_bg(bg);
+            self.cursor.col = 0;
+        }
+        if self.cursor.row >= self.rows || self.cursor.col >= self.cols {
+            self.cluster_anchor = None;
+            return false;
+        }
+        true
+    }
+
+    /// For a Kitty graphics placeholder, derives the image cell origin it maps
+    /// back to: the cell to the left when it belongs to the same image run,
+    /// otherwise the screen top-left.
+    fn kitty_placeholder_origin(&self, row: usize, col: usize, fg: Color) -> (u16, u16) {
+        if col > 0
+            && let Some(coords) = &self.lines[row].placeholders
+            && let Some(&(left_row, left_col, _)) = coords.get(&(col - 1))
+            && self.lines[row].cells[col - 1].fg == fg
+        {
+            (left_row, left_col + 1)
+        } else {
+            (0, 0)
+        }
+    }
+
+    /// Writes the second cell of a wide character (the spacer) when it fits.
+    #[allow(clippy::too_many_arguments)]
+    fn write_wide_spacer(
+        &mut self,
+        row: usize,
+        col: usize,
+        fg: Color,
+        bg: Color,
+        flags: CellFlags,
+        underline_color: Color,
+        hl_id: Option<std::num::NonZeroU32>,
+    ) {
+        if col + 1 < self.cols {
             self.lines[row].cells[col + 1] = Cell {
                 c: ' ',
                 fg,
@@ -920,12 +980,6 @@ impl Grid {
                 hyperlink_id: hl_id,
             };
             self.lines[row].clear_cluster(col + 1);
-        }
-
-        self.cluster_anchor = Some((row, col));
-        self.cursor.col += width;
-        if self.cursor.col >= self.cols {
-            self.cursor.col = self.cols;
         }
     }
 
@@ -953,37 +1007,51 @@ impl Grid {
         };
 
         if target_width > old_width && old_width == 1 {
-            if col + 2 <= self.cols {
-                self.lines[row].sever_wide_at(col + 1);
-                let base = self.lines[row].cells[col];
-                self.lines[row].cells[col].flags |= CellFlags::WIDE_CHAR;
-                self.lines[row].cells[col + 1] = Cell {
-                    c: ' ',
-                    fg: base.fg,
-                    bg: base.bg,
-                    underline_color: base.underline_color,
-                    flags: (base.flags & !CellFlags::WIDE_CHAR) | CellFlags::WIDE_CHAR_SPACER,
-                    hyperlink_id: base.hyperlink_id,
-                };
-                self.lines[row].clear_cluster(col + 1);
-                if self.cursor.row == row && self.cursor.col == col + 1 {
-                    self.cursor.col += 1;
-                }
-                self.lines[row].dirty.set(true);
-            }
+            self.widen_cluster(row, col);
         } else if target_width < old_width && old_width == 2 {
-            self.lines[row].cells[col]
-                .flags
-                .remove(CellFlags::WIDE_CHAR);
-            if col + 1 < self.cols {
-                self.lines[row].sever_wide_at(col + 1);
-                self.lines[row].cells[col + 1] = Cell::blank(self.lines[row].cells[col].bg);
-            }
-            if self.cursor.row == row && self.cursor.col >= col + 2 {
-                self.cursor.col = self.cursor.col.saturating_sub(1);
-            }
-            self.lines[row].dirty.set(true);
+            self.narrow_cluster(row, col);
         }
+    }
+
+    /// Widens an attached cluster from one to two cells, converting the base
+    /// cell to a wide lead and installing a spacer, without disturbing later
+    /// clusters or the cursor.
+    fn widen_cluster(&mut self, row: usize, col: usize) {
+        if col + 2 > self.cols {
+            return;
+        }
+        self.lines[row].sever_wide_at(col + 1);
+        let base = self.lines[row].cells[col];
+        self.lines[row].cells[col].flags |= CellFlags::WIDE_CHAR;
+        self.lines[row].cells[col + 1] = Cell {
+            c: ' ',
+            fg: base.fg,
+            bg: base.bg,
+            underline_color: base.underline_color,
+            flags: (base.flags & !CellFlags::WIDE_CHAR) | CellFlags::WIDE_CHAR_SPACER,
+            hyperlink_id: base.hyperlink_id,
+        };
+        self.lines[row].clear_cluster(col + 1);
+        if self.cursor.row == row && self.cursor.col == col + 1 {
+            self.cursor.col += 1;
+        }
+        self.lines[row].dirty.set(true);
+    }
+
+    /// Narrows an attached cluster from two cells back to one, dropping the
+    /// spacer and nudging the cursor back when it sits on the now-removed cell.
+    fn narrow_cluster(&mut self, row: usize, col: usize) {
+        self.lines[row].cells[col]
+            .flags
+            .remove(CellFlags::WIDE_CHAR);
+        if col + 1 < self.cols {
+            self.lines[row].sever_wide_at(col + 1);
+            self.lines[row].cells[col + 1] = Cell::blank(self.lines[row].cells[col].bg);
+        }
+        if self.cursor.row == row && self.cursor.col >= col + 2 {
+            self.cursor.col = self.cursor.col.saturating_sub(1);
+        }
+        self.lines[row].dirty.set(true);
     }
 
     fn try_placeholder_diacritic(&mut self, c: char) -> bool {
@@ -1279,13 +1347,25 @@ impl Grid {
         let new_cols = new_cols.max(1);
         let new_rows = new_rows.max(1);
 
+        // A pure column-width change on the primary screen reflows every line
+        // (wrapping); the alternate screen and pure height changes resize in place.
         if self.alt_lines.is_none() && new_cols != self.cols {
             reflow::reflow_primary_screen(self, new_cols, new_rows);
             return;
         }
 
         let old_rows = self.rows;
+        self.resize_row_width(new_cols);
+        if new_rows > old_rows {
+            self.grow_rows(old_rows, new_rows, new_cols);
+        } else if new_rows < old_rows {
+            self.shrink_rows_to(old_rows, new_rows);
+        }
+        self.finalize_resize(new_cols, new_rows);
+    }
 
+    /// Re-sizes every row's cell slice to `new_cols` without reflowing content.
+    fn resize_row_width(&mut self, new_cols: usize) {
         for row in &mut self.lines {
             row.resize(new_cols);
         }
@@ -1297,104 +1377,128 @@ impl Grid {
                 row.resize(new_cols);
             }
         }
+    }
 
-        if new_rows > old_rows {
-            let needed = new_rows - old_rows;
-            let active_on_alt = self.alt_lines.is_some();
-            let pull_from_scrollback = if !active_on_alt {
-                needed.min(self.scrollback.len())
-            } else {
-                0
-            };
+    /// Grows the terminal to `new_rows`: on the primary screen rows are first
+    /// pulled back from the scrollback tail, then blank rows pad the bottom.
+    fn grow_rows(&mut self, old_rows: usize, new_rows: usize, new_cols: usize) {
+        let needed = new_rows - old_rows;
+        let active_on_alt = self.alt_lines.is_some();
+        let pull_from_scrollback = if !active_on_alt {
+            needed.min(self.scrollback.len())
+        } else {
+            0
+        };
 
-            for _ in 0..pull_from_scrollback {
-                if let Some(mut row) = self.scrollback.pop_back() {
-                    row.resize(new_cols);
-                    self.lines.insert(0, row);
-                }
+        for _ in 0..pull_from_scrollback {
+            if let Some(mut row) = self.scrollback.pop_back() {
+                row.resize(new_cols);
+                self.lines.insert(0, row);
             }
-            self.cursor.row = self
-                .cursor
-                .row
-                .saturating_add(pull_from_scrollback)
-                .min(new_rows - 1);
-            self.saved_cursor.row = self
-                .saved_cursor
-                .row
-                .saturating_add(pull_from_scrollback)
-                .min(new_rows - 1);
-            self.viewport_offset = self.viewport_offset.min(self.scrollback.len());
+        }
+        self.cursor.row = self
+            .cursor
+            .row
+            .saturating_add(pull_from_scrollback)
+            .min(new_rows - 1);
+        self.saved_cursor.row = self
+            .saved_cursor
+            .row
+            .saturating_add(pull_from_scrollback)
+            .min(new_rows - 1);
+        self.viewport_offset = self.viewport_offset.min(self.scrollback.len());
 
-            let remaining_blanks = needed - pull_from_scrollback;
-            for _ in 0..remaining_blanks {
+        let remaining_blanks = needed - pull_from_scrollback;
+        for _ in 0..remaining_blanks {
+            let row = self.alloc_row(new_cols);
+            self.lines.push(row);
+        }
+        if self.alt_lines.is_some() {
+            for _ in old_rows..new_rows {
                 let row = self.alloc_row(new_cols);
-                self.lines.push(row);
-            }
-            if self.alt_lines.is_some() {
-                for _ in old_rows..new_rows {
-                    let row = self.alloc_row(new_cols);
-                    if let Some(alt) = &mut self.alt_lines {
-                        alt.push(row);
-                    }
-                }
-            }
-        } else if new_rows < old_rows {
-            let to_remove = old_rows - new_rows;
-
-            let active_on_alt = self.alt_lines.is_some();
-            if active_on_alt {
-                // Alternate screen (Neovim/htop/tmux): rows strictly map to absolute screen rows.
-                // Truncate at bottom only; never drain from top or shift surviving row coordinates.
-                self.lines.truncate(new_rows);
-                self.cursor.row = self.cursor.row.min(new_rows.saturating_sub(1));
-                self.saved_cursor.row = self.saved_cursor.row.min(new_rows.saturating_sub(1));
-
-                // Hidden primary screen stashed in alt: trim rows preserving cursor line
                 if let Some(alt) = &mut self.alt_lines {
-                    let hidden_row = self.alt_cursor.unwrap_or_default().row;
-                    let hidden_removed = reflow::shrink_rows(alt, to_remove, hidden_row, new_rows);
-                    let hidden_from_top = hidden_removed.len();
-                    if let Some(cursor) = &mut self.alt_cursor {
-                        cursor.row = cursor.row.saturating_sub(hidden_from_top);
-                    }
-                    if let Some(saved) = &mut self.alt_saved_cursor {
-                        saved.row = saved.row.saturating_sub(hidden_from_top);
-                    }
-                    self.graphics.shift_placements(hidden_from_top);
-                }
-            } else {
-                // Primary screen with scrollback: trim below cursor first so active prompt/cursor survives.
-                let active_retains = self.max_scrollback > 0;
-                let removed_top =
-                    reflow::shrink_rows(&mut self.lines, to_remove, self.cursor.row, new_rows);
-                let from_top = removed_top.len();
-                for row in removed_top {
-                    self.push_scrollback(row);
-                }
-                self.cursor.row = self.cursor.row.saturating_sub(from_top);
-                self.saved_cursor.row = self.saved_cursor.row.saturating_sub(from_top);
-                if !active_retains {
-                    self.graphics.shift_placements(from_top);
-                    if from_top > 0 {
-                        self.total_evicted_rows = self.total_evicted_rows.saturating_add(from_top);
-                        while let Some(&first) = self.prompt_marks.first() {
-                            if first < self.total_evicted_rows {
-                                self.prompt_marks.pop_first();
-                            } else {
-                                break;
-                            }
-                        }
-                    }
+                    alt.push(row);
                 }
             }
+        }
+    }
 
-            let bottom_line = self.scrollback.len() + new_rows;
-            let abs_bottom = self.total_evicted_rows + bottom_line;
-            self.graphics
-                .retain_mut_placements(|p| p.line < bottom_line);
-            self.prompt_marks.retain(|&m| m < abs_bottom);
+    /// Shrinks the terminal to `new_rows`. The alternate screen truncates in
+    /// place; the primary screen trims below the cursor first and pushes the
+    /// removed rows into scrollback, preserving the active prompt line.
+    fn shrink_rows_to(&mut self, old_rows: usize, new_rows: usize) {
+        let to_remove = old_rows - new_rows;
+        if self.alt_lines.is_some() {
+            self.shrink_alt_rows(to_remove, new_rows);
+        } else {
+            self.shrink_primary_rows(to_remove, new_rows);
         }
 
+        let bottom_line = self.scrollback.len() + new_rows;
+        let abs_bottom = self.total_evicted_rows + bottom_line;
+        self.graphics
+            .retain_mut_placements(|p| p.line < bottom_line);
+        self.prompt_marks.retain(|&m| m < abs_bottom);
+    }
+
+    /// Shrinks the visible alternate screen rows (truncate at the bottom only —
+    /// rows strictly map to absolute screen rows) and trims the hidden primary
+    /// screen stashed inside it, shifting placements for removed top rows.
+    fn shrink_alt_rows(&mut self, to_remove: usize, new_rows: usize) {
+        self.lines.truncate(new_rows);
+        self.cursor.row = self.cursor.row.min(new_rows.saturating_sub(1));
+        self.saved_cursor.row = self.saved_cursor.row.min(new_rows.saturating_sub(1));
+
+        if let Some(alt) = &mut self.alt_lines {
+            let hidden_row = self.alt_cursor.unwrap_or_default().row;
+            let hidden_removed = reflow::shrink_rows(alt, to_remove, hidden_row, new_rows);
+            let hidden_from_top = hidden_removed.len();
+            if let Some(cursor) = &mut self.alt_cursor {
+                cursor.row = cursor.row.saturating_sub(hidden_from_top);
+            }
+            if let Some(saved) = &mut self.alt_saved_cursor {
+                saved.row = saved.row.saturating_sub(hidden_from_top);
+            }
+            self.graphics.shift_placements(hidden_from_top);
+        }
+    }
+
+    /// Shrinks the primary screen with scrollback: trim below the cursor first
+    /// so the active prompt/cursor survives, pushing removed rows to scrollback.
+    fn shrink_primary_rows(&mut self, to_remove: usize, new_rows: usize) {
+        let active_retains = self.max_scrollback > 0;
+        let removed_top =
+            reflow::shrink_rows(&mut self.lines, to_remove, self.cursor.row, new_rows);
+        let from_top = removed_top.len();
+        for row in removed_top {
+            self.push_scrollback(row);
+        }
+        self.cursor.row = self.cursor.row.saturating_sub(from_top);
+        self.saved_cursor.row = self.saved_cursor.row.saturating_sub(from_top);
+        if !active_retains {
+            self.graphics.shift_placements(from_top);
+            self.evict_prompt_marks(from_top);
+        }
+    }
+
+    /// Re-bases and prunes prompt marks after rows were evicted from history.
+    fn evict_prompt_marks(&mut self, from_top: usize) {
+        if from_top == 0 {
+            return;
+        }
+        self.total_evicted_rows = self.total_evicted_rows.saturating_add(from_top);
+        while let Some(&first) = self.prompt_marks.first() {
+            if first < self.total_evicted_rows {
+                self.prompt_marks.pop_first();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Commits the new dimensions, resets the scroll region, clamps every
+    /// cursor into bounds, and marks the full screen dirty.
+    fn finalize_resize(&mut self, new_cols: usize, new_rows: usize) {
         self.cols = new_cols;
         self.rows = new_rows;
         self.scroll_region_top = 0;
@@ -1742,7 +1846,7 @@ mod tests {
 
     /// Writes `count` rows labelled `R0`, `R1`, … and leaves the cursor on the last one.
     fn fill_rows(grid: &mut Grid, count: usize) {
-        for row in 0..count {
+        (0..count).for_each(|row| {
             for c in format!("R{row}").chars() {
                 grid.write_char(
                     c,
@@ -1755,7 +1859,7 @@ mod tests {
             if row + 1 < count {
                 grid.newline();
             }
-        }
+        });
     }
 
     #[test]
@@ -2326,7 +2430,7 @@ mod tests {
     #[test]
     fn test_vectorized_clear_line_and_reset_clears_cells() {
         let mut grid = Grid::new(20, 4, 10);
-        for r in 0..4 {
+        (0..4).for_each(|r| {
             for c in 0..20 {
                 grid.cursor.row = r;
                 grid.cursor.col = c;
@@ -2337,7 +2441,7 @@ mod tests {
                     CellFlags::BOLD | CellFlags::UNDERLINE,
                 );
             }
-        }
+        });
 
         // Clear Below on line 1 from col 5
         grid.cursor.row = 1;
@@ -2644,11 +2748,9 @@ mod tests {
 
         assert_eq!(grid.scrollback.len(), 100);
         // Incoming rows taken from pool must be cleanly reset
-        for line in &grid.lines {
-            for cell in &line.cells {
-                if cell.c != 'X' {
-                    assert_eq!(*cell, Cell::default());
-                }
+        for cell in grid.lines.iter().flat_map(|l| l.cells.iter()) {
+            if cell.c != 'X' {
+                assert_eq!(*cell, Cell::default());
             }
         }
     }
@@ -2834,7 +2936,7 @@ mod tests {
     #[test]
     fn test_viewport_scroll_marks_visible_rows_dirty_without_full_scrollback_scan() {
         let mut grid = Grid::new(80, 5, 100);
-        for i in 0..20 {
+        (0..20).for_each(|i| {
             for c in format!("line {i}").chars() {
                 grid.write_char(
                     c,
@@ -2844,7 +2946,7 @@ mod tests {
                 );
             }
             grid.scroll_up(1);
-        }
+        });
 
         // Clear all dirty flags across lines and scrollback
         for row in &grid.lines {
