@@ -27,6 +27,78 @@ fn is_cluster_format(c: char) -> bool {
         || ('\u{1F3FB}'..='\u{1F3FF}').contains(&c)
 }
 
+/// Symbols that participate in programming ligatures (Fira Code–style). Letters,
+/// digits, and space act as run boundaries so `a==b` still ligates the `==`.
+fn is_ligature_symbol(c: char) -> bool {
+    matches!(
+        c,
+        '=' | '+'
+            | '-'
+            | '<'
+            | '>'
+            | '|'
+            | '&'
+            | '*'
+            | '/'
+            | ':'
+            | '!'
+            | '~'
+            | '^'
+            | '%'
+            | '#'
+            | '$'
+            | '@'
+            | '\\'
+            | '.'
+            | '_'
+            | '?'
+            | ';'
+    )
+}
+
+/// A single cell eligible to participate in an ASCII ligature run: visible,
+/// width-1 ligature symbol, and no existing grapheme cluster.
+fn is_ligature_candidate(cell: &Cell, line: &Row, col: usize) -> bool {
+    if cell
+        .flags
+        .intersects(CellFlags::HIDDEN | CellFlags::WIDE_CHAR | CellFlags::WIDE_CHAR_SPACER)
+    {
+        return false;
+    }
+    is_ligature_symbol(cell.c) && line.cluster_text(col).is_none()
+}
+
+/// Returns the length of the contiguous run of cells starting at `col` that is
+/// eligible for ASCII ligature shaping: same style (fg/flags/hyperlink), width-1
+/// ligature symbols with no existing cluster. Runs shorter than two cells return
+/// `None`. Single-glyph shaping is still required to accept the run; fonts
+/// without a matching GSUB ligature simply fall back to per-cell quads.
+pub(crate) fn ascii_ligature_run(line: &Row, col: usize) -> Option<usize> {
+    let cells = &line.cells;
+    let first = cells.get(col)?;
+    if !is_ligature_candidate(first, line, col) {
+        return None;
+    }
+    let mut end = col + 1;
+    while end < cells.len() {
+        let cell = &cells[end];
+        if !is_ligature_candidate(cell, line, end)
+            || cell.fg != first.fg
+            || cell.flags != first.flags
+            || cell.hyperlink_id != first.hyperlink_id
+        {
+            break;
+        }
+        end += 1;
+    }
+    (end - col >= 2).then_some(end - col)
+}
+
+/// Concatenates the cell characters of a ligature run into one cluster string.
+pub(crate) fn ligature_text(line: &Row, col: usize, len: usize) -> String {
+    line.cells[col..col + len].iter().map(|c| c.c).collect()
+}
+
 fn prepare_preedit_glyphs(p: &Preedit, fonts: &FontManager, atlas: &mut GlyphAtlas) -> bool {
     let mut full = false;
     for c in p.text.chars() {
@@ -81,8 +153,21 @@ fn prepare_row_glyphs(
         return false;
     }
     let mut full = false;
-    for (col, cell) in line.cells.iter().enumerate() {
+    let mut col = 0;
+    while col < line.cells.len() {
+        let cell = &line.cells[col];
+        if let Some(len) = ascii_ligature_run(line, col) {
+            let text = ligature_text(line, col, len);
+            if atlas
+                .get_or_insert_cluster(&text, cell.flags, fonts)
+                .is_some()
+            {
+                col += len;
+                continue;
+            }
+        }
         full |= prepare_cell_glyphs(cell, line.cluster_text(col), fonts, atlas);
+        col += 1;
     }
     full
 }
@@ -644,6 +729,40 @@ fn emit_cell_foreground(
     }
 }
 
+fn emit_run_decorations(
+    vertices: &mut Vec<f32>,
+    line: &Row,
+    row: usize,
+    col: usize,
+    len: usize,
+    color: [f32; 4],
+    ctx: &RenderContext<'_>,
+) {
+    let cw = ctx.metrics.cell_width as f32;
+    let ch = ctx.metrics.cell_height as f32;
+    let pad_x = f32::from(ctx.options.padding[0]);
+    let y = f32::from(ctx.options.padding[1]) + row as f32 * ch;
+    let abs_line = ctx.grid.scrollback.len() + row - ctx.grid.viewport_offset();
+    for (offset, cell) in line.cells[col..col + len].iter().enumerate() {
+        let c = col + offset;
+        emit_decorations(
+            vertices,
+            cell,
+            c,
+            abs_line,
+            CellBox {
+                x: pad_x + c as f32 * cw,
+                y,
+                width: cw,
+                ch,
+                cw,
+            },
+            color,
+            ctx,
+        );
+    }
+}
+
 pub fn build_row_foregrounds(vertices: &mut Vec<f32>, row: usize, ctx: &RenderContext<'_>) {
     vertices.clear();
     let cw = ctx.metrics.cell_width as f32;
@@ -656,11 +775,14 @@ pub fn build_row_foregrounds(vertices: &mut Vec<f32>, row: usize, ctx: &RenderCo
     let y = pad_y + row as f32 * ch;
 
     // Draw text glyphs and underlines on this row
-    for (col, cell) in line.cells.iter().enumerate() {
+    let mut col = 0;
+    while col < line.cells.len() {
+        let cell = &line.cells[col];
         if cell
             .flags
             .intersects(CellFlags::HIDDEN | CellFlags::WIDE_CHAR_SPACER | CellFlags::WRAP_SPACER)
         {
+            col += 1;
             continue;
         }
         let x = pad_x + col as f32 * cw;
@@ -669,6 +791,23 @@ pub fn build_row_foregrounds(vertices: &mut Vec<f32>, row: usize, ctx: &RenderCo
                 .cursor
                 .is_some_and(|(r, c, width)| row == r && col >= c && col < c + width);
         let color = cell_foreground_color(cell, ctx.colors, under_block);
+        if let Some(len) = ascii_ligature_run(line, col) {
+            let text = ligature_text(line, col, len);
+            let lig_cbox = CellBox {
+                x,
+                y,
+                width: len as f32 * cw,
+                ch,
+                cw,
+            };
+            if emit_cluster_glyph(vertices, &text, lig_cbox, color, ctx) {
+                // The run rendered as one ligature glyph covering `len` columns.
+                // Decorations still follow the per-cell grid.
+                emit_run_decorations(vertices, line, row, col, len, color, ctx);
+                col += len;
+                continue;
+            }
+        }
         let width = if cell.flags.contains(CellFlags::WIDE_CHAR) {
             2.0 * cw
         } else {
@@ -684,6 +823,7 @@ pub fn build_row_foregrounds(vertices: &mut Vec<f32>, row: usize, ctx: &RenderCo
 
         emit_cell_foreground(vertices, cell, line.cluster_text(col), cbox, color, ctx);
         emit_decorations(vertices, cell, col, abs_line, cbox, color, ctx);
+        col += 1;
     }
 }
 
