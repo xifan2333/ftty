@@ -82,6 +82,79 @@ pub enum Stroke {
 
 /// Renders a Block Element (`U+2580..=U+259F`) directly to vertices.
 /// Returns `true` if the character was handled.
+/// One solid rect inside a block element, expressed as cell-length fractions
+/// (0.0 = cell start edge, 1.0 = cell end edge) with an alpha multiplier for
+/// the shade glyphs. Interior boundaries are rounded, cell edges stay raw.
+#[derive(Copy, Clone)]
+struct BlockRect {
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    alpha: f32,
+}
+
+const fn br(x0: f32, y0: f32, x1: f32, y1: f32, alpha: f32) -> BlockRect {
+    BlockRect {
+        x0,
+        y0,
+        x1,
+        y1,
+        alpha,
+    }
+}
+
+/// Resolves a cell fraction to a pixel coordinate: cell-start edges and
+/// cell-end edges stay raw while interior boundaries are rounded to avoid
+/// bleeding into neighbouring cells.
+fn block_boundary(base: f32, end: f32, f: f32) -> f32 {
+    if f <= 0.0 {
+        base
+    } else if f >= 1.0 {
+        end
+    } else {
+        (base + f * (end - base)).round()
+    }
+}
+
+/// Maps every block element character (U+2580..U+259F) to its component rects.
+static BLOCK_RECT_TABLE: [Option<&'static [BlockRect]>; 32] = [
+    Some(&[br(0.0, 0.0, 1.0, 0.5, 1.0)]),
+    Some(&[br(0.0, 0.875, 1.0, 1.0, 1.0)]),
+    Some(&[br(0.0, 0.75, 1.0, 1.0, 1.0)]),
+    Some(&[br(0.0, 0.625, 1.0, 1.0, 1.0)]),
+    Some(&[br(0.0, 0.5, 1.0, 1.0, 1.0)]),
+    Some(&[br(0.0, 0.375, 1.0, 1.0, 1.0)]),
+    Some(&[br(0.0, 0.25, 1.0, 1.0, 1.0)]),
+    Some(&[br(0.0, 0.125, 1.0, 1.0, 1.0)]),
+    Some(&[br(0.0, 0.0, 1.0, 1.0, 1.0)]),
+    Some(&[br(0.0, 0.0, 0.875, 1.0, 1.0)]),
+    Some(&[br(0.0, 0.0, 0.75, 1.0, 1.0)]),
+    Some(&[br(0.0, 0.0, 0.625, 1.0, 1.0)]),
+    Some(&[br(0.0, 0.0, 0.5, 1.0, 1.0)]),
+    Some(&[br(0.0, 0.0, 0.375, 1.0, 1.0)]),
+    Some(&[br(0.0, 0.0, 0.25, 1.0, 1.0)]),
+    Some(&[br(0.0, 0.0, 0.125, 1.0, 1.0)]),
+    Some(&[br(0.5, 0.0, 1.0, 1.0, 1.0)]),
+    Some(&[br(0.0, 0.0, 1.0, 1.0, 0.25)]),
+    Some(&[br(0.0, 0.0, 1.0, 1.0, 0.50)]),
+    Some(&[br(0.0, 0.0, 1.0, 1.0, 0.75)]),
+    Some(&[br(0.0, 0.0, 1.0, 0.125, 1.0)]),
+    Some(&[br(0.875, 0.0, 1.0, 1.0, 1.0)]),
+    Some(&[br(0.0, 0.5, 0.5, 1.0, 1.0)]),
+    Some(&[br(0.5, 0.5, 1.0, 1.0, 1.0)]),
+    Some(&[br(0.0, 0.0, 0.5, 0.5, 1.0)]),
+    Some(&[br(0.0, 0.0, 0.5, 1.0, 1.0), br(0.5, 0.5, 1.0, 1.0, 1.0)]),
+    Some(&[br(0.0, 0.0, 0.5, 0.5, 1.0), br(0.5, 0.5, 1.0, 1.0, 1.0)]),
+    Some(&[br(0.0, 0.0, 1.0, 0.5, 1.0), br(0.0, 0.5, 0.5, 1.0, 1.0)]),
+    Some(&[br(0.0, 0.0, 1.0, 0.5, 1.0), br(0.5, 0.5, 1.0, 1.0, 1.0)]),
+    Some(&[br(0.5, 0.0, 1.0, 0.5, 1.0)]),
+    Some(&[br(0.5, 0.0, 1.0, 0.5, 1.0), br(0.0, 0.5, 0.5, 1.0, 1.0)]),
+    Some(&[br(0.0, 0.5, 1.0, 1.0, 1.0), br(0.5, 0.0, 1.0, 0.5, 1.0)]),
+];
+
+/// Renders a Block Element (`U+2580..=U+259F`) directly to vertices.
+/// Returns `true` if the character was handled.
 pub fn render_block_element(
     vertices: &mut Vec<f32>,
     c: char,
@@ -91,118 +164,444 @@ pub fn render_block_element(
     ch: f32,
     color: [f32; 4],
 ) -> bool {
+    let idx = c as usize;
+    if !(0x2580..0x25A0).contains(&idx) {
+        return false;
+    }
+    let Some(rects) = BLOCK_RECT_TABLE[idx - 0x2580] else {
+        return false;
+    };
+
     let x_right = x + width;
     let y_bot = y + ch;
-
-    match c {
-        // U+2580: Upper half block ▀
-        '\u{2580}' => {
-            let mid_y = (y + ch * 0.5).round();
-            push_solid_quad(vertices, [x, y, x_right, mid_y], color);
-            true
-        }
-        // U+2581..=U+2587: Lower 1/8 to 7/8 blocks (  ▂ ▃ ▄ ▅ ▆ ▇)
-        '\u{2581}'..='\u{2587}' => {
-            let fraction = (c as u32 - 0x2580) as f32 / 8.0;
-            let top = (y + ch * (1.0 - fraction)).round();
-            push_solid_quad(vertices, [x, top, x_right, y_bot], color);
-            true
-        }
-        // U+2588: Full block █ (The quintessential progress bar block)
-        '\u{2588}' => {
-            push_solid_quad(vertices, [x, y, x_right, y_bot], color);
-            true
-        }
-        // U+2589..=U+258F: Left 7/8 to 1/8 blocks (▉ ▊ ▋ ▌ ▍ ▎ ▏)
-        '\u{2589}'..='\u{258F}' => {
-            let fraction = (8 - (c as u32 - 0x2588)) as f32 / 8.0;
-            let right = (x + width * fraction).round();
-            push_solid_quad(vertices, [x, y, right, y_bot], color);
-            true
-        }
-        // U+2590: Right half block ▐
-        '\u{2590}' => {
-            let mid_x = (x + width * 0.5).round();
-            push_solid_quad(vertices, [mid_x, y, x_right, y_bot], color);
-            true
-        }
-        // U+2591: Light shade ░ (25% opacity)
-        '\u{2591}' => {
-            let mut c = color;
-            c[3] *= 0.25;
-            push_solid_quad(vertices, [x, y, x_right, y_bot], c);
-            true
-        }
-        // U+2592: Medium shade ▒ (50% opacity)
-        '\u{2592}' => {
-            let mut c = color;
-            c[3] *= 0.50;
-            push_solid_quad(vertices, [x, y, x_right, y_bot], c);
-            true
-        }
-        // U+2593: Dark shade ▓ (75% opacity)
-        '\u{2593}' => {
-            let mut c = color;
-            c[3] *= 0.75;
-            push_solid_quad(vertices, [x, y, x_right, y_bot], c);
-            true
-        }
-        // U+2594: Upper 1/8 block ▔
-        '\u{2594}' => {
-            let bot = (y + ch / 8.0).round();
-            push_solid_quad(vertices, [x, y, x_right, bot], color);
-            true
-        }
-        // U+2595: Right 1/8 block ▕
-        '\u{2595}' => {
-            let left = (x + width * 7.0 / 8.0).round();
-            push_solid_quad(vertices, [left, y, x_right, y_bot], color);
-            true
-        }
-        // U+2596..=U+259F: Quadrant blocks (2x2 sub-cells)
-        '\u{2596}'..='\u{259F}' => {
-            let mid_x = (x + width * 0.5).round();
-            let mid_y = (y + ch * 0.5).round();
-            let ul = [x, y, mid_x, mid_y];
-            let ur = [mid_x, y, x_right, mid_y];
-            let ll = [x, mid_y, mid_x, y_bot];
-            let lr = [mid_x, mid_y, x_right, y_bot];
-
-            match c {
-                '\u{2596}' => push_solid_quad(vertices, ll, color),
-                '\u{2597}' => push_solid_quad(vertices, lr, color),
-                '\u{2598}' => push_solid_quad(vertices, ul, color),
-                '\u{2599}' => {
-                    push_solid_quad(vertices, [x, y, mid_x, y_bot], color);
-                    push_solid_quad(vertices, lr, color);
-                }
-                '\u{259A}' => {
-                    push_solid_quad(vertices, ul, color);
-                    push_solid_quad(vertices, lr, color);
-                }
-                '\u{259B}' => {
-                    push_solid_quad(vertices, [x, y, x_right, mid_y], color);
-                    push_solid_quad(vertices, ll, color);
-                }
-                '\u{259C}' => {
-                    push_solid_quad(vertices, [x, y, x_right, mid_y], color);
-                    push_solid_quad(vertices, lr, color);
-                }
-                '\u{259D}' => push_solid_quad(vertices, ur, color),
-                '\u{259E}' => {
-                    push_solid_quad(vertices, ur, color);
-                    push_solid_quad(vertices, ll, color);
-                }
-                '\u{259F}' => {
-                    push_solid_quad(vertices, [x, mid_y, x_right, y_bot], color);
-                    push_solid_quad(vertices, ur, color);
-                }
-                _ => return false,
-            }
-            true
-        }
-        _ => false,
+    for r in rects {
+        let mut quad_color = color;
+        quad_color[3] *= r.alpha;
+        push_solid_quad(
+            vertices,
+            [
+                block_boundary(x, x_right, r.x0),
+                block_boundary(y, y_bot, r.y0),
+                block_boundary(x, x_right, r.x1),
+                block_boundary(y, y_bot, r.y1),
+            ],
+            quad_color,
+        );
     }
+    true
+}
+
+/// Shared geometry metrics for one box drawing cell.
+///
+/// All thicknesses and midpoints derive from the cell rect once, so the
+/// per-stroke emitters stay free of repeated arithmetic.
+struct StrokeSpecs {
+    x: f32,
+    y: f32,
+    width: f32,
+    ch: f32,
+    thick: f32,
+    heavy: f32,
+    gap: f32,
+    mid_x: f32,
+    mid_y: f32,
+    x_right: f32,
+    y_bot: f32,
+}
+
+impl StrokeSpecs {
+    fn new(x: f32, y: f32, width: f32, ch: f32) -> Self {
+        let thick = (ch * 0.08).round().max(1.0);
+        Self {
+            x,
+            y,
+            width,
+            ch,
+            thick,
+            heavy: (thick * 2.0).max(thick + 1.0),
+            gap: thick.max(1.0),
+            mid_x: (x + width * 0.5).floor(),
+            mid_y: (y + ch * 0.5).floor(),
+            x_right: x + width,
+            y_bot: y + ch,
+        }
+    }
+
+    /// Total band thickness an arm of this stroke occupies across the center line.
+    fn thickness(&self, stroke: Stroke) -> f32 {
+        match stroke {
+            Stroke::None => 0.0,
+            Stroke::Light => self.thick,
+            Stroke::Heavy => self.heavy,
+            Stroke::Double => self.gap * 2.0 + self.thick * 2.0,
+        }
+    }
+}
+
+/// Which axis an arm of a box glyph spans.
+#[derive(Copy, Clone)]
+enum ArmAxis {
+    Horizontal,
+    Vertical,
+}
+
+/// Pushes the quads for a single arm of a box glyph.
+///
+/// The arm occupies the longitudinal range `a0..a1` along `axis`; its stroke
+/// band is centered on the perpendicular midline (`mid_y` for horizontal arms,
+/// `mid_x` for vertical arms).
+fn push_arm(
+    vertices: &mut Vec<f32>,
+    specs: &StrokeSpecs,
+    stroke: Stroke,
+    axis: ArmAxis,
+    a0: f32,
+    a1: f32,
+    color: [f32; 4],
+) {
+    let horizontal = matches!(axis, ArmAxis::Horizontal);
+    let midpoint = if horizontal { specs.mid_y } else { specs.mid_x };
+    let band = |t: f32, offset: f32| -> [f32; 4] {
+        if horizontal {
+            [a0, midpoint + offset, a1, midpoint + offset + t]
+        } else {
+            [midpoint + offset, a0, midpoint + offset + t, a1]
+        }
+    };
+    match stroke {
+        Stroke::None => {}
+        Stroke::Light => push_solid_quad(vertices, band(specs.thick, -specs.thick / 2.0), color),
+        Stroke::Heavy => push_solid_quad(vertices, band(specs.heavy, -specs.heavy / 2.0), color),
+        Stroke::Double => {
+            push_solid_quad(vertices, band(specs.thick, -specs.gap - specs.thick), color);
+            push_solid_quad(vertices, band(specs.thick, specs.gap), color);
+        }
+    }
+}
+
+/// Emits a dashed horizontal line split into `count` dashes of stroke width `t`.
+fn draw_dashed_h(
+    vertices: &mut Vec<f32>,
+    specs: &StrokeSpecs,
+    count: usize,
+    t: f32,
+    color: [f32; 4],
+) {
+    let total_units = (count * 2 - 1) as f32;
+    let dash_w = (specs.width / total_units).max(1.0);
+    let top = specs.mid_y - t / 2.0;
+    let bot = top + t;
+    for k in 0..count {
+        let x0 = specs.x + (k * 2) as f32 * dash_w;
+        let x1 = (x0 + dash_w).min(specs.x_right);
+        push_solid_quad(vertices, [x0, top, x1, bot], color);
+    }
+}
+
+/// Emits a dashed vertical line split into `count` dashes of stroke width `t`.
+fn draw_dashed_v(
+    vertices: &mut Vec<f32>,
+    specs: &StrokeSpecs,
+    count: usize,
+    t: f32,
+    color: [f32; 4],
+) {
+    let total_units = (count * 2 - 1) as f32;
+    let dash_h = (specs.ch / total_units).max(1.0);
+    let left = specs.mid_x - t / 2.0;
+    let right = left + t;
+    for k in 0..count {
+        let y0 = specs.y + (k * 2) as f32 * dash_h;
+        let y1 = (y0 + dash_h).min(specs.y_bot);
+        push_solid_quad(vertices, [left, y0, right, y1], color);
+    }
+}
+
+/// Emits a rounded corner: two stems meeting at a ring arc in the selected quadrant.
+fn draw_arc(
+    vertices: &mut Vec<f32>,
+    specs: &StrokeSpecs,
+    down: bool,
+    right: bool,
+    color: [f32; 4],
+) {
+    let r = (specs.width.min(specs.ch) * 0.4).round().max(2.0);
+    let t = specs.thick;
+
+    // Stems run from the arc center outward to the cell edges.
+    let (h0, h1) = if right {
+        (specs.mid_x + r, specs.x_right)
+    } else {
+        (specs.x, specs.mid_x - r)
+    };
+    push_solid_quad(
+        vertices,
+        [h0, specs.mid_y - t / 2.0, h1, specs.mid_y + t / 2.0],
+        color,
+    );
+
+    let (v0, v1) = if down {
+        (specs.mid_y + r, specs.y_bot)
+    } else {
+        (specs.y, specs.mid_y - r)
+    };
+    push_solid_quad(
+        vertices,
+        [specs.mid_x - t / 2.0, v0, specs.mid_x + t / 2.0, v1],
+        color,
+    );
+
+    // Ring center sits `r` in from the selected corner; sweep starts at the stem side.
+    let cx = if right {
+        specs.mid_x + r
+    } else {
+        specs.mid_x - r
+    };
+    let cy = if down {
+        specs.mid_y + r
+    } else {
+        specs.mid_y - r
+    };
+    let start = match (down, right) {
+        (true, true) => std::f32::consts::PI,
+        (true, false) => 1.5 * std::f32::consts::PI,
+        (false, false) => 0.0,
+        (false, true) => std::f32::consts::FRAC_PI_2,
+    };
+    push_arc_ring(vertices, cx, cy, r, t, start, color);
+}
+
+/// Emits a diagonal stroke stepped across the cell as short quads.
+fn draw_diagonal(vertices: &mut Vec<f32>, specs: &StrokeSpecs, forward: bool, color: [f32; 4]) {
+    let steps = (specs.width.min(specs.ch) as usize).max(4);
+    let step_w = specs.width / steps as f32;
+    let step_h = specs.ch / steps as f32;
+    let t = specs.thick;
+    for s in 0..steps {
+        let (x0, x1) = if forward {
+            (
+                specs.x + s as f32 * step_w,
+                specs.x + (s + 1) as f32 * step_w,
+            )
+        } else {
+            (
+                specs.x + specs.width - (s + 1) as f32 * step_w,
+                specs.x + specs.width - s as f32 * step_w,
+            )
+        };
+        let y0 = specs.y + s as f32 * step_h;
+        let y1 = (y0 + step_h + t).min(specs.y_bot);
+        push_solid_quad(vertices, [x0, y0, x1, y1], color);
+    }
+}
+
+/// Pushes a straight full-width horizontal line. Returns `false` only for the
+/// degenerate `None` arm, which cannot occur from the stroke table.
+fn push_straight_h(
+    vertices: &mut Vec<f32>,
+    specs: &StrokeSpecs,
+    stroke: Stroke,
+    color: [f32; 4],
+) -> bool {
+    if stroke == Stroke::None {
+        return false;
+    }
+    push_arm(
+        vertices,
+        specs,
+        stroke,
+        ArmAxis::Horizontal,
+        specs.x,
+        specs.x_right,
+        color,
+    );
+    true
+}
+
+/// Pushes a straight full-height vertical line. Returns `false` only for the
+/// degenerate `None` arm, which cannot occur from the stroke table.
+fn push_straight_v(
+    vertices: &mut Vec<f32>,
+    specs: &StrokeSpecs,
+    stroke: Stroke,
+    color: [f32; 4],
+) -> bool {
+    if stroke == Stroke::None {
+        return false;
+    }
+    push_arm(
+        vertices,
+        specs,
+        stroke,
+        ArmAxis::Vertical,
+        specs.y,
+        specs.y_bot,
+        color,
+    );
+    true
+}
+
+/// The box drawing operation derived from a character's code point, resolved
+/// through a dense table indexed by `U+2500..=U+257F` offset for O(1) lookup.
+#[derive(Copy, Clone)]
+enum BoxGlyph {
+    /// Standard four-arm crossing / corner drawn from stroke widths.
+    Strokes(Stroke, Stroke, Stroke, Stroke),
+    /// Horizontal dashes: `(count, heavy)`.
+    DashedH(usize, bool),
+    /// Vertical dashes: `(count, heavy)`.
+    DashedV(usize, bool),
+    /// Rounded corner arc: `(down, right)`.
+    Arc(bool, bool),
+    /// Diagonal stroke `forward`.
+    Diagonal(bool),
+    /// Both diagonals crossed (╳).
+    DiagonalBoth,
+}
+
+/// Decision table for every box drawing character (U+2500..U+257F).
+static BOX_GLYPH_TABLE: [Option<BoxGlyph>; 128] = {
+    // Stroke variants shortened in table scope for one-row-per-character data.
+    use Stroke::{Double as D, Heavy as H, Light as L, None as N};
+
+    let mut t = [None; 128];
+    t[0] = Some(BoxGlyph::Strokes(L, L, N, N));
+    t[0x2501 - 0x2500] = Some(BoxGlyph::Strokes(H, H, N, N));
+    t[0x2502 - 0x2500] = Some(BoxGlyph::Strokes(N, N, L, L));
+    t[0x2503 - 0x2500] = Some(BoxGlyph::Strokes(N, N, H, H));
+    t[0x2504 - 0x2500] = Some(BoxGlyph::DashedH(3, false));
+    t[0x2505 - 0x2500] = Some(BoxGlyph::DashedH(3, true));
+    t[0x2506 - 0x2500] = Some(BoxGlyph::DashedV(3, false));
+    t[0x2507 - 0x2500] = Some(BoxGlyph::DashedV(3, true));
+    t[0x2508 - 0x2500] = Some(BoxGlyph::DashedH(4, false));
+    t[0x2509 - 0x2500] = Some(BoxGlyph::DashedH(4, true));
+    t[0x250A - 0x2500] = Some(BoxGlyph::DashedV(4, false));
+    t[0x250B - 0x2500] = Some(BoxGlyph::DashedV(4, true));
+    t[0x250C - 0x2500] = Some(BoxGlyph::Strokes(N, L, N, L));
+    t[0x250D - 0x2500] = Some(BoxGlyph::Strokes(N, H, N, L));
+    t[0x250E - 0x2500] = Some(BoxGlyph::Strokes(N, L, N, H));
+    t[0x250F - 0x2500] = Some(BoxGlyph::Strokes(N, H, N, H));
+    t[0x2510 - 0x2500] = Some(BoxGlyph::Strokes(L, N, N, L));
+    t[0x2511 - 0x2500] = Some(BoxGlyph::Strokes(H, N, N, L));
+    t[0x2512 - 0x2500] = Some(BoxGlyph::Strokes(L, N, N, H));
+    t[0x2513 - 0x2500] = Some(BoxGlyph::Strokes(H, N, N, H));
+    t[0x2514 - 0x2500] = Some(BoxGlyph::Strokes(N, L, L, N));
+    t[0x2515 - 0x2500] = Some(BoxGlyph::Strokes(N, H, L, N));
+    t[0x2516 - 0x2500] = Some(BoxGlyph::Strokes(N, L, H, N));
+    t[0x2517 - 0x2500] = Some(BoxGlyph::Strokes(N, H, H, N));
+    t[0x2518 - 0x2500] = Some(BoxGlyph::Strokes(L, N, L, N));
+    t[0x2519 - 0x2500] = Some(BoxGlyph::Strokes(H, N, L, N));
+    t[0x251A - 0x2500] = Some(BoxGlyph::Strokes(L, N, H, N));
+    t[0x251B - 0x2500] = Some(BoxGlyph::Strokes(H, N, H, N));
+    t[0x251C - 0x2500] = Some(BoxGlyph::Strokes(N, L, L, L));
+    t[0x251D - 0x2500] = Some(BoxGlyph::Strokes(N, H, L, L));
+    t[0x251E - 0x2500] = Some(BoxGlyph::Strokes(N, L, H, L));
+    t[0x251F - 0x2500] = Some(BoxGlyph::Strokes(N, L, L, H));
+    t[0x2520 - 0x2500] = Some(BoxGlyph::Strokes(N, L, H, H));
+    t[0x2521 - 0x2500] = Some(BoxGlyph::Strokes(N, H, H, L));
+    t[0x2522 - 0x2500] = Some(BoxGlyph::Strokes(N, H, L, H));
+    t[0x2523 - 0x2500] = Some(BoxGlyph::Strokes(N, H, H, H));
+    t[0x2524 - 0x2500] = Some(BoxGlyph::Strokes(L, N, L, L));
+    t[0x2525 - 0x2500] = Some(BoxGlyph::Strokes(H, N, L, L));
+    t[0x2526 - 0x2500] = Some(BoxGlyph::Strokes(L, N, H, L));
+    t[0x2527 - 0x2500] = Some(BoxGlyph::Strokes(L, N, L, H));
+    t[0x2528 - 0x2500] = Some(BoxGlyph::Strokes(L, N, H, H));
+    t[0x2529 - 0x2500] = Some(BoxGlyph::Strokes(H, N, H, L));
+    t[0x252A - 0x2500] = Some(BoxGlyph::Strokes(H, N, L, H));
+    t[0x252B - 0x2500] = Some(BoxGlyph::Strokes(H, N, H, H));
+    t[0x252C - 0x2500] = Some(BoxGlyph::Strokes(L, L, N, L));
+    t[0x252D - 0x2500] = Some(BoxGlyph::Strokes(H, L, N, L));
+    t[0x252E - 0x2500] = Some(BoxGlyph::Strokes(L, H, N, L));
+    t[0x252F - 0x2500] = Some(BoxGlyph::Strokes(H, H, N, L));
+    t[0x2530 - 0x2500] = Some(BoxGlyph::Strokes(L, L, N, H));
+    t[0x2531 - 0x2500] = Some(BoxGlyph::Strokes(H, L, N, H));
+    t[0x2532 - 0x2500] = Some(BoxGlyph::Strokes(L, H, N, H));
+    t[0x2533 - 0x2500] = Some(BoxGlyph::Strokes(H, H, N, H));
+    t[0x2534 - 0x2500] = Some(BoxGlyph::Strokes(L, L, L, N));
+    t[0x2535 - 0x2500] = Some(BoxGlyph::Strokes(H, L, L, N));
+    t[0x2536 - 0x2500] = Some(BoxGlyph::Strokes(L, H, L, N));
+    t[0x2537 - 0x2500] = Some(BoxGlyph::Strokes(H, H, L, N));
+    t[0x2538 - 0x2500] = Some(BoxGlyph::Strokes(L, L, H, N));
+    t[0x2539 - 0x2500] = Some(BoxGlyph::Strokes(H, L, H, N));
+    t[0x253A - 0x2500] = Some(BoxGlyph::Strokes(L, H, H, N));
+    t[0x253B - 0x2500] = Some(BoxGlyph::Strokes(H, H, H, N));
+    t[0x253C - 0x2500] = Some(BoxGlyph::Strokes(L, L, L, L));
+    t[0x253D - 0x2500] = Some(BoxGlyph::Strokes(H, L, L, L));
+    t[0x253E - 0x2500] = Some(BoxGlyph::Strokes(L, H, L, L));
+    t[0x253F - 0x2500] = Some(BoxGlyph::Strokes(H, H, L, L));
+    t[0x2540 - 0x2500] = Some(BoxGlyph::Strokes(L, L, H, L));
+    t[0x2541 - 0x2500] = Some(BoxGlyph::Strokes(L, L, L, H));
+    t[0x2542 - 0x2500] = Some(BoxGlyph::Strokes(L, L, H, H));
+    t[0x2543 - 0x2500] = Some(BoxGlyph::Strokes(H, L, H, L));
+    t[0x2544 - 0x2500] = Some(BoxGlyph::Strokes(L, H, H, L));
+    t[0x2545 - 0x2500] = Some(BoxGlyph::Strokes(H, L, L, H));
+    t[0x2546 - 0x2500] = Some(BoxGlyph::Strokes(L, H, L, H));
+    t[0x2547 - 0x2500] = Some(BoxGlyph::Strokes(H, H, H, L));
+    t[0x2548 - 0x2500] = Some(BoxGlyph::Strokes(H, H, L, H));
+    t[0x2549 - 0x2500] = Some(BoxGlyph::Strokes(H, L, H, H));
+    t[0x254A - 0x2500] = Some(BoxGlyph::Strokes(L, H, H, H));
+    t[0x254B - 0x2500] = Some(BoxGlyph::Strokes(H, H, H, H));
+    t[0x254C - 0x2500] = Some(BoxGlyph::DashedH(2, false));
+    t[0x254D - 0x2500] = Some(BoxGlyph::DashedH(2, true));
+    t[0x254E - 0x2500] = Some(BoxGlyph::DashedV(2, false));
+    t[0x254F - 0x2500] = Some(BoxGlyph::DashedV(2, true));
+    t[0x2550 - 0x2500] = Some(BoxGlyph::Strokes(D, D, N, N));
+    t[0x2551 - 0x2500] = Some(BoxGlyph::Strokes(N, N, D, D));
+    t[0x2552 - 0x2500] = Some(BoxGlyph::Strokes(N, D, N, L));
+    t[0x2553 - 0x2500] = Some(BoxGlyph::Strokes(N, L, N, D));
+    t[0x2554 - 0x2500] = Some(BoxGlyph::Strokes(N, D, N, D));
+    t[0x2555 - 0x2500] = Some(BoxGlyph::Strokes(D, N, N, L));
+    t[0x2556 - 0x2500] = Some(BoxGlyph::Strokes(L, N, N, D));
+    t[0x2557 - 0x2500] = Some(BoxGlyph::Strokes(D, N, N, D));
+    t[0x2558 - 0x2500] = Some(BoxGlyph::Strokes(N, D, L, N));
+    t[0x2559 - 0x2500] = Some(BoxGlyph::Strokes(N, L, D, N));
+    t[0x255A - 0x2500] = Some(BoxGlyph::Strokes(N, D, D, N));
+    t[0x255B - 0x2500] = Some(BoxGlyph::Strokes(D, N, L, N));
+    t[0x255C - 0x2500] = Some(BoxGlyph::Strokes(L, N, D, N));
+    t[0x255D - 0x2500] = Some(BoxGlyph::Strokes(D, N, D, N));
+    t[0x255E - 0x2500] = Some(BoxGlyph::Strokes(N, D, L, L));
+    t[0x255F - 0x2500] = Some(BoxGlyph::Strokes(N, L, D, D));
+    t[0x2560 - 0x2500] = Some(BoxGlyph::Strokes(N, D, D, D));
+    t[0x2561 - 0x2500] = Some(BoxGlyph::Strokes(D, N, L, L));
+    t[0x2562 - 0x2500] = Some(BoxGlyph::Strokes(L, N, D, D));
+    t[0x2563 - 0x2500] = Some(BoxGlyph::Strokes(D, N, D, D));
+    t[0x2564 - 0x2500] = Some(BoxGlyph::Strokes(D, D, N, L));
+    t[0x2565 - 0x2500] = Some(BoxGlyph::Strokes(L, L, N, D));
+    t[0x2566 - 0x2500] = Some(BoxGlyph::Strokes(D, D, N, D));
+    t[0x2567 - 0x2500] = Some(BoxGlyph::Strokes(D, D, L, N));
+    t[0x2568 - 0x2500] = Some(BoxGlyph::Strokes(L, L, D, N));
+    t[0x2569 - 0x2500] = Some(BoxGlyph::Strokes(D, D, D, N));
+    t[0x256A - 0x2500] = Some(BoxGlyph::Strokes(D, D, L, L));
+    t[0x256B - 0x2500] = Some(BoxGlyph::Strokes(L, L, D, D));
+    t[0x256C - 0x2500] = Some(BoxGlyph::Strokes(D, D, D, D));
+    t[0x256D - 0x2500] = Some(BoxGlyph::Arc(true, true));
+    t[0x256E - 0x2500] = Some(BoxGlyph::Arc(true, false));
+    t[0x256F - 0x2500] = Some(BoxGlyph::Arc(false, false));
+    t[0x2570 - 0x2500] = Some(BoxGlyph::Arc(false, true));
+    t[0x2571 - 0x2500] = Some(BoxGlyph::Diagonal(false));
+    t[0x2572 - 0x2500] = Some(BoxGlyph::Diagonal(true));
+    t[0x2573 - 0x2500] = Some(BoxGlyph::DiagonalBoth);
+    t[0x2574 - 0x2500] = Some(BoxGlyph::Strokes(L, N, N, N));
+    t[0x2575 - 0x2500] = Some(BoxGlyph::Strokes(N, N, L, N));
+    t[0x2576 - 0x2500] = Some(BoxGlyph::Strokes(N, L, N, N));
+    t[0x2577 - 0x2500] = Some(BoxGlyph::Strokes(N, N, N, L));
+    t[0x2578 - 0x2500] = Some(BoxGlyph::Strokes(H, N, N, N));
+    t[0x2579 - 0x2500] = Some(BoxGlyph::Strokes(N, N, H, N));
+    t[0x257A - 0x2500] = Some(BoxGlyph::Strokes(N, H, N, N));
+    t[0x257B - 0x2500] = Some(BoxGlyph::Strokes(N, N, N, H));
+    t[0x257C - 0x2500] = Some(BoxGlyph::Strokes(L, H, N, N));
+    t[0x257D - 0x2500] = Some(BoxGlyph::Strokes(N, N, L, H));
+    t[0x257E - 0x2500] = Some(BoxGlyph::Strokes(H, L, N, N));
+    t[0x257F - 0x2500] = Some(BoxGlyph::Strokes(N, N, H, L));
+    t
+};
+
+fn box_glyph(c: char) -> Option<BoxGlyph> {
+    let idx = c as usize;
+    if !(0x2500..0x2580).contains(&idx) {
+        return None;
+    }
+    BOX_GLYPH_TABLE[idx - 0x2500]
 }
 
 /// Renders a Box Drawing character (`U+2500..=U+257F`) directly to vertices.
@@ -216,625 +615,85 @@ pub fn render_box_drawing(
     ch: f32,
     color: [f32; 4],
 ) -> bool {
-    let thick = (ch * 0.08).round().max(1.0);
-    let heavy = (thick * 2.0).max(thick + 1.0);
-    let gap = thick.max(1.0);
-    let mid_x = (x + width * 0.5).floor();
-    let mid_y = (y + ch * 0.5).floor();
-    let x_right = x + width;
-    let y_bot = y + ch;
+    let specs = StrokeSpecs::new(x, y, width, ch);
 
-    // Special: Dashed horizontal lines
-    let draw_dashed_h = |vertices: &mut Vec<f32>, count: usize, t: f32| {
-        let total_units = (count * 2 - 1) as f32;
-        let dash_w = (width / total_units).max(1.0);
-        let top = mid_y - t / 2.0;
-        let bot = top + t;
-        for k in 0..count {
-            let x0 = x + (k * 2) as f32 * dash_w;
-            let x1 = (x0 + dash_w).min(x_right);
-            push_solid_quad(vertices, [x0, top, x1, bot], color);
-        }
+    let Some(glyph) = box_glyph(c) else {
+        return false;
     };
 
-    // Special: Dashed vertical lines
-    let draw_dashed_v = |vertices: &mut Vec<f32>, count: usize, t: f32| {
-        let total_units = (count * 2 - 1) as f32;
-        let dash_h = (ch / total_units).max(1.0);
-        let left = mid_x - t / 2.0;
-        let right = left + t;
-        for k in 0..count {
-            let y0 = y + (k * 2) as f32 * dash_h;
-            let y1 = (y0 + dash_h).min(y_bot);
-            push_solid_quad(vertices, [left, y0, right, y1], color);
-        }
-    };
-
-    // Special: Rounded corners (Arcs)
-    let draw_arc = |vertices: &mut Vec<f32>, down: bool, right: bool| {
-        let r = (width.min(ch) * 0.4).round().max(2.0);
-        let t = thick;
-        if down && right {
-            // ╭ Arc down & right: connects [mid_x + r, mid_y] to [mid_x, mid_y + r]
-            push_solid_quad(
-                vertices,
-                [mid_x + r, mid_y - t / 2.0, x_right, mid_y + t / 2.0],
-                color,
-            );
-            push_solid_quad(
-                vertices,
-                [mid_x - t / 2.0, mid_y + r, mid_x + t / 2.0, y_bot],
-                color,
-            );
-            push_arc_ring(
-                vertices,
-                mid_x + r,
-                mid_y + r,
-                r,
-                t,
-                std::f32::consts::PI,
-                color,
-            );
-        } else if down && !right {
-            // ╮ Arc down & left
-            push_solid_quad(
-                vertices,
-                [x, mid_y - t / 2.0, mid_x - r, mid_y + t / 2.0],
-                color,
-            );
-            push_solid_quad(
-                vertices,
-                [mid_x - t / 2.0, mid_y + r, mid_x + t / 2.0, y_bot],
-                color,
-            );
-            push_arc_ring(
-                vertices,
-                mid_x - r,
-                mid_y + r,
-                r,
-                t,
-                1.5 * std::f32::consts::PI,
-                color,
-            );
-        } else if !down && !right {
-            // ╯ Arc up & left
-            push_solid_quad(
-                vertices,
-                [x, mid_y - t / 2.0, mid_x - r, mid_y + t / 2.0],
-                color,
-            );
-            push_solid_quad(
-                vertices,
-                [mid_x - t / 2.0, y, mid_x + t / 2.0, mid_y - r],
-                color,
-            );
-            push_arc_ring(vertices, mid_x - r, mid_y - r, r, t, 0.0, color);
-        } else {
-            // ╰ Arc up & right
-            push_solid_quad(
-                vertices,
-                [mid_x + r, mid_y - t / 2.0, x_right, mid_y + t / 2.0],
-                color,
-            );
-            push_solid_quad(
-                vertices,
-                [mid_x - t / 2.0, y, mid_x + t / 2.0, mid_y - r],
-                color,
-            );
-            push_arc_ring(
-                vertices,
-                mid_x + r,
-                mid_y - r,
-                r,
-                t,
-                std::f32::consts::FRAC_PI_2,
-                color,
-            );
-        }
-    };
-
-    // Special: Diagonals
-    let draw_diagonal = |vertices: &mut Vec<f32>, forward: bool| {
-        let steps = (width.min(ch) as usize).max(4);
-        let step_w = width / steps as f32;
-        let step_h = ch / steps as f32;
-        let t = thick;
-        for s in 0..steps {
-            let (x0, x1) = if forward {
-                (x + s as f32 * step_w, x + (s + 1) as f32 * step_w)
-            } else {
-                (
-                    x + width - (s + 1) as f32 * step_w,
-                    x + width - s as f32 * step_w,
-                )
-            };
-            let y0 = y + s as f32 * step_h;
-            let y1 = (y0 + step_h + t).min(y_bot);
-            push_solid_quad(vertices, [x0, y0, x1, y1], color);
-        }
-    };
-
-    use Stroke::*;
-
-    let strokes: (Stroke, Stroke, Stroke, Stroke) = match c {
-        // Dashed lines
-        '\u{2504}' => {
-            draw_dashed_h(vertices, 3, thick);
-            return true;
-        }
-        '\u{2505}' => {
-            draw_dashed_h(vertices, 3, heavy);
-            return true;
-        }
-        '\u{2506}' => {
-            draw_dashed_v(vertices, 3, thick);
-            return true;
-        }
-        '\u{2507}' => {
-            draw_dashed_v(vertices, 3, heavy);
-            return true;
-        }
-        '\u{2508}' => {
-            draw_dashed_h(vertices, 4, thick);
-            return true;
-        }
-        '\u{2509}' => {
-            draw_dashed_h(vertices, 4, heavy);
-            return true;
-        }
-        '\u{250A}' => {
-            draw_dashed_v(vertices, 4, thick);
-            return true;
-        }
-        '\u{250B}' => {
-            draw_dashed_v(vertices, 4, heavy);
-            return true;
-        }
-        '\u{254C}' => {
-            draw_dashed_h(vertices, 2, thick);
-            return true;
-        }
-        '\u{254D}' => {
-            draw_dashed_h(vertices, 2, heavy);
-            return true;
-        }
-        '\u{254E}' => {
-            draw_dashed_v(vertices, 2, thick);
-            return true;
-        }
-        '\u{254F}' => {
-            draw_dashed_v(vertices, 2, heavy);
-            return true;
-        }
-
-        // Rounded corners
-        '\u{256D}' => {
-            draw_arc(vertices, true, true);
-            return true;
-        }
-        '\u{256E}' => {
-            draw_arc(vertices, true, false);
-            return true;
-        }
-        '\u{256F}' => {
-            draw_arc(vertices, false, false);
-            return true;
-        }
-        '\u{2570}' => {
-            draw_arc(vertices, false, true);
-            return true;
-        }
-
-        // Diagonals
-        '\u{2571}' => {
-            draw_diagonal(vertices, false);
-            return true;
-        }
-        '\u{2572}' => {
-            draw_diagonal(vertices, true);
-            return true;
-        }
-        '\u{2573}' => {
-            draw_diagonal(vertices, false);
-            draw_diagonal(vertices, true);
-            return true;
-        }
-
-        // Horizontal & Vertical
-        '\u{2500}' => (Light, Light, None, None),
-        '\u{2501}' => (Heavy, Heavy, None, None),
-        '\u{2502}' => (None, None, Light, Light),
-        '\u{2503}' => (None, None, Heavy, Heavy),
-
-        // Corners (Down & Right)
-        '\u{250C}' => (None, Light, None, Light),
-        '\u{250D}' => (None, Heavy, None, Light),
-        '\u{250E}' => (None, Light, None, Heavy),
-        '\u{250F}' => (None, Heavy, None, Heavy),
-
-        // Corners (Down & Left)
-        '\u{2510}' => (Light, None, None, Light),
-        '\u{2511}' => (Heavy, None, None, Light),
-        '\u{2512}' => (Light, None, None, Heavy),
-        '\u{2513}' => (Heavy, None, None, Heavy),
-
-        // Corners (Up & Right)
-        '\u{2514}' => (None, Light, Light, None),
-        '\u{2515}' => (None, Heavy, Light, None),
-        '\u{2516}' => (None, Light, Heavy, None),
-        '\u{2517}' => (None, Heavy, Heavy, None),
-
-        // Corners (Up & Left)
-        '\u{2518}' => (Light, None, Light, None),
-        '\u{2519}' => (Heavy, None, Light, None),
-        '\u{251A}' => (Light, None, Heavy, None),
-        '\u{251B}' => (Heavy, None, Heavy, None),
-
-        // Tees (Vertical & Right)
-        '\u{251C}' => (None, Light, Light, Light),
-        '\u{251D}' => (None, Heavy, Light, Light),
-        '\u{251E}' => (None, Light, Heavy, Light),
-        '\u{251F}' => (None, Light, Light, Heavy),
-        '\u{2520}' => (None, Light, Heavy, Heavy),
-        '\u{2521}' => (None, Heavy, Heavy, Light),
-        '\u{2522}' => (None, Heavy, Light, Heavy),
-        '\u{2523}' => (None, Heavy, Heavy, Heavy),
-
-        // Tees (Vertical & Left)
-        '\u{2524}' => (Light, None, Light, Light),
-        '\u{2525}' => (Heavy, None, Light, Light),
-        '\u{2526}' => (Light, None, Heavy, Light),
-        '\u{2527}' => (Light, None, Light, Heavy),
-        '\u{2528}' => (Light, None, Heavy, Heavy),
-        '\u{2529}' => (Heavy, None, Heavy, Light),
-        '\u{252A}' => (Heavy, None, Light, Heavy),
-        '\u{252B}' => (Heavy, None, Heavy, Heavy),
-
-        // Tees (Down & Horizontal)
-        '\u{252C}' => (Light, Light, None, Light),
-        '\u{252D}' => (Heavy, Light, None, Light),
-        '\u{252E}' => (Light, Heavy, None, Light),
-        '\u{252F}' => (Heavy, Heavy, None, Light),
-        '\u{2530}' => (Light, Light, None, Heavy),
-        '\u{2531}' => (Heavy, Light, None, Heavy),
-        '\u{2532}' => (Light, Heavy, None, Heavy),
-        '\u{2533}' => (Heavy, Heavy, None, Heavy),
-
-        // Tees (Up & Horizontal)
-        '\u{2534}' => (Light, Light, Light, None),
-        '\u{2535}' => (Heavy, Light, Light, None),
-        '\u{2536}' => (Light, Heavy, Light, None),
-        '\u{2537}' => (Heavy, Heavy, Light, None),
-        '\u{2538}' => (Light, Light, Heavy, None),
-        '\u{2539}' => (Heavy, Light, Heavy, None),
-        '\u{253A}' => (Light, Heavy, Heavy, None),
-        '\u{253B}' => (Heavy, Heavy, Heavy, None),
-
-        // Crosses
-        '\u{253C}' => (Light, Light, Light, Light),
-        '\u{253D}' => (Heavy, Light, Light, Light),
-        '\u{253E}' => (Light, Heavy, Light, Light),
-        '\u{253F}' => (Heavy, Heavy, Light, Light),
-        '\u{2540}' => (Light, Light, Heavy, Light),
-        '\u{2541}' => (Light, Light, Light, Heavy),
-        '\u{2542}' => (Light, Light, Heavy, Heavy),
-        '\u{2543}' => (Heavy, Light, Heavy, Light),
-        '\u{2544}' => (Light, Heavy, Heavy, Light),
-        '\u{2545}' => (Heavy, Light, Light, Heavy),
-        '\u{2546}' => (Light, Heavy, Light, Heavy),
-        '\u{2547}' => (Heavy, Heavy, Heavy, Light),
-        '\u{2548}' => (Heavy, Heavy, Light, Heavy),
-        '\u{2549}' => (Heavy, Light, Heavy, Heavy),
-        '\u{254A}' => (Light, Heavy, Heavy, Heavy),
-        '\u{254B}' => (Heavy, Heavy, Heavy, Heavy),
-
-        // Double lines
-        '\u{2550}' => (Double, Double, None, None),
-        '\u{2551}' => (None, None, Double, Double),
-
-        // Double corners
-        '\u{2552}' => (None, Double, None, Light),
-        '\u{2553}' => (None, Light, None, Double),
-        '\u{2554}' => (None, Double, None, Double),
-        '\u{2555}' => (Double, None, None, Light),
-        '\u{2556}' => (Light, None, None, Double),
-        '\u{2557}' => (Double, None, None, Double),
-        '\u{2558}' => (None, Double, Light, None),
-        '\u{2559}' => (None, Light, Double, None),
-        '\u{255A}' => (None, Double, Double, None),
-        '\u{255B}' => (Double, None, Light, None),
-        '\u{255C}' => (Light, None, Double, None),
-        '\u{255D}' => (Double, None, Double, None),
-
-        // Double tees
-        '\u{255E}' => (None, Double, Light, Light),
-        '\u{255F}' => (None, Light, Double, Double),
-        '\u{2560}' => (None, Double, Double, Double),
-        '\u{2561}' => (Double, None, Light, Light),
-        '\u{2562}' => (Light, None, Double, Double),
-        '\u{2563}' => (Double, None, Double, Double),
-        '\u{2564}' => (Double, Double, None, Light),
-        '\u{2565}' => (Light, Light, None, Double),
-        '\u{2566}' => (Double, Double, None, Double),
-        '\u{2567}' => (Double, Double, Light, None),
-        '\u{2568}' => (Light, Light, Double, None),
-        '\u{2569}' => (Double, Double, Double, None),
-
-        // Double crosses
-        '\u{256A}' => (Double, Double, Light, Light),
-        '\u{256B}' => (Light, Light, Double, Double),
-        '\u{256C}' => (Double, Double, Double, Double),
-
-        // Half rays
-        '\u{2574}' => (Light, None, None, None),
-        '\u{2575}' => (None, None, Light, None),
-        '\u{2576}' => (None, Light, None, None),
-        '\u{2577}' => (None, None, None, Light),
-        '\u{2578}' => (Heavy, None, None, None),
-        '\u{2579}' => (None, None, Heavy, None),
-        '\u{257A}' => (None, Heavy, None, None),
-        '\u{257B}' => (None, None, None, Heavy),
-        '\u{257C}' => (Light, Heavy, None, None),
-        '\u{257D}' => (None, None, Light, Heavy),
-        '\u{257E}' => (Heavy, Light, None, None),
-        '\u{257F}' => (None, None, Heavy, Light),
-
-        _ => return false,
-    };
-
-    let (left, right, up, down) = strokes;
-
-    // Direct optimization for straight full-width lines
-    if left == right && up == None && down == None {
-        match left {
-            Light => {
-                push_solid_quad(
-                    vertices,
-                    [x, mid_y - thick / 2.0, x_right, mid_y + thick / 2.0],
-                    color,
-                );
-                return true;
-            }
-            Heavy => {
-                push_solid_quad(
-                    vertices,
-                    [x, mid_y - heavy / 2.0, x_right, mid_y + heavy / 2.0],
-                    color,
-                );
-                return true;
-            }
-            Double => {
-                push_solid_quad(
-                    vertices,
-                    [x, mid_y - gap - thick, x_right, mid_y - gap],
-                    color,
-                );
-                push_solid_quad(
-                    vertices,
-                    [x, mid_y + gap, x_right, mid_y + gap + thick],
-                    color,
-                );
-                return true;
-            }
-            None => return false,
-        }
-    }
-
-    // Direct optimization for straight full-height lines
-    if up == down && left == None && right == None {
-        match up {
-            Light => {
-                push_solid_quad(
-                    vertices,
-                    [mid_x - thick / 2.0, y, mid_x + thick / 2.0, y_bot],
-                    color,
-                );
-                return true;
-            }
-            Heavy => {
-                push_solid_quad(
-                    vertices,
-                    [mid_x - heavy / 2.0, y, mid_x + heavy / 2.0, y_bot],
-                    color,
-                );
-                return true;
-            }
-            Double => {
-                push_solid_quad(
-                    vertices,
-                    [mid_x - gap - thick, y, mid_x - gap, y_bot],
-                    color,
-                );
-                push_solid_quad(
-                    vertices,
-                    [mid_x + gap, y, mid_x + gap + thick, y_bot],
-                    color,
-                );
-                return true;
-            }
-            None => return false,
-        }
-    }
-
-    // Arm thickness resolution helper
-    let stroke_thickness = |s: Stroke| match s {
-        None => 0.0,
-        Light => thick,
-        Heavy => heavy,
-        Double => gap * 2.0 + thick * 2.0,
-    };
-
-    let max_h = stroke_thickness(left).max(stroke_thickness(right));
-    let max_v = stroke_thickness(up).max(stroke_thickness(down));
-    let center_half_x = (max_v / 2.0).max(thick / 2.0);
-    let center_half_y = (max_h / 2.0).max(thick / 2.0);
-
-    // Left arm
-    match left {
-        Light => push_solid_quad(
+    match glyph {
+        BoxGlyph::DashedH(count, heavy) => draw_dashed_h(
             vertices,
-            [
+            &specs,
+            count,
+            if heavy { specs.heavy } else { specs.thick },
+            color,
+        ),
+        BoxGlyph::DashedV(count, heavy) => draw_dashed_v(
+            vertices,
+            &specs,
+            count,
+            if heavy { specs.heavy } else { specs.thick },
+            color,
+        ),
+        BoxGlyph::Arc(down, right) => draw_arc(vertices, &specs, down, right, color),
+        BoxGlyph::Diagonal(forward) => draw_diagonal(vertices, &specs, forward, color),
+        BoxGlyph::DiagonalBoth => {
+            draw_diagonal(vertices, &specs, false, color);
+            draw_diagonal(vertices, &specs, true, color);
+        }
+        BoxGlyph::Strokes(left, right, up, down) => {
+            // Straight full-width / full-height lines: the arm spans the entire cell.
+            if left == right && up == Stroke::None && down == Stroke::None {
+                return push_straight_h(vertices, &specs, left, color);
+            }
+            if up == down && left == Stroke::None && right == Stroke::None {
+                return push_straight_v(vertices, &specs, up, color);
+            }
+
+            // Generic junction: four arms clipped at the crossing so bands never overlap.
+            let max_h = specs.thickness(left).max(specs.thickness(right));
+            let max_v = specs.thickness(up).max(specs.thickness(down));
+            let center_half_x = (max_v / 2.0).max(specs.thick / 2.0);
+            let center_half_y = (max_h / 2.0).max(specs.thick / 2.0);
+
+            push_arm(
+                vertices,
+                &specs,
+                left,
+                ArmAxis::Horizontal,
                 x,
-                mid_y - thick / 2.0,
-                mid_x + center_half_x,
-                mid_y + thick / 2.0,
-            ],
-            color,
-        ),
-        Heavy => push_solid_quad(
-            vertices,
-            [
-                x,
-                mid_y - heavy / 2.0,
-                mid_x + center_half_x,
-                mid_y + heavy / 2.0,
-            ],
-            color,
-        ),
-        Double => {
-            push_solid_quad(
-                vertices,
-                [x, mid_y - gap - thick, mid_x + center_half_x, mid_y - gap],
+                specs.mid_x + center_half_x,
                 color,
             );
-            push_solid_quad(
+            push_arm(
                 vertices,
-                [x, mid_y + gap, mid_x + center_half_x, mid_y + gap + thick],
+                &specs,
+                right,
+                ArmAxis::Horizontal,
+                specs.mid_x - center_half_x,
+                specs.x_right,
                 color,
             );
-        }
-        None => {}
-    }
-
-    // Right arm
-    match right {
-        Light => push_solid_quad(
-            vertices,
-            [
-                mid_x - center_half_x,
-                mid_y - thick / 2.0,
-                x_right,
-                mid_y + thick / 2.0,
-            ],
-            color,
-        ),
-        Heavy => push_solid_quad(
-            vertices,
-            [
-                mid_x - center_half_x,
-                mid_y - heavy / 2.0,
-                x_right,
-                mid_y + heavy / 2.0,
-            ],
-            color,
-        ),
-        Double => {
-            push_solid_quad(
+            push_arm(
                 vertices,
-                [
-                    mid_x - center_half_x,
-                    mid_y - gap - thick,
-                    x_right,
-                    mid_y - gap,
-                ],
-                color,
-            );
-            push_solid_quad(
-                vertices,
-                [
-                    mid_x - center_half_x,
-                    mid_y + gap,
-                    x_right,
-                    mid_y + gap + thick,
-                ],
-                color,
-            );
-        }
-        None => {}
-    }
-
-    // Up arm
-    match up {
-        Light => push_solid_quad(
-            vertices,
-            [
-                mid_x - thick / 2.0,
+                &specs,
+                up,
+                ArmAxis::Vertical,
                 y,
-                mid_x + thick / 2.0,
-                mid_y + center_half_y,
-            ],
-            color,
-        ),
-        Heavy => push_solid_quad(
-            vertices,
-            [
-                mid_x - heavy / 2.0,
-                y,
-                mid_x + heavy / 2.0,
-                mid_y + center_half_y,
-            ],
-            color,
-        ),
-        Double => {
-            push_solid_quad(
-                vertices,
-                [mid_x - gap - thick, y, mid_x - gap, mid_y + center_half_y],
+                specs.mid_y + center_half_y,
                 color,
             );
-            push_solid_quad(
+            push_arm(
                 vertices,
-                [mid_x + gap, y, mid_x + gap + thick, mid_y + center_half_y],
+                &specs,
+                down,
+                ArmAxis::Vertical,
+                specs.mid_y - center_half_y,
+                specs.y_bot,
                 color,
             );
         }
-        None => {}
-    }
-
-    // Down arm
-    match down {
-        Light => push_solid_quad(
-            vertices,
-            [
-                mid_x - thick / 2.0,
-                mid_y - center_half_y,
-                mid_x + thick / 2.0,
-                y_bot,
-            ],
-            color,
-        ),
-        Heavy => push_solid_quad(
-            vertices,
-            [
-                mid_x - heavy / 2.0,
-                mid_y - center_half_y,
-                mid_x + heavy / 2.0,
-                y_bot,
-            ],
-            color,
-        ),
-        Double => {
-            push_solid_quad(
-                vertices,
-                [
-                    mid_x - gap - thick,
-                    mid_y - center_half_y,
-                    mid_x - gap,
-                    y_bot,
-                ],
-                color,
-            );
-            push_solid_quad(
-                vertices,
-                [
-                    mid_x + gap,
-                    mid_y - center_half_y,
-                    mid_x + gap + thick,
-                    y_bot,
-                ],
-                color,
-            );
-        }
-        None => {}
     }
 
     true
@@ -1064,5 +923,111 @@ mod tests {
             ));
             assert_eq!(vertices.len(), 8 * 48);
         }
+    }
+
+    #[test]
+    fn test_junction_arm_quad_counts() {
+        let mut vertices = Vec::new();
+        let color = [1.0, 1.0, 1.0, 1.0];
+        // ┼ light cross: four arms, one quad each
+        assert!(render_procedural_glyph(
+            &mut vertices,
+            '┼',
+            0.0,
+            0.0,
+            10.0,
+            20.0,
+            color
+        ));
+        assert_eq!(vertices.len(), 4 * 48);
+
+        vertices.clear();
+        // ┣ heavy tee: three heavy arms
+        assert!(render_procedural_glyph(
+            &mut vertices,
+            '┣',
+            0.0,
+            0.0,
+            10.0,
+            20.0,
+            color
+        ));
+        assert_eq!(vertices.len(), 3 * 48);
+
+        vertices.clear();
+        // ╔ double corner: right and down arms, two quads each
+        assert!(render_procedural_glyph(
+            &mut vertices,
+            '╔',
+            0.0,
+            0.0,
+            10.0,
+            20.0,
+            color
+        ));
+        assert_eq!(vertices.len(), 4 * 48);
+
+        vertices.clear();
+        // ╬ double cross: four arms, two quads each
+        assert!(render_procedural_glyph(
+            &mut vertices,
+            '╬',
+            0.0,
+            0.0,
+            10.0,
+            20.0,
+            color
+        ));
+        assert_eq!(vertices.len(), 8 * 48);
+    }
+
+    #[test]
+    fn test_half_ray_clips_at_center() {
+        let mut vertices = Vec::new();
+        let color = [1.0, 1.0, 1.0, 1.0];
+        // ╴ left half ray: single light arm clipped at the crossing center.
+        // thick = round(20 * 0.08) = 2; mid_x = floor(10 / 2) = 5; arm ends at 5 + 2/2 = 6.
+        assert!(render_procedural_glyph(
+            &mut vertices,
+            '╴',
+            0.0,
+            0.0,
+            10.0,
+            20.0,
+            color
+        ));
+        assert_eq!(vertices.len(), 48);
+        assert_eq!(vertices[0], 0.0);
+        assert_eq!(vertices[8], 6.0);
+    }
+
+    #[test]
+    fn test_dashed_and_diagonal_quad_counts() {
+        let mut vertices = Vec::new();
+        let color = [1.0, 1.0, 1.0, 1.0];
+        // ┄ 3-dash horizontal line: three dashes
+        assert!(render_procedural_glyph(
+            &mut vertices,
+            '┄',
+            0.0,
+            0.0,
+            10.0,
+            20.0,
+            color
+        ));
+        assert_eq!(vertices.len(), 3 * 48);
+
+        vertices.clear();
+        // ╱ diagonal: min(10, 20) = 10 steps (>= 4)
+        assert!(render_procedural_glyph(
+            &mut vertices,
+            '╱',
+            0.0,
+            0.0,
+            10.0,
+            20.0,
+            color
+        ));
+        assert_eq!(vertices.len(), 10 * 48);
     }
 }
