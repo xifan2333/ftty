@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use nix::errno::Errno;
 
+use crate::kitty::model::KittyEvent;
 use crate::kitty::{GraphicContext, KittyParser, KittyStreamChunk, collect_placeholder_ids};
 use crate::parser::{Terminal, VtParser};
 use crate::pty::Pty;
@@ -281,38 +282,8 @@ impl TerminalSession {
                     self.advance_vt_bytes(text, auto_scroll, &mut outcome);
                 }
                 KittyStreamChunk::Event(event) => {
-                    let active = collect_placeholder_ids(
-                        self.terminal
-                            .grid
-                            .lines
-                            .iter()
-                            .chain(self.terminal.grid.alt_lines.iter().flatten())
-                            .chain(self.terminal.grid.scrollback.iter()),
-                    );
-                    let ctx = GraphicContext {
-                        cell_width,
-                        cell_height,
-                        cursor_row: self.terminal.grid.cursor.row,
-                        cursor_col: self.terminal.grid.cursor.col,
-                        scrollback_len: self.terminal.grid.scrollback.len(),
-                    };
-                    let graphic_outcome = self
-                        .terminal
-                        .grid
-                        .graphics
-                        .handle_event(*event, ctx, &active);
-
-                    if let Some((cols, rows, do_not_move)) = graphic_outcome.cursor_advance {
-                        self.advance_cursor_for_image(cols, rows, do_not_move);
-                    }
-                    if let Some(resp) = graphic_outcome.pty_response {
-                        self.write_input_bytes(&resp);
-                    }
-                    if graphic_outcome.needs_redraw {
+                    if self.handle_kitty_event(*event, cell_width, cell_height, auto_scroll) {
                         outcome.needs_redraw = true;
-                        if auto_scroll && !self.terminal.grid.is_alt_screen() {
-                            self.terminal.grid.scroll_viewport_bottom();
-                        }
                     }
                 }
             });
@@ -346,19 +317,7 @@ impl TerminalSession {
                     let step_outcome =
                         self.process_incoming_bytes(incoming, cell_width, cell_height, auto_scroll);
 
-                    if step_outcome.needs_redraw {
-                        aggregated.needs_redraw = true;
-                    }
-                    if let Some(title) = step_outcome.title_update {
-                        aggregated.title_update = Some(title);
-                    }
-                    if let Some(clip) = step_outcome.clipboard_update {
-                        aggregated.clipboard_update = Some(clip);
-                    }
-                    if step_outcome.theme_changed {
-                        aggregated.theme_changed = true;
-                    }
-                    aggregated.kitty_keyboard_flags = step_outcome.kitty_keyboard_flags;
+                    merge_outcome(&mut aggregated, &step_outcome);
 
                     if total_read >= 65536 {
                         break;
@@ -380,6 +339,53 @@ impl TerminalSession {
             aggregated.needs_redraw = true;
         }
         Ok(aggregated)
+    }
+
+    /// Applies a Kitty graphics event to the grid, returning whether the screen
+    /// needs a redraw. Handles cursor advance, PTY responses, and scrolling to
+    /// the viewport bottom on auto-scroll.
+    fn handle_kitty_event(
+        &mut self,
+        event: KittyEvent,
+        cell_width: f32,
+        cell_height: f32,
+        auto_scroll: bool,
+    ) -> bool {
+        let active = collect_placeholder_ids(
+            self.terminal
+                .grid
+                .lines
+                .iter()
+                .chain(self.terminal.grid.alt_lines.iter().flatten())
+                .chain(self.terminal.grid.scrollback.iter()),
+        );
+        let ctx = GraphicContext {
+            cell_width,
+            cell_height,
+            cursor_row: self.terminal.grid.cursor.row,
+            cursor_col: self.terminal.grid.cursor.col,
+            scrollback_len: self.terminal.grid.scrollback.len(),
+        };
+        let graphic_outcome = self
+            .terminal
+            .grid
+            .graphics
+            .handle_event(event, ctx, &active);
+
+        if let Some((cols, rows, do_not_move)) = graphic_outcome.cursor_advance {
+            self.advance_cursor_for_image(cols, rows, do_not_move);
+        }
+        if let Some(resp) = graphic_outcome.pty_response {
+            self.write_input_bytes(&resp);
+        }
+        if graphic_outcome.needs_redraw {
+            if auto_scroll && !self.terminal.grid.is_alt_screen() {
+                self.terminal.grid.scroll_viewport_bottom();
+            }
+            true
+        } else {
+            false
+        }
     }
 
     fn advance_vt_bytes(&mut self, text: &[u8], auto_scroll: bool, outcome: &mut SessionOutcome) {
@@ -467,6 +473,23 @@ impl TerminalSession {
         self.terminal.grid.cursor.col = c_col.min(grid_cols.saturating_sub(1));
         self.terminal.grid.cursor.row = c_row.min(grid_rows.saturating_sub(1));
     }
+}
+
+/// Merges one read step's outcome fields into the aggregated session outcome.
+fn merge_outcome(aggregated: &mut SessionOutcome, step: &SessionOutcome) {
+    if step.needs_redraw {
+        aggregated.needs_redraw = true;
+    }
+    if let Some(title) = step.title_update.clone() {
+        aggregated.title_update = Some(title);
+    }
+    if let Some(clip) = step.clipboard_update.clone() {
+        aggregated.clipboard_update = Some(clip);
+    }
+    if step.theme_changed {
+        aggregated.theme_changed = true;
+    }
+    aggregated.kitty_keyboard_flags = step.kitty_keyboard_flags;
 }
 
 #[cfg(test)]
