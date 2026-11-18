@@ -791,7 +791,9 @@ pub fn build_row_foregrounds(vertices: &mut Vec<f32>, row: usize, ctx: &RenderCo
                 .cursor
                 .is_some_and(|(r, c, width)| row == r && col >= c && col < c + width);
         let color = cell_foreground_color(cell, ctx.colors, under_block);
-        if let Some(len) = ascii_ligature_run(line, col) {
+        if ctx.options.ligatures
+            && let Some(len) = ascii_ligature_run(line, col)
+        {
             let text = ligature_text(line, col, len);
             let lig_cbox = CellBox {
                 x,

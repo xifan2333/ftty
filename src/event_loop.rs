@@ -16,7 +16,7 @@ use crate::font::{CellMetrics, FontManager, GlyphAtlas};
 use crate::input::ime::ImeState;
 use crate::input::{KeyAction, KeyboardHandler};
 use crate::render::{ColorScheme, RenderOptions, Renderer};
-use crate::session::TerminalSession;
+use crate::session::{SessionOutcome, TerminalSession};
 use crate::wayland::WaylandState;
 
 /// Shared application state passed to all calloop sources and Wayland event dispatches.
@@ -200,15 +200,181 @@ impl AppState {
         })
     }
 
+    /// Registers the PTY read source exactly once, after the initial configure has
+    /// established final tiling dimensions and created the renderer.
+    fn register_pty_source(
+        &mut self,
+        event_loop: &mut EventLoop<AppState>,
+        qh: &QueueHandle<Self>,
+    ) -> Result<(), FttyError> {
+        if !self.should_register_pty() {
+            return Ok(());
+        }
+        self.pty_registered = true;
+        let pty_master = self.session.pty.try_clone_master()?;
+        let pty_source = Generic::new(pty_master, Interest::READ, Mode::Level);
+        let pty_qh = qh.clone();
+        event_loop
+            .handle()
+            .insert_source(pty_source, move |_event, _fd, state: &mut AppState| {
+                let cw = state.font_mgr.metrics.cell_width as f32;
+                let ch = state.font_mgr.metrics.cell_height as f32;
+                let auto_scroll = state.config.auto_scroll();
+                match state.session.read_and_process_pty(cw, ch, auto_scroll) {
+                    Ok(outcome) => Ok(state.handle_pty_outcome(outcome, &pty_qh)),
+                    Err(_) => {
+                        state.running = false;
+                        Ok(calloop::PostAction::Reregister)
+                    }
+                }
+            })
+            .map_err(|e| WaylandError::Dispatch(e.to_string()))?;
+        Ok(())
+    }
+
     #[must_use]
     pub fn should_register_pty(&self) -> bool {
         !self.pty_registered && self.wayland.configured
+    }
+
+    /// Dispatch deadline: poll quickly while synchronized output is active.
+    #[must_use]
+    fn dispatch_timeout(&self) -> Option<std::time::Duration> {
+        self.session
+            .terminal
+            .synchronized_output
+            .then(|| std::time::Duration::from_millis(50))
+    }
+
+    /// Applies the last configure of the dispatch; returns `false` when the loop
+    /// must stop (configure failed).
+    fn apply_pending_configure(&mut self, conn: &Connection) -> Result<bool, FttyError> {
+        if !self.configure_pending {
+            return Ok(true);
+        }
+        self.configure_pending = false;
+        match self.configure_renderer(conn) {
+            Ok(()) => Ok(true),
+            Err(error) => {
+                self.render_error = Some(error);
+                self.running = false;
+                Ok(false)
+            }
+        }
+    }
+
+    /// Whether a new frame should be rendered right now (not synced, no callback in flight).
+    #[must_use]
+    fn should_render_frame(&self) -> bool {
+        self.needs_redraw
+            && !self.session.terminal.synchronized_output
+            && self.frame_callback.is_none()
+    }
+
+    /// Whether the allocator should be trimmed (idle for 3s, last trim > 10s ago).
+    #[must_use]
+    fn should_trim_memory(&self) -> bool {
+        self.pending_trim
+            && self.last_activity.elapsed() >= std::time::Duration::from_secs(3)
+            && self.last_trim.elapsed() >= std::time::Duration::from_secs(10)
+    }
+
+    /// Applies a PTY read outcome to keyboard flags, theme, title, clipboard, and redraw state.
+    fn handle_pty_outcome(
+        &mut self,
+        outcome: SessionOutcome,
+        qh: &QueueHandle<Self>,
+    ) -> calloop::PostAction {
+        if outcome.process_exited {
+            self.running = false;
+            return calloop::PostAction::Reregister;
+        }
+        self.keyboard.kitty_flags = outcome.kitty_keyboard_flags;
+        if outcome.theme_changed {
+            self.apply_theme_change();
+        }
+        if let Some(title) = outcome.title_update {
+            self.apply_title_update(title);
+        }
+        if let Some(clip) = outcome.clipboard_update {
+            self.apply_clipboard_update(clip, qh);
+        }
+        if outcome.needs_redraw {
+            self.needs_redraw = true;
+            self.last_activity = std::time::Instant::now();
+            self.pending_trim = true;
+            self.update_ime_cursor_area();
+        }
+        calloop::PostAction::Continue
+    }
+
+    /// Invalidates the render cache and repaints everything after a theme switch.
+    fn apply_theme_change(&mut self) {
+        if let Some(renderer) = &mut self.renderer {
+            renderer.clear_cache();
+        }
+        self.session.terminal.grid.mark_all_dirty();
+        self.needs_redraw = true;
+    }
+
+    /// Propagates an OSC 0/2 title update to the window title.
+    fn apply_title_update(&mut self, title: String) {
+        self.wayland.title = title.clone();
+        if let Some(toplevel) = &self.wayland.xdg_toplevel {
+            let display_title = if title.is_empty() { "ftty" } else { &title };
+            toplevel.set_title(display_title.to_string());
+        }
+    }
+
+    /// Applies a clipboard update, either setting the new text or clearing the selection.
+    fn apply_clipboard_update(&mut self, clip: Option<String>, qh: &QueueHandle<Self>) {
+        match clip {
+            Some(text) => self.set_clipboard_text(text, Some(qh)),
+            None => {
+                self.clipboard_text = None;
+                self.session.terminal.set_clipboard_content(None);
+                if let Some(device) = &self.wayland.data_device {
+                    device.set_selection(None, self.last_serial);
+                }
+            }
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
 // Unified Event Loop Runner
 // ---------------------------------------------------------------------------
+
+/// Registers POSIX signal handlers (SIGCHLD/SIGINT/SIGTERM/SIGUSR1) on the loop.
+fn register_signal_sources(event_loop: &mut EventLoop<AppState>) -> Result<(), FttyError> {
+    let signals = Signals::new(&[
+        Signal::SIGCHLD,
+        Signal::SIGINT,
+        Signal::SIGTERM,
+        Signal::SIGUSR1,
+    ])
+    .map_err(|e| WaylandError::Dispatch(e.to_string()))?;
+    event_loop
+        .handle()
+        .insert_source(signals, |event, _, state: &mut AppState| {
+            match event.signal() {
+                Signal::SIGCHLD => {
+                    if !state.session.pty.is_alive() {
+                        state.running = false;
+                    }
+                }
+                Signal::SIGINT | Signal::SIGTERM => {
+                    state.running = false;
+                }
+                Signal::SIGUSR1 => {
+                    state.reload_config();
+                }
+                _ => {}
+            }
+        })
+        .map_err(|e| WaylandError::Dispatch(e.to_string()))?;
+    Ok(())
+}
 
 /// Runs the unified calloop event loop until terminal exits.
 ///
@@ -237,41 +403,13 @@ pub fn run_event_loop_with_connection(
         })
         .map_err(|e| WaylandError::Dispatch(e.to_string()))?;
 
-    // 2. POSIX Signals Event Source
-    let signals = Signals::new(&[
-        Signal::SIGCHLD,
-        Signal::SIGINT,
-        Signal::SIGTERM,
-        Signal::SIGUSR1,
-    ])
-    .map_err(|e| WaylandError::Dispatch(e.to_string()))?;
-    event_loop
-        .handle()
-        .insert_source(signals, |event, _, state: &mut AppState| {
-            match event.signal() {
-                Signal::SIGCHLD => {
-                    if !state.session.pty.is_alive() {
-                        state.running = false;
-                    }
-                }
-                Signal::SIGINT | Signal::SIGTERM => {
-                    state.running = false;
-                }
-                Signal::SIGUSR1 => {
-                    state.reload_config();
-                }
-                _ => {}
-            }
-        })
-        .map_err(|e| WaylandError::Dispatch(e.to_string()))?;
+    // 2. POSIX Signals + PTY read sources
+    register_signal_sources(&mut event_loop)?;
+    app_state.register_pty_source(&mut event_loop, &qh)?;
 
     // 3. Main Event Loop Tick
     while app_state.running {
-        let dispatch_timeout = if app_state.session.terminal.synchronized_output {
-            Some(std::time::Duration::from_millis(50))
-        } else {
-            None
-        };
+        let dispatch_timeout = app_state.dispatch_timeout();
 
         event_loop
             .dispatch(dispatch_timeout, &mut app_state)
@@ -282,151 +420,20 @@ pub fn run_event_loop_with_connection(
         }
 
         // Apply the last configure of this dispatch, if any, before drawing the frame.
-        if app_state.configure_pending {
-            app_state.configure_pending = false;
-            if let Err(error) = app_state.configure_renderer(&conn) {
-                app_state.render_error = Some(error);
-                app_state.running = false;
-                break;
-            }
+        if !app_state.apply_pending_configure(&conn)? {
+            break;
         }
 
         // Register PTY read source exactly once after initial configure establishes
-        // final tiling dimensions and creates the renderer, preventing busy-looping and SIGWINCH restarts.
-        if app_state.should_register_pty() {
-            app_state.pty_registered = true;
-            let pty_master = app_state.session.pty.try_clone_master()?;
-            let pty_source = Generic::new(pty_master, Interest::READ, Mode::Level);
-            let pty_qh = qh.clone();
-            event_loop
-                .handle()
-                .insert_source(pty_source, move |_event, _fd, state: &mut AppState| {
-                    let cw = state.font_mgr.metrics.cell_width as f32;
-                    let ch = state.font_mgr.metrics.cell_height as f32;
-                    let auto_scroll = state.config.auto_scroll();
+        // final tiling dimensions and creates the renderer, preventing busy-looping
+        // and SIGWINCH restarts. (Registration is a no-op once registered.)
+        app_state.register_pty_source(&mut event_loop, &qh)?;
 
-                    let outcome = match state.session.read_and_process_pty(cw, ch, auto_scroll) {
-                        Ok(o) => o,
-                        Err(_) => {
-                            state.running = false;
-                            return Ok(calloop::PostAction::Reregister);
-                        }
-                    };
-
-                    if outcome.process_exited {
-                        state.running = false;
-                        return Ok(calloop::PostAction::Reregister);
-                    }
-
-                    state.keyboard.kitty_flags = outcome.kitty_keyboard_flags;
-
-                    if outcome.theme_changed {
-                        if let Some(renderer) = &mut state.renderer {
-                            renderer.clear_cache();
-                        }
-                        state.session.terminal.grid.mark_all_dirty();
-                        state.needs_redraw = true;
-                    }
-
-                    if let Some(title) = outcome.title_update {
-                        state.wayland.title = title.clone();
-                        if let Some(toplevel) = &state.wayland.xdg_toplevel {
-                            let display_title = if title.is_empty() { "ftty" } else { &title };
-                            toplevel.set_title(display_title.to_string());
-                        }
-                    }
-
-                    if let Some(clip) = outcome.clipboard_update {
-                        match clip {
-                            Some(text) => state.set_clipboard_text(text, Some(&pty_qh)),
-                            None => {
-                                state.clipboard_text = None;
-                                state.session.terminal.set_clipboard_content(None);
-                                if let Some(device) = &state.wayland.data_device {
-                                    device.set_selection(None, state.last_serial);
-                                }
-                            }
-                        }
-                    }
-
-                    if outcome.needs_redraw {
-                        state.needs_redraw = true;
-                        state.last_activity = std::time::Instant::now();
-                        state.pending_trim = true;
-                        state.update_ime_cursor_area();
-                    }
-                    Ok(calloop::PostAction::Continue)
-                })
-                .map_err(|e| WaylandError::Dispatch(e.to_string()))?;
+        if app_state.should_render_frame() {
+            app_state.render_frame(&qh)?;
         }
 
-        let sync_active = app_state.session.is_synchronized_output_active();
-
-        if app_state.needs_redraw && !sync_active && app_state.frame_callback.is_none() {
-            app_state.update_hover_state();
-            app_state.update_cursor_shape();
-        }
-
-        if app_state.needs_redraw
-            && !sync_active
-            && app_state.frame_callback.is_none()
-            && let Some(renderer) = &mut app_state.renderer
-        {
-            let colors = ColorScheme::from(&app_state.session.terminal.theme);
-            let factor = if app_state.wayland.is_fractional_scale_active() {
-                app_state.wayland.scale_factor
-            } else {
-                1.0
-            };
-            let pad_x = (f64::from(app_state.config.padding_x()) * factor).round() as u16;
-            let pad_y = (f64::from(app_state.config.padding_y()) * factor).round() as u16;
-            let options = RenderOptions::new(
-                [pad_x, pad_y],
-                app_state.ime.preedit.as_ref(),
-                Some(&app_state.pointer.selection),
-            )
-            .with_hovered_span(app_state.pointer.hovered_span);
-            let physical_size = [
-                (app_state.wayland.width as f64 * factor).round().max(1.0) as u32,
-                (app_state.wayland.height as f64 * factor).round().max(1.0) as u32,
-            ];
-            renderer.render_grid(
-                &mut app_state.session.terminal.grid,
-                colors,
-                &app_state.font_mgr,
-                &mut app_state.atlas,
-                physical_size,
-                options,
-            )?;
-            if let Some(surface) = &app_state.wayland.surface {
-                if let Some(xdg_surface) = &app_state.wayland.xdg_surface {
-                    xdg_surface.set_window_geometry(
-                        0,
-                        0,
-                        app_state.wayland.width as i32,
-                        app_state.wayland.height as i32,
-                    );
-                }
-                if let Some(viewport) = &app_state.wayland.viewport {
-                    viewport.set_destination(
-                        app_state.wayland.width as i32,
-                        app_state.wayland.height as i32,
-                    );
-                }
-                app_state.frame_callback = Some(surface.frame(&qh, ()));
-            }
-            renderer.present()?;
-            let _ = app_state
-                .wayland
-                .transition_window_to(crate::wayland::WindowState::Active);
-            app_state.update_ime_cursor_area();
-            app_state.needs_redraw = false;
-        }
-
-        if app_state.pending_trim
-            && app_state.last_activity.elapsed() >= std::time::Duration::from_secs(3)
-            && app_state.last_trim.elapsed() >= std::time::Duration::from_secs(10)
-        {
+        if app_state.should_trim_memory() {
             app_state.pending_trim = false;
             app_state.last_trim = std::time::Instant::now();
             crate::alloc::trim_memory();
@@ -608,6 +615,91 @@ impl Drop for PipelineGuard {
 }
 
 impl AppState {
+    /// Trims scrollback history beyond the newly configured cap.
+    fn apply_scrollback_cap(&mut self, max_sb: usize) {
+        self.session.terminal.grid.max_scrollback = max_sb;
+        if self.session.terminal.grid.scrollback.len() > max_sb {
+            let overflow = self.session.terminal.grid.scrollback.len() - max_sb;
+            for _ in 0..overflow {
+                self.session.terminal.grid.scrollback.pop_front();
+            }
+            self.session.terminal.grid.viewport_offset =
+                self.session.terminal.grid.viewport_offset.min(max_sb);
+        }
+    }
+
+    /// Applies reloaded colors, palette, OSC52 policy, cursor shape, and keybindings.
+    fn apply_terminal_settings(&mut self, new_config: &Config) {
+        self.session
+            .terminal
+            .set_default_colors(new_config.foreground(), new_config.background());
+        self.session
+            .terminal
+            .set_palette(new_config.build_palette());
+        self.session.terminal.allow_osc52_read = new_config.allow_osc52_read();
+        self.session.terminal.allow_osc52_write = new_config.allow_osc52_write();
+        self.session.terminal.grid.cursor.shape = new_config.cursor_shape();
+        self.keyboard.update_keybindings(&new_config.keybindings);
+    }
+
+    /// Renders one frame: refreshes hover/cursor state, draws text and images,
+    /// schedules the next frame callback, and presents.
+    fn render_frame(&mut self, qh: &QueueHandle<Self>) -> Result<(), FttyError> {
+        self.update_hover_state();
+        self.update_cursor_shape();
+        let Some(renderer) = &mut self.renderer else {
+            return Ok(());
+        };
+        let colors = ColorScheme::from(&self.session.terminal.theme);
+        let factor = if self.wayland.is_fractional_scale_active() {
+            self.wayland.scale_factor
+        } else {
+            1.0
+        };
+        let pad_x = (f64::from(self.config.padding_x()) * factor).round() as u16;
+        let pad_y = (f64::from(self.config.padding_y()) * factor).round() as u16;
+        let options = RenderOptions::new(
+            [pad_x, pad_y],
+            self.ime.preedit.as_ref(),
+            Some(&self.pointer.selection),
+        )
+        .with_hovered_span(self.pointer.hovered_span)
+        .with_ligatures(self.config.ligatures());
+        let physical_size = [
+            (self.wayland.width as f64 * factor).round().max(1.0) as u32,
+            (self.wayland.height as f64 * factor).round().max(1.0) as u32,
+        ];
+        renderer.render_grid(
+            &mut self.session.terminal.grid,
+            colors,
+            &self.font_mgr,
+            &mut self.atlas,
+            physical_size,
+            options,
+        )?;
+        if let Some(surface) = &self.wayland.surface {
+            if let Some(xdg_surface) = &self.wayland.xdg_surface {
+                xdg_surface.set_window_geometry(
+                    0,
+                    0,
+                    self.wayland.width as i32,
+                    self.wayland.height as i32,
+                );
+            }
+            if let Some(viewport) = &self.wayland.viewport {
+                viewport.set_destination(self.wayland.width as i32, self.wayland.height as i32);
+            }
+            self.frame_callback = Some(surface.frame(qh, ()));
+        }
+        renderer.present()?;
+        let _ = self
+            .wayland
+            .transition_window_to(crate::wayland::WindowState::Active);
+        self.update_ime_cursor_area();
+        self.needs_redraw = false;
+        Ok(())
+    }
+
     /// Writes bytes to the PTY master via the session.
     pub fn write_pty_blocking(&mut self, bytes: &[u8]) {
         self.session.write_input_bytes(bytes);
@@ -658,29 +750,12 @@ impl AppState {
         };
 
         let max_sb = new_config.scrollback_lines();
-        self.session.terminal.grid.max_scrollback = max_sb;
-        if self.session.terminal.grid.scrollback.len() > max_sb {
-            let overflow = self.session.terminal.grid.scrollback.len() - max_sb;
-            for _ in 0..overflow {
-                self.session.terminal.grid.scrollback.pop_front();
-            }
-            self.session.terminal.grid.viewport_offset =
-                self.session.terminal.grid.viewport_offset.min(max_sb);
-        }
+        self.apply_scrollback_cap(max_sb);
 
         let padding_changed = self.config.padding_x() != new_config.padding_x()
             || self.config.padding_y() != new_config.padding_y();
 
-        self.session
-            .terminal
-            .set_default_colors(new_config.foreground(), new_config.background());
-        self.session
-            .terminal
-            .set_palette(new_config.build_palette());
-        self.session.terminal.allow_osc52_read = new_config.allow_osc52_read();
-        self.session.terminal.allow_osc52_write = new_config.allow_osc52_write();
-        self.session.terminal.grid.cursor.shape = new_config.cursor_shape();
-        self.keyboard.update_keybindings(&new_config.keybindings);
+        self.apply_terminal_settings(&new_config);
         self.config = new_config;
 
         self.session.terminal.grid.mark_all_dirty();
@@ -722,55 +797,16 @@ impl AppState {
         conn: Option<&Connection>,
     ) {
         match action {
-            KeyAction::ScrollbackUpPage => {
-                self.session
-                    .terminal
-                    .grid
-                    .scroll_viewport_up(self.session.terminal.grid.rows);
-                self.needs_redraw = true;
-            }
-            KeyAction::ScrollbackDownPage => {
-                self.session
-                    .terminal
-                    .grid
-                    .scroll_viewport_down(self.session.terminal.grid.rows);
-                self.needs_redraw = true;
-            }
-            KeyAction::ScrollbackUpLine => {
-                self.session.terminal.grid.scroll_viewport_up(1);
-                self.needs_redraw = true;
-            }
-            KeyAction::ScrollbackDownLine => {
-                self.session.terminal.grid.scroll_viewport_down(1);
-                self.needs_redraw = true;
-            }
-            KeyAction::ScrollbackHome => {
-                self.session.terminal.grid.scroll_viewport_top();
-                self.needs_redraw = true;
-            }
-            KeyAction::ScrollbackEnd => {
-                self.session.terminal.grid.scroll_viewport_bottom();
-                self.needs_redraw = true;
-            }
-            KeyAction::PromptPrev => {
-                self.session.terminal.grid.scroll_to_prompt_prev();
-                self.needs_redraw = true;
-            }
-            KeyAction::PromptNext => {
-                self.session.terminal.grid.scroll_to_prompt_next();
-                self.needs_redraw = true;
-            }
-            KeyAction::FontIncrease => {
-                let new_size = (self.logical_font_size + 1.0).min(crate::font::MAX_FONT_SIZE);
-                self.set_logical_font_size(new_size);
-            }
-            KeyAction::FontDecrease => {
-                let new_size = (self.logical_font_size - 1.0).max(crate::font::MIN_FONT_SIZE);
-                self.set_logical_font_size(new_size);
-            }
-            KeyAction::FontReset => {
-                let default_size = self.config.font_size();
-                self.set_logical_font_size(default_size);
+            KeyAction::ScrollbackUpPage
+            | KeyAction::ScrollbackDownPage
+            | KeyAction::ScrollbackUpLine
+            | KeyAction::ScrollbackDownLine
+            | KeyAction::ScrollbackHome
+            | KeyAction::ScrollbackEnd
+            | KeyAction::PromptPrev
+            | KeyAction::PromptNext => self.handle_key_scroll(action),
+            KeyAction::FontIncrease | KeyAction::FontDecrease | KeyAction::FontReset => {
+                self.handle_key_font(action);
             }
             KeyAction::ClipboardCopy => {
                 self.copy_selection(qh);
@@ -795,6 +831,63 @@ impl AppState {
                     Self::spawn_pipe_async(cmd, text);
                 }
             }
+        }
+    }
+
+    /// Applies a scroll-related key action to the viewport.
+    fn handle_key_scroll(&mut self, action: KeyAction) {
+        match action {
+            KeyAction::ScrollbackUpPage => {
+                self.session
+                    .terminal
+                    .grid
+                    .scroll_viewport_up(self.session.terminal.grid.rows);
+            }
+            KeyAction::ScrollbackDownPage => {
+                self.session
+                    .terminal
+                    .grid
+                    .scroll_viewport_down(self.session.terminal.grid.rows);
+            }
+            KeyAction::ScrollbackUpLine => {
+                self.session.terminal.grid.scroll_viewport_up(1);
+            }
+            KeyAction::ScrollbackDownLine => {
+                self.session.terminal.grid.scroll_viewport_down(1);
+            }
+            KeyAction::ScrollbackHome => {
+                self.session.terminal.grid.scroll_viewport_top();
+            }
+            KeyAction::ScrollbackEnd => {
+                self.session.terminal.grid.scroll_viewport_bottom();
+            }
+            KeyAction::PromptPrev => {
+                self.session.terminal.grid.scroll_to_prompt_prev();
+            }
+            KeyAction::PromptNext => {
+                self.session.terminal.grid.scroll_to_prompt_next();
+            }
+            _ => {}
+        }
+        self.needs_redraw = true;
+    }
+
+    /// Applies a font-size key action.
+    fn handle_key_font(&mut self, action: KeyAction) {
+        match action {
+            KeyAction::FontIncrease => {
+                let new_size = (self.logical_font_size + 1.0).min(crate::font::MAX_FONT_SIZE);
+                self.set_logical_font_size(new_size);
+            }
+            KeyAction::FontDecrease => {
+                let new_size = (self.logical_font_size - 1.0).max(crate::font::MIN_FONT_SIZE);
+                self.set_logical_font_size(new_size);
+            }
+            KeyAction::FontReset => {
+                let default_size = self.config.font_size();
+                self.set_logical_font_size(default_size);
+            }
+            _ => {}
         }
     }
 
