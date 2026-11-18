@@ -1478,4 +1478,29 @@ mod tests {
             probe = if ligates { "ligating" } else { "non-ligating" },
         );
     }
+
+    #[test]
+    fn ligatures_can_be_disabled_per_frame() {
+        // Disabling ligatures forces per-cell quads regardless of the font's
+        // GSUB features: two glyph quads for "==", no ligature quad.
+        let fonts = fonts();
+        let mut grid = Grid::new(2, 1, 0);
+        grid.cursor.visible = false;
+        grid.lines[0].cells[0].c = '=';
+        grid.lines[0].cells[1].c = '=';
+        grid.lines[0].cells[0].bg = Color::Rgb(10, 20, 30);
+        grid.lines[0].cells[1].bg = Color::Rgb(10, 20, 30);
+        let atlas = atlas_for(&grid, &fonts, 64, None);
+        let vertices = vertices_for(
+            &grid,
+            &fonts,
+            &atlas,
+            RenderOptions::default().with_ligatures(false),
+        );
+        assert_eq!(
+            vertices.len() / 48,
+            3,
+            "background span + two per-cell glyph quads"
+        );
+    }
 }

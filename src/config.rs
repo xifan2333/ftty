@@ -39,6 +39,8 @@ pub struct FontConfig {
     #[serde(alias = "families")]
     pub family: Option<FontFamilies>,
     pub size: Option<f32>,
+    /// Enables programming ligatures for adjacent symbol runs (default: true).
+    pub ligatures: Option<bool>,
 }
 
 /// Padding configuration: either a uniform scalar `padding = 4` or an array `padding = [4, 2]`.
@@ -118,56 +120,32 @@ pub struct ColorsConfig {
 
 impl ColorsConfig {
     pub fn fold_legacy_palette(&mut self) {
-        if let Some(p) = self.palette.take() {
-            if self.black.is_none() {
-                self.black = p.black;
-            }
-            if self.red.is_none() {
-                self.red = p.red;
-            }
-            if self.green.is_none() {
-                self.green = p.green;
-            }
-            if self.yellow.is_none() {
-                self.yellow = p.yellow;
-            }
-            if self.blue.is_none() {
-                self.blue = p.blue;
-            }
-            if self.magenta.is_none() {
-                self.magenta = p.magenta;
-            }
-            if self.cyan.is_none() {
-                self.cyan = p.cyan;
-            }
-            if self.white.is_none() {
-                self.white = p.white;
-            }
-            if self.bright_black.is_none() {
-                self.bright_black = p.bright_black;
-            }
-            if self.bright_red.is_none() {
-                self.bright_red = p.bright_red;
-            }
-            if self.bright_green.is_none() {
-                self.bright_green = p.bright_green;
-            }
-            if self.bright_yellow.is_none() {
-                self.bright_yellow = p.bright_yellow;
-            }
-            if self.bright_blue.is_none() {
-                self.bright_blue = p.bright_blue;
-            }
-            if self.bright_magenta.is_none() {
-                self.bright_magenta = p.bright_magenta;
-            }
-            if self.bright_cyan.is_none() {
-                self.bright_cyan = p.bright_cyan;
-            }
-            if self.bright_white.is_none() {
-                self.bright_white = p.bright_white;
-            }
-        }
+        let Some(p) = self.palette.take() else {
+            return;
+        };
+        fold_color(&mut self.black, p.black);
+        fold_color(&mut self.red, p.red);
+        fold_color(&mut self.green, p.green);
+        fold_color(&mut self.yellow, p.yellow);
+        fold_color(&mut self.blue, p.blue);
+        fold_color(&mut self.magenta, p.magenta);
+        fold_color(&mut self.cyan, p.cyan);
+        fold_color(&mut self.white, p.white);
+        fold_color(&mut self.bright_black, p.bright_black);
+        fold_color(&mut self.bright_red, p.bright_red);
+        fold_color(&mut self.bright_green, p.bright_green);
+        fold_color(&mut self.bright_yellow, p.bright_yellow);
+        fold_color(&mut self.bright_blue, p.bright_blue);
+        fold_color(&mut self.bright_magenta, p.bright_magenta);
+        fold_color(&mut self.bright_cyan, p.bright_cyan);
+        fold_color(&mut self.bright_white, p.bright_white);
+    }
+}
+
+/// Assigns `src` into `dst` only when the caller did not set it explicitly.
+fn fold_color(dst: &mut Option<Rgb>, src: Option<Rgb>) {
+    if dst.is_none() {
+        *dst = src;
     }
 }
 
@@ -235,31 +213,49 @@ pub enum ActionDef {
     Pipe(PipeActionDef),
 }
 
+/// Lookup table for named keybinding actions (drives both resolution and the
+/// known-actions fast path). Kept as a table so `to_resolved_action` stays a
+/// flat lookup instead of a many-branch match.
+const NAMED_ACTIONS: &[(&str, KeyAction)] = &[
+    ("scrollback_up_page", KeyAction::ScrollbackUpPage),
+    ("scrollback_down_page", KeyAction::ScrollbackDownPage),
+    ("scrollback_up_line", KeyAction::ScrollbackUpLine),
+    ("scrollback_down_line", KeyAction::ScrollbackDownLine),
+    ("scrollback_home", KeyAction::ScrollbackHome),
+    ("scrollback_end", KeyAction::ScrollbackEnd),
+    ("prompt_prev", KeyAction::PromptPrev),
+    ("prompt_next", KeyAction::PromptNext),
+    ("font_increase", KeyAction::FontIncrease),
+    ("font_decrease", KeyAction::FontDecrease),
+    ("font_reset", KeyAction::FontReset),
+    ("clipboard_copy", KeyAction::ClipboardCopy),
+    ("clipboard_paste", KeyAction::ClipboardPaste),
+    ("primary_paste", KeyAction::PrimaryPaste),
+];
+
+/// Resolves a known action name to its [`KeyAction`], or `None` if unrecognized.
+fn named_action(name: &str) -> Option<KeyAction> {
+    NAMED_ACTIONS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, action)| action.clone())
+}
+
 impl ActionDef {
     #[must_use]
     pub fn to_resolved_action(&self) -> ResolvedAction {
         match self {
-            Self::Simple(s) => match s.to_ascii_lowercase().as_str() {
-                "scrollback_up_page" => ResolvedAction::Action(KeyAction::ScrollbackUpPage),
-                "scrollback_down_page" => ResolvedAction::Action(KeyAction::ScrollbackDownPage),
-                "scrollback_up_line" => ResolvedAction::Action(KeyAction::ScrollbackUpLine),
-                "scrollback_down_line" => ResolvedAction::Action(KeyAction::ScrollbackDownLine),
-                "scrollback_home" => ResolvedAction::Action(KeyAction::ScrollbackHome),
-                "scrollback_end" => ResolvedAction::Action(KeyAction::ScrollbackEnd),
-                "prompt_prev" => ResolvedAction::Action(KeyAction::PromptPrev),
-                "prompt_next" => ResolvedAction::Action(KeyAction::PromptNext),
-                "font_increase" => ResolvedAction::Action(KeyAction::FontIncrease),
-                "font_decrease" => ResolvedAction::Action(KeyAction::FontDecrease),
-                "font_reset" => ResolvedAction::Action(KeyAction::FontReset),
-                "clipboard_copy" => ResolvedAction::Action(KeyAction::ClipboardCopy),
-                "clipboard_paste" => ResolvedAction::Action(KeyAction::ClipboardPaste),
-                "primary_paste" => ResolvedAction::Action(KeyAction::PrimaryPaste),
-                "none" | "" => ResolvedAction::Unbind,
-                _ => {
-                    eprintln!("ftty: unrecognized keybinding action '{s}'");
-                    ResolvedAction::Invalid
+            Self::Simple(s) => {
+                let name = s.to_ascii_lowercase();
+                match named_action(&name) {
+                    Some(action) => ResolvedAction::Action(action),
+                    None if name.is_empty() || name == "none" => ResolvedAction::Unbind,
+                    None => {
+                        eprintln!("ftty: unrecognized keybinding action '{s}'");
+                        ResolvedAction::Invalid
+                    }
                 }
-            },
+            }
             Self::Multiple(_) => ResolvedAction::Invalid,
             Self::Pipe(pipe) => match pipe {
                 PipeActionDef::PipeVisible(cmd) => {
@@ -275,23 +271,6 @@ impl ActionDef {
         }
     }
 }
-
-const KNOWN_ACTIONS: &[&str] = &[
-    "scrollback_up_page",
-    "scrollback_down_page",
-    "scrollback_up_line",
-    "scrollback_down_line",
-    "scrollback_home",
-    "scrollback_end",
-    "prompt_prev",
-    "prompt_next",
-    "font_increase",
-    "font_decrease",
-    "font_reset",
-    "clipboard_copy",
-    "clipboard_paste",
-    "primary_paste",
-];
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(transparent)]
@@ -334,30 +313,10 @@ impl KeybindingsConfig {
 
         for (key_str, def) in &self.bindings {
             let key_lower = key_str.to_ascii_lowercase();
-            if KNOWN_ACTIONS.contains(&key_lower.as_str()) {
-                let action_res = ActionDef::Simple(key_lower).to_resolved_action();
-                if let ResolvedAction::Action(act) = action_res {
-                    match def {
-                        ActionDef::Simple(c) => {
-                            if let Some((mods, sym)) = parse_key_combo(c) {
-                                let canonical_sym = canonicalize_sym(sym);
-                                map.insert((mods, canonical_sym), act);
-                            }
-                        }
-                        ActionDef::Multiple(combos) => {
-                            for c in combos {
-                                if let Some((mods, sym)) = parse_key_combo(c) {
-                                    let canonical_sym = canonicalize_sym(sym);
-                                    map.insert((mods, canonical_sym), act.clone());
-                                }
-                            }
-                        }
-                        ActionDef::Pipe(_) => {}
-                    }
-                }
+            if named_action(&key_lower).is_some() {
+                resolve_known_binding(&mut map, key_lower, def);
                 continue;
             }
-
             if let Some((mods, sym)) = parse_key_combo(key_str) {
                 let canonical_sym = canonicalize_sym(sym);
                 match def.to_resolved_action() {
@@ -378,6 +337,39 @@ impl KeybindingsConfig {
     #[must_use]
     pub fn resolve_bindings(&self) -> Vec<((Modifiers, xkb::Keysym), KeyAction)> {
         self.resolve_bindings_map().into_iter().collect()
+    }
+}
+
+/// Maps a resolved action onto every combo in a known-action user binding.
+fn resolve_known_binding(
+    map: &mut HashMap<(Modifiers, xkb::Keysym), KeyAction>,
+    key_lower: String,
+    def: &ActionDef,
+) {
+    let action_res = ActionDef::Simple(key_lower).to_resolved_action();
+    let ResolvedAction::Action(act) = action_res else {
+        return;
+    };
+    match def {
+        ActionDef::Simple(combo) => insert_user_combo(map, combo, act),
+        ActionDef::Multiple(combos) => {
+            for combo in combos {
+                insert_user_combo(map, combo, act.clone());
+            }
+        }
+        ActionDef::Pipe(_) => {}
+    }
+}
+
+/// Parses and canonicalizes a user combo string, inserting it into the bindings map.
+fn insert_user_combo(
+    map: &mut HashMap<(Modifiers, xkb::Keysym), KeyAction>,
+    combo: &str,
+    action: KeyAction,
+) {
+    if let Some((mods, sym)) = parse_key_combo(combo) {
+        let canonical_sym = canonicalize_sym(sym);
+        map.insert((mods, canonical_sym), action);
     }
 }
 
@@ -496,6 +488,11 @@ impl Config {
     }
 
     #[must_use]
+    pub fn ligatures(&self) -> bool {
+        self.font.ligatures.unwrap_or(true)
+    }
+
+    #[must_use]
     pub fn padding(&self) -> [u16; 2] {
         self.window.padding.map_or([0, 0], Padding::to_axes)
     }
@@ -554,62 +551,28 @@ impl Config {
     #[must_use]
     pub fn build_palette(&self) -> [Rgb; 256] {
         let mut palette = default_256_palette();
-
         let c = &self.colors;
-        let leg = c.palette.as_ref();
-        if let Some(col) = c.black.or_else(|| leg.and_then(|p| p.black)) {
-            palette[0] = col;
-        }
-        if let Some(col) = c.red.or_else(|| leg.and_then(|p| p.red)) {
-            palette[1] = col;
-        }
-        if let Some(col) = c.green.or_else(|| leg.and_then(|p| p.green)) {
-            palette[2] = col;
-        }
-        if let Some(col) = c.yellow.or_else(|| leg.and_then(|p| p.yellow)) {
-            palette[3] = col;
-        }
-        if let Some(col) = c.blue.or_else(|| leg.and_then(|p| p.blue)) {
-            palette[4] = col;
-        }
-        if let Some(col) = c.magenta.or_else(|| leg.and_then(|p| p.magenta)) {
-            palette[5] = col;
-        }
-        if let Some(col) = c.cyan.or_else(|| leg.and_then(|p| p.cyan)) {
-            palette[6] = col;
-        }
-        if let Some(col) = c.white.or_else(|| leg.and_then(|p| p.white)) {
-            palette[7] = col;
-        }
-        if let Some(col) = c.bright_black.or_else(|| leg.and_then(|p| p.bright_black)) {
-            palette[8] = col;
-        }
-        if let Some(col) = c.bright_red.or_else(|| leg.and_then(|p| p.bright_red)) {
-            palette[9] = col;
-        }
-        if let Some(col) = c.bright_green.or_else(|| leg.and_then(|p| p.bright_green)) {
-            palette[10] = col;
-        }
-        if let Some(col) = c
-            .bright_yellow
-            .or_else(|| leg.and_then(|p| p.bright_yellow))
-        {
-            palette[11] = col;
-        }
-        if let Some(col) = c.bright_blue.or_else(|| leg.and_then(|p| p.bright_blue)) {
-            palette[12] = col;
-        }
-        if let Some(col) = c
-            .bright_magenta
-            .or_else(|| leg.and_then(|p| p.bright_magenta))
-        {
-            palette[13] = col;
-        }
-        if let Some(col) = c.bright_cyan.or_else(|| leg.and_then(|p| p.bright_cyan)) {
-            palette[14] = col;
-        }
-        if let Some(col) = c.bright_white.or_else(|| leg.and_then(|p| p.bright_white)) {
-            palette[15] = col;
+        let legacy = c.palette.as_ref();
+        let slots: [(usize, Option<Rgb>, Option<Rgb>); 16] = [
+            (0, c.black, legacy.and_then(|p| p.black)),
+            (1, c.red, legacy.and_then(|p| p.red)),
+            (2, c.green, legacy.and_then(|p| p.green)),
+            (3, c.yellow, legacy.and_then(|p| p.yellow)),
+            (4, c.blue, legacy.and_then(|p| p.blue)),
+            (5, c.magenta, legacy.and_then(|p| p.magenta)),
+            (6, c.cyan, legacy.and_then(|p| p.cyan)),
+            (7, c.white, legacy.and_then(|p| p.white)),
+            (8, c.bright_black, legacy.and_then(|p| p.bright_black)),
+            (9, c.bright_red, legacy.and_then(|p| p.bright_red)),
+            (10, c.bright_green, legacy.and_then(|p| p.bright_green)),
+            (11, c.bright_yellow, legacy.and_then(|p| p.bright_yellow)),
+            (12, c.bright_blue, legacy.and_then(|p| p.bright_blue)),
+            (13, c.bright_magenta, legacy.and_then(|p| p.bright_magenta)),
+            (14, c.bright_cyan, legacy.and_then(|p| p.bright_cyan)),
+            (15, c.bright_white, legacy.and_then(|p| p.bright_white)),
+        ];
+        for (idx, primary, legacy_slot) in slots {
+            fold_palette_slot(&mut palette, idx, primary, legacy_slot);
         }
 
         if let Some(indexed) = &self.colors.indexed {
@@ -619,6 +582,18 @@ impl Config {
         }
 
         palette
+    }
+}
+
+/// Writes `primary` into `palette[idx]`, falling back to the legacy palette slot.
+fn fold_palette_slot(
+    palette: &mut [Rgb; 256],
+    idx: usize,
+    primary: Option<Rgb>,
+    legacy: Option<Rgb>,
+) {
+    if let Some(col) = primary.or(legacy) {
+        palette[idx] = col;
     }
 }
 
@@ -684,67 +659,35 @@ pub(crate) fn merge_colors(dst: &mut ColorsConfig, mut src: ColorsConfig) {
     src.fold_legacy_palette();
     dst.fold_legacy_palette();
 
-    if let Some(c) = src.foreground {
-        dst.foreground = Some(c);
-    }
-    if let Some(c) = src.background {
-        dst.background = Some(c);
-    }
-    if let Some(c) = src.black {
-        dst.black = Some(c);
-    }
-    if let Some(c) = src.red {
-        dst.red = Some(c);
-    }
-    if let Some(c) = src.green {
-        dst.green = Some(c);
-    }
-    if let Some(c) = src.yellow {
-        dst.yellow = Some(c);
-    }
-    if let Some(c) = src.blue {
-        dst.blue = Some(c);
-    }
-    if let Some(c) = src.magenta {
-        dst.magenta = Some(c);
-    }
-    if let Some(c) = src.cyan {
-        dst.cyan = Some(c);
-    }
-    if let Some(c) = src.white {
-        dst.white = Some(c);
-    }
-    if let Some(c) = src.bright_black {
-        dst.bright_black = Some(c);
-    }
-    if let Some(c) = src.bright_red {
-        dst.bright_red = Some(c);
-    }
-    if let Some(c) = src.bright_green {
-        dst.bright_green = Some(c);
-    }
-    if let Some(c) = src.bright_yellow {
-        dst.bright_yellow = Some(c);
-    }
-    if let Some(c) = src.bright_blue {
-        dst.bright_blue = Some(c);
-    }
-    if let Some(c) = src.bright_magenta {
-        dst.bright_magenta = Some(c);
-    }
-    if let Some(c) = src.bright_cyan {
-        dst.bright_cyan = Some(c);
-    }
-    if let Some(c) = src.bright_white {
-        dst.bright_white = Some(c);
-    }
+    merge_color(&mut dst.foreground, src.foreground);
+    merge_color(&mut dst.background, src.background);
+    merge_color(&mut dst.black, src.black);
+    merge_color(&mut dst.red, src.red);
+    merge_color(&mut dst.green, src.green);
+    merge_color(&mut dst.yellow, src.yellow);
+    merge_color(&mut dst.blue, src.blue);
+    merge_color(&mut dst.magenta, src.magenta);
+    merge_color(&mut dst.cyan, src.cyan);
+    merge_color(&mut dst.white, src.white);
+    merge_color(&mut dst.bright_black, src.bright_black);
+    merge_color(&mut dst.bright_red, src.bright_red);
+    merge_color(&mut dst.bright_green, src.bright_green);
+    merge_color(&mut dst.bright_yellow, src.bright_yellow);
+    merge_color(&mut dst.bright_blue, src.bright_blue);
+    merge_color(&mut dst.bright_magenta, src.bright_magenta);
+    merge_color(&mut dst.bright_cyan, src.bright_cyan);
+    merge_color(&mut dst.bright_white, src.bright_white);
+
     if let Some(other_indexed) = src.indexed {
-        let indexed = dst
-            .indexed
-            .get_or_insert_with(std::collections::HashMap::new);
-        for (k, v) in other_indexed {
-            indexed.insert(k, v);
-        }
+        let indexed = dst.indexed.get_or_insert_with(HashMap::new);
+        indexed.extend(other_indexed);
+    }
+}
+
+/// Overwrites `dst` with `src` when the source slot is set.
+fn merge_color(dst: &mut Option<Rgb>, src: Option<Rgb>) {
+    if let Some(c) = src {
+        *dst = Some(c);
     }
 }
 

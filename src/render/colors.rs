@@ -38,12 +38,26 @@ pub struct HoveredHyperlinkSpan {
 }
 
 /// Options controlling frame layout, window padding, active IME composition, and text selection.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct RenderOptions<'a> {
     pub padding: [u16; 2],
     pub preedit: Option<&'a Preedit>,
     pub selection: Option<&'a Selection>,
     pub hovered_span: Option<HoveredHyperlinkSpan>,
+    /// Enables programming ligatures for adjacent ASCII symbol runs (default: true).
+    pub ligatures: bool,
+}
+
+impl Default for RenderOptions<'_> {
+    fn default() -> Self {
+        Self {
+            padding: [0, 0],
+            preedit: None,
+            selection: None,
+            hovered_span: None,
+            ligatures: true,
+        }
+    }
 }
 
 impl<'a> RenderOptions<'a> {
@@ -58,12 +72,19 @@ impl<'a> RenderOptions<'a> {
             preedit,
             selection,
             hovered_span: None,
+            ligatures: true,
         }
     }
 
     #[must_use]
     pub fn with_hovered_span(mut self, hovered_span: Option<HoveredHyperlinkSpan>) -> Self {
         self.hovered_span = hovered_span;
+        self
+    }
+
+    #[must_use]
+    pub fn with_ligatures(mut self, ligatures: bool) -> Self {
+        self.ligatures = ligatures;
         self
     }
 }
