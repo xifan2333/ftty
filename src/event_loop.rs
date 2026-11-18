@@ -112,8 +112,9 @@ impl AppState {
         config: Config,
         config_path: Option<PathBuf>,
     ) -> Result<Self, FttyError> {
-        let font_mgr =
+        let mut font_mgr =
             FontManager::load_with_families(&config.font_families(), config.font_size())?;
+        font_mgr.set_line_height(config.line_height());
         Self::with_font_and_config(session, font_mgr, config, config_path)
     }
 
@@ -738,6 +739,7 @@ impl AppState {
             ) {
                 Ok(mut mgr) => {
                     mgr.bgr = active_bgr;
+                    mgr.set_line_height(new_config.line_height());
                     Some(mgr)
                 }
                 Err(e) => {
@@ -754,6 +756,9 @@ impl AppState {
 
         let padding_changed = self.config.padding_x() != new_config.padding_x()
             || self.config.padding_y() != new_config.padding_y();
+        let new_line_height = new_config.line_height();
+        let line_height_changed =
+            (self.font_mgr.line_height - new_line_height).abs() > f32::EPSILON;
 
         self.apply_terminal_settings(&new_config);
         self.config = new_config;
@@ -774,19 +779,48 @@ impl AppState {
             crate::font::MAX_RASTER_FONT_SIZE,
         );
 
+        self.apply_reloaded_font_geometry(
+            maybe_new_font,
+            size_changed,
+            line_height_changed,
+            new_line_height,
+            padding_changed,
+            scaled_font_size,
+        );
+
+        self.needs_redraw = true;
+        crate::alloc::trim_memory();
+    }
+
+    /// Applies the reloaded font size / line height / padding to the metrics.
+    fn apply_reloaded_font_geometry(
+        &mut self,
+        maybe_new_font: Option<FontManager>,
+        size_changed: bool,
+        line_height_changed: bool,
+        new_line_height: f32,
+        padding_changed: bool,
+        scaled_font_size: f32,
+    ) {
         if let Some(new_font_mgr) = maybe_new_font {
             self.font_mgr = new_font_mgr;
             self.atlas.clear();
             self.update_font_size(scaled_font_size);
             let _ = self.resize_terminal();
-        } else if size_changed {
+            return;
+        }
+        if size_changed {
             self.update_font_size(scaled_font_size);
-        } else if padding_changed {
+            return;
+        }
+        if line_height_changed {
+            self.font_mgr.set_line_height(new_line_height);
+            let _ = self.resize_terminal();
+            return;
+        }
+        if padding_changed {
             let _ = self.resize_terminal();
         }
-
-        self.needs_redraw = true;
-        crate::alloc::trim_memory();
     }
 
     /// Executes a semantic shortcut action (e.g. scroll page up, zoom font).
