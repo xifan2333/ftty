@@ -1390,4 +1390,92 @@ mod tests {
             assert!(pipeline.vbo_full_upload());
         }
     }
+
+    #[test]
+    fn ligature_run_symbol_boundaries_and_style_breaks() {
+        use crate::render::text::ascii_ligature_run;
+        use std::num::NonZeroU32;
+
+        // "a==b": letters bound the run; the '==' in the middle is one run.
+        let mut grid = Grid::new(4, 1, 0);
+        for (i, c) in "a==b".chars().enumerate() {
+            grid.lines[0].cells[i].c = c;
+        }
+        assert_eq!(
+            ascii_ligature_run(&grid.lines[0], 0),
+            None,
+            "'a' is not a ligature symbol"
+        );
+        assert_eq!(ascii_ligature_run(&grid.lines[0], 1), Some(2));
+        assert_eq!(
+            ascii_ligature_run(&grid.lines[0], 2),
+            None,
+            "a run must start at its first symbol"
+        );
+        assert_eq!(
+            ascii_ligature_run(&grid.lines[0], 3),
+            None,
+            "'b' is not a ligature symbol"
+        );
+
+        // A single symbol never forms a run.
+        let mut grid = Grid::new(1, 1, 0);
+        grid.lines[0].cells[0].c = '=';
+        assert_eq!(ascii_ligature_run(&grid.lines[0], 0), None);
+
+        // A foreground change breaks the run.
+        let mut grid = Grid::new(3, 1, 0);
+        for (i, _) in "===".chars().enumerate() {
+            grid.lines[0].cells[i].c = '=';
+        }
+        grid.lines[0].cells[1].fg = Color::Rgb(200, 0, 0);
+        assert_eq!(ascii_ligature_run(&grid.lines[0], 0), None);
+
+        // A hyperlink change breaks the run.
+        let mut grid = Grid::new(3, 1, 0);
+        for (i, _) in "===".chars().enumerate() {
+            grid.lines[0].cells[i].c = '=';
+        }
+        grid.lines[0].cells[1].hyperlink_id = NonZeroU32::new(7);
+        assert_eq!(ascii_ligature_run(&grid.lines[0], 0), None);
+
+        // An existing grapheme cluster opts the cell out.
+        let mut grid = Grid::new(3, 1, 0);
+        grid.lines[0].cells[0].c = '=';
+        grid.lines[0].set_cluster_text(0, "❤️".to_string());
+        assert_eq!(ascii_ligature_run(&grid.lines[0], 0), None);
+
+        // Wide characters end the run at the boundary.
+        let mut grid = Grid::new(3, 1, 0);
+        grid.lines[0].cells[0].c = '=';
+        grid.lines[0].cells[1].c = '=';
+        assert_eq!(ascii_ligature_run(&grid.lines[0], 0), Some(2));
+    }
+
+    #[test]
+    fn ligature_fallback_preserves_per_cell_quads() {
+        // Environment-independent: probe whether the default font ligates "==",
+        // then assert the quad count matches that reality (one ligature quad over
+        // both columns, or two per-cell glyph quads, on a shared background span).
+        let fonts = fonts();
+        let mut probe = GlyphAtlas::new(64, 64);
+        let ligates = probe
+            .get_or_insert_cluster("==", CellFlags::empty(), &fonts)
+            .is_some();
+
+        let mut grid = Grid::new(2, 1, 0);
+        grid.cursor.visible = false;
+        grid.lines[0].cells[0].c = '=';
+        grid.lines[0].cells[1].c = '=';
+        grid.lines[0].cells[0].bg = Color::Rgb(10, 20, 30);
+        grid.lines[0].cells[1].bg = Color::Rgb(10, 20, 30);
+        let (vertices, _) = frame(&grid);
+        let quads = vertices.len() / 48;
+        assert!(
+            (ligates && quads == 2) || (!ligates && quads == 3),
+            "expected {q:?} quads for a {probe} environment",
+            q = if ligates { 2 } else { 3 },
+            probe = if ligates { "ligating" } else { "non-ligating" },
+        );
+    }
 }
