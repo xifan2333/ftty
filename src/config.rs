@@ -41,6 +41,8 @@ pub struct FontConfig {
     pub size: Option<f32>,
     /// Enables programming ligatures for adjacent symbol runs (default: true).
     pub ligatures: Option<bool>,
+    /// Vertical line spacing multiplier applied to the rendered cell height (default: 1.0).
+    pub line_height: Option<f32>,
 }
 
 /// Padding configuration: either a uniform scalar `padding = 4` or an array `padding = [4, 2]`.
@@ -490,6 +492,14 @@ impl Config {
     #[must_use]
     pub fn ligatures(&self) -> bool {
         self.font.ligatures.unwrap_or(true)
+    }
+
+    #[must_use]
+    pub fn line_height(&self) -> f32 {
+        self.font
+            .line_height
+            .filter(|lh| lh.is_finite() && *lh > 0.0)
+            .unwrap_or(1.0)
     }
 
     #[must_use]

@@ -66,6 +66,10 @@ pub struct FontManager {
     pub font_size: f32,
     pub subpixel: bool,
     pub bgr: bool,
+    /// Vertical line spacing multiplier applied to `metrics.cell_height` (default 1.0).
+    pub line_height: f32,
+    /// Unscaled cell height; `metrics.cell_height` is `raw_cell_height * line_height`.
+    raw_cell_height: u32,
     pub metrics: CellMetrics,
 }
 
@@ -175,6 +179,8 @@ impl FontManager {
                 font_size,
                 subpixel,
                 bgr: false,
+                line_height: 1.0,
+                raw_cell_height: cached.metrics.cell_height,
                 metrics: cached.metrics,
             });
         }
@@ -231,6 +237,8 @@ impl FontManager {
             font_size,
             subpixel,
             bgr: false,
+            line_height: 1.0,
+            raw_cell_height: metrics.cell_height,
             metrics,
         })
     }
@@ -283,7 +291,22 @@ impl FontManager {
         }
         self.font_size = new_size;
         self.metrics = self.regular.primary.compute_cell_metrics(new_size);
+        self.raw_cell_height = self.metrics.cell_height;
+        self.apply_line_height();
         true
+    }
+
+    /// Sets the vertical line spacing multiplier and re-applies it to the cell height.
+    pub fn set_line_height(&mut self, line_height: f32) {
+        self.line_height = line_height.clamp(0.5, 3.0);
+        self.apply_line_height();
+    }
+
+    /// Multiplies the unscaled cell height by the configured line spacing.
+    fn apply_line_height(&mut self) {
+        self.metrics.cell_height = ((self.raw_cell_height as f32) * self.line_height)
+            .round()
+            .max(1.0) as u32;
     }
 
     /// Falls back to the regular face if a styled face cannot be loaded.
@@ -724,6 +747,31 @@ mod tests {
         assert_eq!(fonts.font_size(), 14.0);
         assert_eq!(fonts.metrics.cell_width, initial_width);
         assert_eq!(fonts.metrics.cell_height, initial_height);
+    }
+
+    #[test]
+    fn test_line_height_scales_cell_height_and_survives_font_resize() {
+        let mut fonts = FontManager::load(14.0).expect("load monospace");
+        let base_height = fonts.metrics.cell_height;
+
+        // 1.5x line spacing multiplies the cell height, leaving width untouched.
+        fonts.set_line_height(1.5);
+        let scaled = ((base_height as f32) * 1.5).round() as u32;
+        assert_eq!(fonts.metrics.cell_height, scaled);
+
+        // Font zoom keeps applying the multiplier: 28 pt × 1.5 vs a plain 28 pt.
+        let mut plain = FontManager::load(14.0).expect("load monospace");
+        let _ = plain.set_font_size(28.0);
+        let _ = fonts.set_font_size(28.0);
+        assert_eq!(
+            fonts.metrics.cell_height,
+            ((plain.metrics.cell_height as f32) * 1.5).round() as u32
+        );
+
+        // Back to 1.0 restores the raw metrics.
+        let _ = fonts.set_font_size(14.0);
+        fonts.set_line_height(1.0);
+        assert_eq!(fonts.metrics.cell_height, base_height);
     }
 
     #[test]
