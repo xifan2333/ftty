@@ -133,6 +133,48 @@ pub fn encode_mouse_event(
     motion: bool,
     modifiers: MouseModifiers,
 ) -> Option<Vec<u8>> {
+    let x = u16::try_from(col).ok()?.saturating_add(1);
+    let y = u16::try_from(row).ok()?.saturating_add(1);
+    let base_code = build_mouse_code(button, motion, modifiers);
+
+    match encoding {
+        MouseEncoding::Sgr => {
+            // SGR carries releases via the `m` terminator, so the raw code is used.
+            let terminator = if pressed { 'M' } else { 'm' };
+            Some(format!("\x1b[<{base_code};{x};{y}{terminator}").into_bytes())
+        }
+        MouseEncoding::Urxvt => {
+            let code = release_mouse_code(base_code, pressed, motion);
+            Some(format!("\x1b[{};{x};{y}M", code + 32).into_bytes())
+        }
+        MouseEncoding::Utf8 => {
+            if col > 2015 || row > 2015 {
+                return None;
+            }
+            let code = release_mouse_code(base_code, pressed, motion);
+            let mut out = b"\x1b[M".to_vec();
+            for value in [code + 32, x + 32, y + 32] {
+                push_utf8(&mut out, value);
+            }
+            Some(out)
+        }
+        MouseEncoding::X10 => {
+            // The legacy encoding has no way to say which button was released.
+            let code = release_mouse_code(base_code, pressed, motion);
+            let values = [code + 32, x + 32, y + 32];
+            if values.iter().any(|value| *value > u16::from(u8::MAX)) {
+                return None;
+            }
+            let mut out = b"\x1b[M".to_vec();
+            out.extend(values.iter().map(|value| *value as u8));
+            Some(out)
+        }
+    }
+}
+
+/// Assembles the raw mouse reporting code: button number plus motion and
+/// modifier flag bits.
+fn build_mouse_code(button: u8, motion: bool, modifiers: MouseModifiers) -> u16 {
     let mut code = u16::from(button);
     if motion {
         code |= 32;
@@ -146,52 +188,16 @@ pub fn encode_mouse_event(
     if modifiers.ctrl {
         code |= 16;
     }
-    let x = u16::try_from(col).ok()?.saturating_add(1);
-    let y = u16::try_from(row).ok()?.saturating_add(1);
+    code
+}
 
-    match encoding {
-        MouseEncoding::Sgr => {
-            let terminator = if pressed { 'M' } else { 'm' };
-            Some(format!("\x1b[<{code};{x};{y}{terminator}").into_bytes())
-        }
-        MouseEncoding::Urxvt => {
-            let code = if pressed || motion {
-                code
-            } else {
-                (code & !3) | 3
-            };
-            Some(format!("\x1b[{};{x};{y}M", code + 32).into_bytes())
-        }
-        MouseEncoding::Utf8 => {
-            if col > 2015 || row > 2015 {
-                return None;
-            }
-            let code = if pressed || motion {
-                code
-            } else {
-                (code & !3) | 3
-            };
-            let mut out = b"\x1b[M".to_vec();
-            for value in [code + 32, x + 32, y + 32] {
-                push_utf8(&mut out, value);
-            }
-            Some(out)
-        }
-        MouseEncoding::X10 => {
-            // The legacy encoding has no way to say which button was released.
-            let code = if pressed || motion {
-                code
-            } else {
-                (code & !3) | 3
-            };
-            let values = [code + 32, x + 32, y + 32];
-            if values.iter().any(|value| *value > u16::from(u8::MAX)) {
-                return None;
-            }
-            let mut out = b"\x1b[M".to_vec();
-            out.extend(values.iter().map(|value| *value as u8));
-            Some(out)
-        }
+/// Reports a release as button 3 in UTF-8/Urxvt/X10 encodings (which cannot
+/// carry release states otherwise); SGR keeps the raw code with an `m` suffix.
+fn release_mouse_code(code: u16, pressed: bool, motion: bool) -> u16 {
+    if pressed || motion {
+        code
+    } else {
+        (code & !3) | 3
     }
 }
 

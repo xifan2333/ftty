@@ -238,41 +238,7 @@ impl PointerController {
             None
         } else {
             let (line, screen_row, col) = self.cell_at_pointer(ctx);
-            let row = ctx.grid.visible_line(screen_row);
-            if let Some(cell) = row.cells.get(col)
-                && let Some(id) = cell.hyperlink_id
-                && let Some(resolver) = ctx.hyperlink_resolver
-                && resolver(id.get()).is_some()
-            {
-                let mut start_col = col;
-                while start_col > 0
-                    && row.cells.get(start_col - 1).and_then(|c| c.hyperlink_id) == Some(id)
-                {
-                    start_col -= 1;
-                }
-                let mut end_col = col;
-                while end_col + 1 < row.cells.len()
-                    && row.cells.get(end_col + 1).and_then(|c| c.hyperlink_id) == Some(id)
-                {
-                    end_col += 1;
-                }
-                Some(HoveredHyperlinkSpan {
-                    line,
-                    start_col,
-                    end_col,
-                })
-            } else if ctx.modifiers.ctrl
-                && let Some((start_col, end_col, _)) =
-                    find_url_in_grid(ctx.grid, line, screen_row, col)
-            {
-                Some(HoveredHyperlinkSpan {
-                    line,
-                    start_col,
-                    end_col,
-                })
-            } else {
-                None
-            }
+            hover_span_at(ctx, line, screen_row, col)
         };
 
         let span_changed = self.hovered_span != new_span;
@@ -380,151 +346,161 @@ impl PointerController {
         let Some(index) = x11_button_index(button) else {
             return PointerOutcome::default();
         };
-
         if pressed {
-            if index == 0
-                && ctx.modifiers.ctrl
-                && let Some(url_owned) = self.url_at_pointer(ctx)
-            {
-                return PointerOutcome {
-                    open_url: Some(url_owned),
-                    ..Default::default()
-                };
-            }
+            self.handle_button_press(index, time, ctx)
+        } else {
+            self.handle_button_release(index, ctx)
+        }
+    }
 
-            if let Some(bytes) = self.encode_mouse(index, true, false, ctx) {
-                self.mouse_buttons_held |= 1 << index;
-                self.mouse_reported = true;
-                self.mouse_button = index;
-                return PointerOutcome {
-                    pty_write: Some(bytes),
-                    ..Default::default()
-                };
-            }
+    /// Press path: hyperlink open, mouse reporting, middle-click paste, then
+    /// left-click selection with double/triple tap detection.
+    fn handle_button_press(
+        &mut self,
+        index: u8,
+        time: u32,
+        ctx: &PointerContext<'_>,
+    ) -> PointerOutcome {
+        if index == 0
+            && ctx.modifiers.ctrl
+            && let Some(url_owned) = self.url_at_pointer(ctx)
+        {
+            return PointerOutcome {
+                open_url: Some(url_owned),
+                ..Default::default()
+            };
+        }
 
-            if index == 1 {
-                return PointerOutcome {
-                    paste_primary: true,
-                    ..Default::default()
-                };
-            }
+        if let Some(bytes) = self.encode_mouse(index, true, false, ctx) {
+            self.mouse_buttons_held |= 1 << index;
+            self.mouse_reported = true;
+            self.mouse_button = index;
+            return PointerOutcome {
+                pty_write: Some(bytes),
+                ..Default::default()
+            };
+        }
 
-            if index != 0 {
-                return PointerOutcome::default();
-            }
+        if index == 1 {
+            return PointerOutcome {
+                paste_primary: true,
+                ..Default::default()
+            };
+        }
 
-            let (line, screen_row, col) = self.cell_at_pointer(ctx);
-            let same_cell = self.last_click_cell == Some((line, col));
-            if same_cell && time.saturating_sub(self.last_click_time) < 350 {
-                self.click_count = (self.click_count % 3) + 1;
-            } else {
-                self.click_count = 1;
-            }
-            self.last_click_time = time;
-            self.last_click_cell = Some((line, col));
-            self.mouse_pressed = true;
+        if index != 0 {
+            return PointerOutcome::default();
+        }
+
+        let (line, screen_row, col) = self.cell_at_pointer(ctx);
+        let click_count = self.update_click_count(line, col, time);
+        self.mouse_pressed = true;
+        let (_, cursor_shape) = self.update_hover_state(ctx);
+        if let Some(selection) = click_selection(ctx, line, screen_row, col, click_count) {
+            self.selection = selection;
+        }
+
+        PointerOutcome {
+            cursor_shape,
+            needs_redraw: true,
+            ..Default::default()
+        }
+    }
+
+    /// Release path: clears the held button state (reporting the release when
+    /// the application tracks it), then refreshes hover for the left button.
+    fn handle_button_release(&mut self, index: u8, ctx: &PointerContext<'_>) -> PointerOutcome {
+        let was_held = (self.mouse_buttons_held & (1 << index)) != 0;
+        let mut pty_write = None;
+        if was_held {
+            self.mouse_buttons_held &= !(1 << index);
+            self.mouse_reported = self.mouse_buttons_held != 0;
+            pty_write = self.encode_mouse(index, false, false, ctx);
+        }
+
+        if index == 0 {
+            self.mouse_pressed = false;
             let (_, cursor_shape) = self.update_hover_state(ctx);
-
-            match self.click_count {
-                1 => {
-                    self.selection = Selection::new(
-                        SelectionPoint::new(line, col),
-                        SelectionPoint::new(line, col),
-                        SelectionType::Simple,
-                    );
-                }
-                2 => {
-                    let row = ctx.grid.visible_line(screen_row);
-                    let (w_start, w_end) = find_word_boundaries(row, col);
-                    self.selection = Selection::new(
-                        SelectionPoint::new(line, w_start),
-                        SelectionPoint::new(line, w_end),
-                        SelectionType::Word,
-                    );
-                }
-                3 => {
-                    self.selection = Selection::new(
-                        SelectionPoint::new(line, 0),
-                        SelectionPoint::new(line, ctx.grid.cols.saturating_sub(1)),
-                        SelectionType::Line,
-                    );
-                }
-                _ => {}
-            }
-
-            PointerOutcome {
+            return PointerOutcome {
+                pty_write,
                 cursor_shape,
                 needs_redraw: true,
                 ..Default::default()
-            }
-        } else {
-            let was_held = (self.mouse_buttons_held & (1 << index)) != 0;
-            let mut pty_write = None;
-            if was_held {
-                self.mouse_buttons_held &= !(1 << index);
-                self.mouse_reported = self.mouse_buttons_held != 0;
-                pty_write = self.encode_mouse(index, false, false, ctx);
-            }
-            if index == 0 {
-                self.mouse_pressed = false;
-                let (_, cursor_shape) = self.update_hover_state(ctx);
-                return PointerOutcome {
-                    pty_write,
-                    cursor_shape,
-                    needs_redraw: true,
-                    ..Default::default()
-                };
-            }
+            };
+        }
 
+        PointerOutcome {
+            pty_write,
+            ..Default::default()
+        }
+    }
+
+    /// Counts clicks within the double-click time window on the same cell.
+    fn update_click_count(&mut self, line: usize, col: usize, time: u32) -> u8 {
+        let same_cell = self.last_click_cell == Some((line, col));
+        let count = if same_cell && time.saturating_sub(self.last_click_time) < 350 {
+            (self.click_count % 3) + 1
+        } else {
+            1
+        };
+        self.last_click_time = time;
+        self.last_click_cell = Some((line, col));
+        self.click_count = count;
+        count
+    }
+
+    /// Handles pointer vertical scroll axis events.
+    pub fn handle_axis(&mut self, value: f64, ctx: &PointerContext<'_>) -> PointerOutcome {
+        let Some(lines) = self.accumulate_scroll(value, ctx.scroll_multiplier) else {
+            return PointerOutcome::default();
+        };
+        let count = (lines.unsigned_abs() as usize).min(100);
+
+        if ctx.mouse_mode.is_reporting() && !ctx.modifiers.shift {
+            self.report_wheel(lines, count, ctx)
+        } else if ctx.is_alt_screen {
+            alt_screen_scroll(lines, count)
+        } else {
             PointerOutcome {
-                pty_write,
+                scroll_lines: Some(clamped_scroll_lines(lines, count)),
+                needs_redraw: true,
                 ..Default::default()
             }
         }
     }
 
-    /// Handles pointer vertical scroll axis events.
-    pub fn handle_axis(&mut self, value: f64, ctx: &PointerContext<'_>) -> PointerOutcome {
-        self.scroll_accumulator += (value / 15.0) * ctx.scroll_multiplier;
+    /// Integrates a raw axis delta into the scroll accumulator, returning the
+    /// whole lines to scroll (and `None` when nothing accumulated yet).
+    fn accumulate_scroll(&mut self, value: f64, multiplier: f64) -> Option<i32> {
+        self.scroll_accumulator += (value / 15.0) * multiplier;
         let lines = self.scroll_accumulator.trunc() as i32;
         if lines == 0 {
-            return PointerOutcome::default();
+            return None;
         }
         self.scroll_accumulator -= f64::from(lines);
-        let count = (lines.unsigned_abs() as usize).min(100);
+        Some(lines)
+    }
 
-        if ctx.mouse_mode.is_reporting() && !ctx.modifiers.shift {
-            let button = if lines < 0 { 64 } else { 65 };
-            let mut batch = Vec::new();
-            for _ in 0..count {
-                if let Some(bytes) = self.encode_mouse(button, true, false, ctx) {
-                    batch.extend_from_slice(&bytes);
-                } else {
-                    break;
-                }
-            }
-            PointerOutcome {
-                pty_write: if batch.is_empty() { None } else { Some(batch) },
-                ..Default::default()
-            }
-        } else if ctx.is_alt_screen {
-            let seq: &[u8] = if lines < 0 { b"\x1b[A" } else { b"\x1b[B" };
-            let batch = seq.repeat(count);
-            PointerOutcome {
-                pty_write: Some(batch),
-                ..Default::default()
-            }
-        } else {
-            let clamped_lines = if lines < 0 {
-                -(count as i32)
+    /// Reports wheel scrolling to a mouse-tracking application as repeated
+    /// wheel-up/down button presses.
+    fn report_wheel(
+        &mut self,
+        lines: i32,
+        count: usize,
+        ctx: &PointerContext<'_>,
+    ) -> PointerOutcome {
+        let button = if lines < 0 { 64 } else { 65 };
+        let mut batch = Vec::new();
+        for _ in 0..count {
+            if let Some(bytes) = self.encode_mouse(button, true, false, ctx) {
+                batch.extend_from_slice(&bytes);
             } else {
-                count as i32
-            };
-            PointerOutcome {
-                scroll_lines: Some(clamped_lines),
-                needs_redraw: true,
-                ..Default::default()
+                break;
             }
+        }
+        PointerOutcome {
+            pty_write: if batch.is_empty() { None } else { Some(batch) },
+            ..Default::default()
         }
     }
 
@@ -568,3 +544,107 @@ impl PointerController {
 #[cfg(test)]
 pub use super::url::find_url_at_col;
 pub use super::url::find_url_in_grid;
+
+/// Resolves the hovered hyperlink span at a cell: the full run of adjacent
+/// cells sharing the resolved hyperlink id, or for Ctrl+hover the plaintext
+/// URL detected there.
+fn hover_span_at(
+    ctx: &PointerContext<'_>,
+    line: usize,
+    screen_row: usize,
+    col: usize,
+) -> Option<HoveredHyperlinkSpan> {
+    let row = ctx.grid.visible_line(screen_row);
+    if let Some(cell) = row.cells.get(col)
+        && let Some(id) = cell.hyperlink_id
+        && let Some(resolver) = ctx.hyperlink_resolver
+        && resolver(id.get()).is_some()
+    {
+        return Some(HoveredHyperlinkSpan {
+            line,
+            start_col: hyperlink_start(row, col, id),
+            end_col: hyperlink_end(row, col, id),
+        });
+    }
+    if ctx.modifiers.ctrl
+        && let Some((start_col, end_col, _)) = find_url_in_grid(ctx.grid, line, screen_row, col)
+    {
+        return Some(HoveredHyperlinkSpan {
+            line,
+            start_col,
+            end_col,
+        });
+    }
+    None
+}
+
+/// First column of the contiguous hyperlink run ending at `col`.
+fn hyperlink_start(row: &crate::grid::Row, col: usize, id: std::num::NonZeroU32) -> usize {
+    let mut start_col = col;
+    while start_col > 0 && row.cells.get(start_col - 1).and_then(|c| c.hyperlink_id) == Some(id) {
+        start_col -= 1;
+    }
+    start_col
+}
+
+/// Last column of the contiguous hyperlink run starting at `col`.
+fn hyperlink_end(row: &crate::grid::Row, col: usize, id: std::num::NonZeroU32) -> usize {
+    let mut end_col = col;
+    while end_col + 1 < row.cells.len()
+        && row.cells.get(end_col + 1).and_then(|c| c.hyperlink_id) == Some(id)
+    {
+        end_col += 1;
+    }
+    end_col
+}
+
+/// Selection shape for a given click count: 1 = simple cell, 2 = word,
+/// 3 = full line. `None` for out-of-range counts (selection unchanged).
+fn click_selection(
+    ctx: &PointerContext<'_>,
+    line: usize,
+    screen_row: usize,
+    col: usize,
+    click_count: u8,
+) -> Option<Selection> {
+    match click_count {
+        1 => Some(Selection::new(
+            SelectionPoint::new(line, col),
+            SelectionPoint::new(line, col),
+            SelectionType::Simple,
+        )),
+        2 => {
+            let row = ctx.grid.visible_line(screen_row);
+            let (w_start, w_end) = find_word_boundaries(row, col);
+            Some(Selection::new(
+                SelectionPoint::new(line, w_start),
+                SelectionPoint::new(line, w_end),
+                SelectionType::Word,
+            ))
+        }
+        3 => Some(Selection::new(
+            SelectionPoint::new(line, 0),
+            SelectionPoint::new(line, ctx.grid.cols.saturating_sub(1)),
+            SelectionType::Line,
+        )),
+        _ => None,
+    }
+}
+
+/// Scrolls the alternate screen by emitting repeated arrow-key sequences.
+fn alt_screen_scroll(lines: i32, count: usize) -> PointerOutcome {
+    let seq: &[u8] = if lines < 0 { b"\x1b[A" } else { b"\x1b[B" };
+    PointerOutcome {
+        pty_write: Some(seq.repeat(count)),
+        ..Default::default()
+    }
+}
+
+/// Sign-preserving scroll line count capped to `count`.
+fn clamped_scroll_lines(lines: i32, count: usize) -> i32 {
+    if lines < 0 {
+        -(count as i32)
+    } else {
+        count as i32
+    }
+}
