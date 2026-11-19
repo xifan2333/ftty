@@ -48,79 +48,83 @@ impl EglContext {
             _connection: connection.clone(),
         };
 
-        let init_result = (|| -> Result<(), RenderError> {
-            context
-                .egl
-                .bind_api(egl::OPENGL_ES_API)
-                .map_err(|e| RenderError::Gl(format!("{e:?}")))?;
-            let config = context
-                .egl
-                .choose_first_config(
-                    display,
-                    &[
-                        egl::SURFACE_TYPE,
-                        egl::WINDOW_BIT,
-                        egl::RENDERABLE_TYPE,
-                        egl::OPENGL_ES3_BIT,
-                        egl::RED_SIZE,
-                        8,
-                        egl::GREEN_SIZE,
-                        8,
-                        egl::BLUE_SIZE,
-                        8,
-                        egl::ALPHA_SIZE,
-                        8,
-                        egl::NONE,
-                    ],
-                )
-                .map_err(|e| RenderError::Gl(format!("{e:?}")))?
-                .ok_or(RenderError::NoSupportedConfig)?;
-            context.context = Some(
-                context
-                    .egl
-                    .create_context(
-                        display,
-                        config,
-                        None,
-                        &[egl::CONTEXT_CLIENT_VERSION, 3, egl::NONE],
-                    )
-                    .map_err(|e| RenderError::ContextCreation(format!("{e:?}")))?,
-            );
-            // SAFETY: window wraps a live wl_surface on this EGL display.
-            context.surface = Some(
-                unsafe {
-                    context.egl.create_window_surface(
-                        display,
-                        config,
-                        context.window.ptr().cast_mut(),
-                        None,
-                    )
-                }
-                .map_err(|e| RenderError::SurfaceCreation(format!("{e:?}")))?,
-            );
-            context.make_current()?;
-            // Frame callbacks pace drawing; swapping must not block PTY and signal dispatch.
-            context
-                .egl
-                .swap_interval(display, 0)
-                .map_err(|e| RenderError::Gl(format!("{e:?}")))?;
-            Ok(())
-        })();
-
-        if let Err(err) = init_result {
-            let _ = context.egl.make_current(display, None, None, None);
-            if let Some(surface) = context.surface {
-                let _ = context.egl.destroy_surface(display, surface);
-            }
-            if let Some(ctx) = context.context {
-                let _ = context.egl.destroy_context(display, ctx);
-            }
-            let _ = context.egl.terminate(display);
+        if let Err(err) = context.initialize_egl_contexts() {
+            context.cleanup_failed();
             return Err(err);
         }
 
         context.initialized = true;
         Ok(context)
+    }
+
+    /// Binds the GLES API, selects a config, creates the GL context and window
+    /// surface, and paces swap via `swap_interval(0)`.
+    fn initialize_egl_contexts(&mut self) -> Result<(), RenderError> {
+        self.egl
+            .bind_api(egl::OPENGL_ES_API)
+            .map_err(|e| RenderError::Gl(format!("{e:?}")))?;
+        let config = self
+            .egl
+            .choose_first_config(
+                self.display,
+                &[
+                    egl::SURFACE_TYPE,
+                    egl::WINDOW_BIT,
+                    egl::RENDERABLE_TYPE,
+                    egl::OPENGL_ES3_BIT,
+                    egl::RED_SIZE,
+                    8,
+                    egl::GREEN_SIZE,
+                    8,
+                    egl::BLUE_SIZE,
+                    8,
+                    egl::ALPHA_SIZE,
+                    8,
+                    egl::NONE,
+                ],
+            )
+            .map_err(|e| RenderError::Gl(format!("{e:?}")))?
+            .ok_or(RenderError::NoSupportedConfig)?;
+        self.context = Some(
+            self.egl
+                .create_context(
+                    self.display,
+                    config,
+                    None,
+                    &[egl::CONTEXT_CLIENT_VERSION, 3, egl::NONE],
+                )
+                .map_err(|e| RenderError::ContextCreation(format!("{e:?}")))?,
+        );
+        // SAFETY: window wraps a live wl_surface on this EGL display.
+        self.surface = Some(
+            unsafe {
+                self.egl.create_window_surface(
+                    self.display,
+                    config,
+                    self.window.ptr().cast_mut(),
+                    None,
+                )
+            }
+            .map_err(|e| RenderError::SurfaceCreation(format!("{e:?}")))?,
+        );
+        self.make_current()?;
+        // Frame callbacks pace drawing; swapping must not block PTY and signal dispatch.
+        self.egl
+            .swap_interval(self.display, 0)
+            .map_err(|e| RenderError::Gl(format!("{e:?}")))?;
+        Ok(())
+    }
+
+    /// Releases every EGL handle acquired so far after a failed init.
+    fn cleanup_failed(&mut self) {
+        let _ = self.egl.make_current(self.display, None, None, None);
+        if let Some(surface) = self.surface {
+            let _ = self.egl.destroy_surface(self.display, surface);
+        }
+        if let Some(ctx) = self.context {
+            let _ = self.egl.destroy_context(self.display, ctx);
+        }
+        let _ = self.egl.terminate(self.display);
     }
 
     pub(crate) fn make_current(&self) -> Result<(), RenderError> {
