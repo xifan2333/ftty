@@ -183,27 +183,18 @@ impl Row {
         };
         let mut shifted = HashMap::with_capacity(clusters.len());
         for (&col, text) in clusters.iter() {
-            let target = if col >= start && col < end {
-                if delta >= 0 {
-                    col + delta as usize
-                } else {
-                    match col.checked_sub(delta.unsigned_abs()) {
-                        Some(target) => target,
-                        None => continue,
-                    }
-                }
-            } else {
-                col
+            let Some(target) = shifted_cluster_col(col, start, end, delta) else {
+                continue;
             };
             if target < self.cells.len() {
                 shifted.insert(target, text.clone());
             }
         }
-        if shifted.is_empty() {
-            self.clusters = None;
+        self.clusters = if shifted.is_empty() {
+            None
         } else {
-            self.clusters = Some(Box::new(shifted));
-        }
+            Some(Box::new(shifted))
+        };
         self.dirty.set(true);
     }
 
@@ -214,4 +205,16 @@ impl Row {
     pub fn shift_clusters_left(&mut self, start: usize, count: usize) {
         self.shift_clusters(start, self.cells.len(), -(count as isize));
     }
+}
+
+/// Target column for a cluster shifted by `delta`, or `None` when it slides
+/// off the leading edge of the range entirely.
+fn shifted_cluster_col(col: usize, start: usize, end: usize, delta: isize) -> Option<usize> {
+    if col < start || col >= end {
+        return Some(col);
+    }
+    if delta >= 0 {
+        return Some(col + delta as usize);
+    }
+    col.checked_sub(delta.unsigned_abs())
 }

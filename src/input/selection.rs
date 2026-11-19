@@ -140,48 +140,24 @@ impl Selection {
         let mut result = String::new();
         let mut line_str = String::with_capacity(grid.cols);
 
-        let get_row = |idx: usize| -> Option<&Row> {
-            if idx < grid.scrollback.len() {
-                grid.scrollback.get(idx)
-            } else {
-                grid.lines.get(idx - grid.scrollback.len())
-            }
-        };
-
         for line_idx in start.line..=end.line.min(total_lines.saturating_sub(1)) {
-            let Some(row) = get_row(line_idx) else {
+            let Some(row) = row_at(grid, line_idx) else {
                 break;
             };
-
-            let start_col = if line_idx == start.line && self.kind != SelectionType::Line {
-                start.col.min(row.cells.len())
-            } else {
-                0
-            };
-
-            let end_col = if line_idx == end.line && self.kind != SelectionType::Line {
-                (end.col + 1).min(row.cells.len())
-            } else {
-                row.cells.len()
-            };
-
-            if start_col >= end_col {
+            let Some((start_col, end_col)) = selected_column_range(
+                start.line,
+                start.col,
+                end.line,
+                end.col,
+                self.kind,
+                line_idx,
+                row.cells.len(),
+            ) else {
                 continue;
-            }
+            };
 
             line_str.clear();
-            for (offset, cell) in row.cells[start_col..end_col].iter().enumerate() {
-                if !cell
-                    .flags
-                    .intersects(CellFlags::WIDE_CHAR_SPACER | CellFlags::WRAP_SPACER)
-                {
-                    if let Some(text) = row.cluster_text(start_col + offset) {
-                        line_str.push_str(text);
-                    } else {
-                        line_str.push(cell.c);
-                    }
-                }
-            }
+            append_row_range_text(row, start_col, end_col, &mut line_str);
 
             // Only trim trailing whitespace if this is the last line or an unwrapped line
             if line_idx == end.line || !row.wrapped {
@@ -236,4 +212,54 @@ pub fn find_word_boundaries(row: &Row, col: usize) -> (usize, usize) {
     }
 
     (start, end)
+}
+
+/// Resolves a row by absolute index across scrollback and the live screen.
+fn row_at(grid: &Grid, idx: usize) -> Option<&Row> {
+    if idx < grid.scrollback.len() {
+        grid.scrollback.get(idx)
+    } else {
+        grid.lines.get(idx - grid.scrollback.len())
+    }
+}
+
+/// Column bounds `(start, end)` for one selected line, or `None` when the
+/// selection does not intersect it. Line selections span the full row.
+fn selected_column_range(
+    start_line: usize,
+    start_col: usize,
+    end_line: usize,
+    end_col: usize,
+    kind: SelectionType,
+    line_idx: usize,
+    row_len: usize,
+) -> Option<(usize, usize)> {
+    let start = if line_idx == start_line && kind != SelectionType::Line {
+        start_col.min(row_len)
+    } else {
+        0
+    };
+    let end = if line_idx == end_line && kind != SelectionType::Line {
+        (end_col + 1).min(row_len)
+    } else {
+        row_len
+    };
+    (start < end).then_some((start, end))
+}
+
+/// Appends the printable text of `row.cells[from..to]`, skipping wide and
+/// wrapped spacers and preferring composed grapheme clusters.
+fn append_row_range_text(row: &Row, from: usize, to: usize, out: &mut String) {
+    for (offset, cell) in row.cells[from..to].iter().enumerate() {
+        if !cell
+            .flags
+            .intersects(CellFlags::WIDE_CHAR_SPACER | CellFlags::WRAP_SPACER)
+        {
+            if let Some(text) = row.cluster_text(from + offset) {
+                out.push_str(text);
+            } else {
+                out.push(cell.c);
+            }
+        }
+    }
 }

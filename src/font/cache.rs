@@ -301,79 +301,21 @@ fn write_cached_file(buf: &mut Vec<u8>, file: &CachedFontFile) {
 /// Deserializes font cache data from compact binary buffer.
 #[must_use]
 pub fn deserialize_cache(bytes: &[u8]) -> Option<FontCacheData> {
-    if bytes.len() < 8 + 4 {
-        return None;
-    }
-    if &bytes[..8] != CACHE_MAGIC {
+    if bytes.len() < 8 + 4 || &bytes[..8] != CACHE_MAGIC {
         return None;
     }
     let mut cursor = Cursor::new(&bytes[8..]);
-    let version = read_u32(&mut cursor).ok()?;
-    if version != CACHE_VERSION {
+    if read_u32(&mut cursor).ok()? != CACHE_VERSION {
         return None;
     }
 
-    let num_families = read_u32(&mut cursor).ok()? as usize;
-    if num_families > MAX_CACHED_FAMILIES {
-        return None;
-    }
-    let mut families = Vec::with_capacity(num_families);
-    for _ in 0..num_families {
-        let str_len = read_u32(&mut cursor).ok()? as usize;
-        if str_len > 1024 {
-            return None;
-        }
-        let mut s_bytes = vec![0u8; str_len];
-        cursor.read_exact(&mut s_bytes).ok()?;
-        let family = String::from_utf8(s_bytes).ok()?;
-        families.push(family);
-    }
-
-    let font_size = f32::from_bits(read_u32(&mut cursor).ok()?);
-    if !font_size.is_finite() || font_size < MIN_FONT_SIZE || font_size > MAX_FONT_SIZE {
-        return None;
-    }
-
-    let mut subpixel_byte = [0u8; 1];
-    cursor.read_exact(&mut subpixel_byte).ok()?;
-    let subpixel = subpixel_byte[0] != 0;
-
+    let families = read_family_list(&mut cursor)?;
+    let font_size = read_font_size(&mut cursor)?;
+    let subpixel = read_subpixel_flag(&mut cursor)?;
     let dirs_fingerprint = read_u64(&mut cursor).ok()?;
-
     let primary = read_cached_file(&mut cursor).ok()?;
-
-    let cell_width = read_u32(&mut cursor).ok()?;
-    let cell_height = read_u32(&mut cursor).ok()?;
-    let ascent = read_i32(&mut cursor).ok()?;
-
-    if !(1..=256).contains(&cell_width) || !(1..=256).contains(&cell_height) {
-        return None;
-    }
-    if ascent < -(cell_height as i32) || ascent > (cell_height as i32 * 2) {
-        return None;
-    }
-
-    let metrics = CellMetrics {
-        cell_width,
-        cell_height,
-        ascent,
-    };
-
-    let num_fallbacks = read_u32(&mut cursor).ok()? as usize;
-    if num_fallbacks > MAX_CACHED_FALLBACKS {
-        return None;
-    }
-    let mut fallbacks = Vec::with_capacity(num_fallbacks);
-    for _ in 0..num_fallbacks {
-        let mut tag = [0u8; 1];
-        cursor.read_exact(&mut tag).ok()?;
-        if tag[0] == 1 {
-            let fb = read_cached_file(&mut cursor).ok()?;
-            fallbacks.push(Some(fb));
-        } else {
-            fallbacks.push(None);
-        }
-    }
+    let metrics = read_metrics(&mut cursor)?;
+    let fallbacks = read_fallback_list(&mut cursor)?;
 
     Some(FontCacheData {
         families,
@@ -384,6 +326,78 @@ pub fn deserialize_cache(bytes: &[u8]) -> Option<FontCacheData> {
         metrics,
         fallbacks,
     })
+}
+
+/// Reads the cached family-name list (each entry sized and utf-8 validated).
+fn read_family_list(cursor: &mut Cursor<&[u8]>) -> Option<Vec<String>> {
+    let num_families = read_u32(cursor).ok()? as usize;
+    if num_families > MAX_CACHED_FAMILIES {
+        return None;
+    }
+    let mut families = Vec::with_capacity(num_families);
+    for _ in 0..num_families {
+        let str_len = read_u32(cursor).ok()? as usize;
+        if str_len > 1024 {
+            return None;
+        }
+        let mut s_bytes = vec![0u8; str_len];
+        cursor.read_exact(&mut s_bytes).ok()?;
+        families.push(String::from_utf8(s_bytes).ok()?);
+    }
+    Some(families)
+}
+
+/// Reads the cached font size, rejecting non-finite/out-of-range values.
+fn read_font_size(cursor: &mut Cursor<&[u8]>) -> Option<f32> {
+    let font_size = f32::from_bits(read_u32(cursor).ok()?);
+    if !font_size.is_finite() || font_size < MIN_FONT_SIZE || font_size > MAX_FONT_SIZE {
+        return None;
+    }
+    Some(font_size)
+}
+
+/// Reads the subpixel rendering flag byte.
+fn read_subpixel_flag(cursor: &mut Cursor<&[u8]>) -> Option<bool> {
+    let mut byte = [0u8; 1];
+    cursor.read_exact(&mut byte).ok()?;
+    Some(byte[0] != 0)
+}
+
+/// Reads cell metrics, rejecting hostile dimensions or ascent.
+fn read_metrics(cursor: &mut Cursor<&[u8]>) -> Option<CellMetrics> {
+    let cell_width = read_u32(cursor).ok()?;
+    let cell_height = read_u32(cursor).ok()?;
+    let ascent = read_i32(cursor).ok()?;
+    if !(1..=256).contains(&cell_width) || !(1..=256).contains(&cell_height) {
+        return None;
+    }
+    if ascent < -(cell_height as i32) || ascent > (cell_height as i32 * 2) {
+        return None;
+    }
+    Some(CellMetrics {
+        cell_width,
+        cell_height,
+        ascent,
+    })
+}
+
+/// Reads the optional fallback stack (tag byte 1 = present).
+fn read_fallback_list(cursor: &mut Cursor<&[u8]>) -> Option<Vec<Option<CachedFontFile>>> {
+    let num_fallbacks = read_u32(cursor).ok()? as usize;
+    if num_fallbacks > MAX_CACHED_FALLBACKS {
+        return None;
+    }
+    let mut fallbacks = Vec::with_capacity(num_fallbacks);
+    for _ in 0..num_fallbacks {
+        let mut tag = [0u8; 1];
+        cursor.read_exact(&mut tag).ok()?;
+        if tag[0] == 1 {
+            fallbacks.push(Some(read_cached_file(cursor).ok()?));
+        } else {
+            fallbacks.push(None);
+        }
+    }
+    Some(fallbacks)
 }
 
 fn read_u32<R: Read>(r: &mut R) -> io::Result<u32> {

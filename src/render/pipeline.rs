@@ -9,7 +9,7 @@ use super::text::{
 };
 use crate::error::RenderError;
 use crate::font::{CellMetrics, FontManager, GlyphAtlas};
-use crate::grid::{CursorShape, Grid};
+use crate::grid::{CursorShape, Grid, Row};
 use crate::input::ime::Preedit;
 use crate::input::selection::Selection;
 
@@ -148,35 +148,10 @@ impl RenderPipeline {
     ) {
         let cursor = cursor_cell(grid);
         let viewport_offset = grid.viewport_offset();
-        let viewport_changed = self.last_viewport_offset != viewport_offset;
-        self.last_viewport_offset = viewport_offset;
 
-        let padding_changed = self.last_padding != options.padding;
-        self.last_padding = options.padding;
-
-        let cursor_shape = Some(grid.cursor.shape);
-        let shape_changed = self.last_cursor_shape != cursor_shape;
-        self.last_cursor_shape = cursor_shape;
-
-        let cursor_changed = self.last_cursor != cursor;
-        let selection_changed = self.last_selection.as_ref() != options.selection;
-        let hover_changed = self.last_hovered_span != options.hovered_span;
-
-        let cols_changed = self.last_cols != grid.cols;
+        let change = self.note_frame_change(grid, viewport_offset, &options, cursor);
         let rows = grid.rows.min(MAX_RENDER_CACHE_ROWS);
-        if row_cache_needs_reset(
-            self.row_valid.len(),
-            rows,
-            self.last_cols,
-            grid.cols,
-            padding_changed,
-        ) {
-            self.row_bg = vec![Vec::new(); rows];
-            self.row_fg = vec![Vec::new(); rows];
-            self.row_valid = vec![false; rows];
-            self.batch.static_vertices_len = 0;
-            self.batch.vbo_full_upload = true;
-        }
+        self.ensure_row_cache(rows, grid.cols, change.padding_changed);
         self.last_cols = grid.cols;
 
         let ctx = RenderContext {
@@ -189,57 +164,135 @@ impl RenderPipeline {
             cursor,
         };
 
-        let mut any_row_regenerated = false;
-        for r in 0..rows {
-            let line = grid.visible_line(r);
-            let abs_line = grid.scrollback.len() + r - viewport_offset;
+        let any_row_regenerated = self.regenerate_rows(rows, &ctx, &change, cursor);
+        self.rebuild_vertices(rows, &ctx, change.overlays_changed(), any_row_regenerated);
 
-            let row_has_cursor = cursor.is_some_and(|(cr, _, _)| cr == r);
-            let row_had_cursor = self.last_cursor.is_some_and(|(cr, _, _)| cr == r);
-            let row_has_sel = options.selection.is_some_and(|s| s.spans_line(abs_line));
-            let row_had_sel = self
-                .last_selection
-                .as_ref()
-                .is_some_and(|s| s.spans_line(abs_line));
-            let row_has_hover = options
-                .hovered_span
-                .is_some_and(|span| span.line == abs_line);
-            let row_had_hover = self
-                .last_hovered_span
-                .is_some_and(|span| span.line == abs_line);
+        self.last_cursor = cursor;
+        self.last_selection = options.selection.cloned();
+        self.last_hovered_span = options.hovered_span;
+        self.last_preedit = options.preedit.cloned();
+    }
 
-            let cursor_affects_row =
-                grid.cursor.shape == CursorShape::Block && (row_has_cursor || row_had_cursor);
-
-            let needs_regen = !self.row_valid[r]
-                || line.dirty.get()
-                || viewport_changed
-                || shape_changed
-                || cols_changed
-                || (cursor_changed && cursor_affects_row)
-                || (selection_changed && (row_has_sel || row_had_sel))
-                || (hover_changed && (row_has_hover || row_had_hover));
-
-            if needs_regen {
-                build_row_backgrounds(&mut self.row_bg[r], r, &ctx);
-                build_row_foregrounds(&mut self.row_fg[r], r, &ctx);
-                self.row_valid[r] = true;
-                line.dirty.set(false);
-                any_row_regenerated = true;
-            }
+    /// Records this frame's externally visible inputs (viewport, padding,
+    /// cursor shape, cols) and returns every dirty flag for the row caches.
+    fn note_frame_change(
+        &mut self,
+        grid: &Grid,
+        viewport_offset: usize,
+        options: &RenderOptions<'_>,
+        cursor: Option<(usize, usize, usize)>,
+    ) -> FrameChange {
+        let viewport_changed = self.last_viewport_offset != viewport_offset;
+        self.last_viewport_offset = viewport_offset;
+        let padding_changed = self.last_padding != options.padding;
+        self.last_padding = options.padding;
+        let cursor_shape = Some(grid.cursor.shape);
+        let shape_changed = self.last_cursor_shape != cursor_shape;
+        self.last_cursor_shape = cursor_shape;
+        FrameChange {
+            viewport_changed,
+            padding_changed,
+            shape_changed,
+            cursor_changed: self.last_cursor != cursor,
+            selection_changed: self.last_selection.as_ref() != options.selection,
+            hover_changed: self.last_hovered_span != options.hovered_span,
+            preedit_changed: self.last_preedit.as_ref() != options.preedit,
+            cols_changed: self.last_cols != grid.cols,
         }
+    }
 
-        let preedit_changed = self.last_preedit.as_ref() != options.preedit;
+    /// Drops and reallocates the row caches when their shape no longer fits.
+    fn ensure_row_cache(&mut self, rows: usize, cols: usize, padding_changed: bool) {
+        if row_cache_needs_reset(
+            self.row_valid.len(),
+            rows,
+            self.last_cols,
+            cols,
+            padding_changed,
+        ) {
+            self.row_bg = vec![Vec::new(); rows];
+            self.row_fg = vec![Vec::new(); rows];
+            self.row_valid = vec![false; rows];
+            self.batch.static_vertices_len = 0;
+            self.batch.vbo_full_upload = true;
+        }
+    }
 
-        let overlays_changed = cursor_changed
-            || selection_changed
-            || hover_changed
-            || preedit_changed
-            || viewport_changed
-            || shape_changed
-            || cols_changed
-            || padding_changed;
+    /// Regenerates background/foreground vertex caches for every dirty row,
+    /// returning whether any row changed.
+    fn regenerate_rows(
+        &mut self,
+        rows: usize,
+        ctx: &RenderContext<'_>,
+        change: &FrameChange,
+        cursor: Option<(usize, usize, usize)>,
+    ) -> bool {
+        let mut any_regenerated = false;
+        for r in 0..rows {
+            let line = ctx.grid.visible_line(r);
+            let abs_line = ctx.grid.scrollback.len() + r - ctx.grid.viewport_offset();
+            if !self.row_needs_regen(r, line, abs_line, ctx, change, cursor) {
+                continue;
+            }
+            build_row_backgrounds(&mut self.row_bg[r], r, ctx);
+            build_row_foregrounds(&mut self.row_fg[r], r, ctx);
+            self.row_valid[r] = true;
+            line.dirty.set(false);
+            any_regenerated = true;
+        }
+        any_regenerated
+    }
 
+    /// Whether a single row must be regenerated: dirty data, or a changed
+    /// cursor/selection/hover span touching this row.
+    fn row_needs_regen(
+        &self,
+        r: usize,
+        line: &Row,
+        abs_line: usize,
+        ctx: &RenderContext<'_>,
+        change: &FrameChange,
+        cursor: Option<(usize, usize, usize)>,
+    ) -> bool {
+        let row_has_cursor = cursor.is_some_and(|(cr, _, _)| cr == r);
+        let row_had_cursor = self.last_cursor.is_some_and(|(cr, _, _)| cr == r);
+        let row_has_sel = ctx
+            .options
+            .selection
+            .is_some_and(|s| s.spans_line(abs_line));
+        let row_had_sel = self
+            .last_selection
+            .as_ref()
+            .is_some_and(|s| s.spans_line(abs_line));
+        let row_has_hover = ctx
+            .options
+            .hovered_span
+            .is_some_and(|span| span.line == abs_line);
+        let row_had_hover = self
+            .last_hovered_span
+            .is_some_and(|span| span.line == abs_line);
+        let cursor_affects_row =
+            ctx.grid.cursor.shape == CursorShape::Block && (row_has_cursor || row_had_cursor);
+
+        !self.row_valid[r]
+            || line.dirty.get()
+            || change.viewport_changed
+            || change.shape_changed
+            || change.cols_changed
+            || (change.cursor_changed && cursor_affects_row)
+            || (change.selection_changed && (row_has_sel || row_had_sel))
+            || (change.hover_changed && (row_has_hover || row_had_hover))
+    }
+
+    /// Reassembles the static+overlay vertex batch: full rebuild when any row
+    /// changed, otherwise just the dynamic overlays (cursor, preedit).
+    fn rebuild_vertices(
+        &mut self,
+        rows: usize,
+        ctx: &RenderContext<'_>,
+        overlays_changed: bool,
+        any_row_regenerated: bool,
+    ) {
         if any_row_regenerated || self.batch.static_vertices_len == 0 {
             let total_floats: usize = self.row_bg[..rows].iter().map(Vec::len).sum::<usize>()
                 + self.row_fg[..rows].iter().map(Vec::len).sum::<usize>()
@@ -256,17 +309,39 @@ impl RenderPipeline {
             }
             self.batch.static_vertices_len = self.batch.vertices.len();
             // 3. Dynamic overlays (cursor, preedit)
-            build_dynamic_overlays(&mut self.batch.vertices, &ctx);
+            build_dynamic_overlays(&mut self.batch.vertices, ctx);
             self.batch.vbo_full_upload = true;
         } else if overlays_changed {
             self.batch.vertices.truncate(self.batch.static_vertices_len);
-            build_dynamic_overlays(&mut self.batch.vertices, &ctx);
+            build_dynamic_overlays(&mut self.batch.vertices, ctx);
             self.batch.vbo_full_upload = false;
         }
+    }
+}
 
-        self.last_cursor = cursor;
-        self.last_selection = options.selection.cloned();
-        self.last_hovered_span = options.hovered_span;
-        self.last_preedit = options.preedit.cloned();
+/// Dirty flags for a single render frame compared against cached state.
+#[derive(Clone, Copy)]
+struct FrameChange {
+    viewport_changed: bool,
+    padding_changed: bool,
+    shape_changed: bool,
+    cursor_changed: bool,
+    selection_changed: bool,
+    hover_changed: bool,
+    preedit_changed: bool,
+    cols_changed: bool,
+}
+
+impl FrameChange {
+    /// Whether the dynamic overlays must be rebuilt this frame.
+    fn overlays_changed(&self) -> bool {
+        self.cursor_changed
+            || self.selection_changed
+            || self.hover_changed
+            || self.preedit_changed
+            || self.viewport_changed
+            || self.shape_changed
+            || self.cols_changed
+            || self.padding_changed
     }
 }

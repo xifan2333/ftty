@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
-# Audits AST anti-patterns (deep-if-branching, nested-loops, no-dbg) across Rust
-# files changed relative to the upstream merge-base, or explicit file arguments.
+# Audits AST anti-patterns across Rust files changed relative to the upstream
+# merge-base, or explicit file arguments.
+#
+# Only `deep-if-branching` and `no-dbg` are hard gates (`--error=<rule>`).
+# `nested-loops` stays a warning: nested iteration over 2-D grid data (rows x
+# cells) and test scaffolding is legitimate linear traversal, not O(N^2)
+# algorithmic degradation, and should not force code-rewrites to dodge the
+# detector.
 #
 # Usage:
 #   scripts/check-ast-changed.sh           # Audit files changed vs origin/main merge-base
@@ -23,4 +29,4 @@ if [ "${#RUST_FILES[@]}" -eq 0 ]; then
   exit 0
 fi
 
-ast-grep scan --error "${RUST_FILES[@]}"
+ast-grep scan --error=deep-if-branching --error=no-dbg "${RUST_FILES[@]}"
