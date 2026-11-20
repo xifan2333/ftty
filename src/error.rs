@@ -264,27 +264,46 @@ pub enum RenderError {
     Gl(String),
 }
 
+fn fmt_egl_error(err: &RenderError, f: &mut fmt::Formatter<'_>) -> Option<fmt::Result> {
+    match err {
+        RenderError::EglSurface(msg) => Some(write!(f, "failed to create wl_egl_window: {msg}")),
+        RenderError::EglDisplay(msg) => Some(write!(f, "eglGetDisplay failed: {msg}")),
+        RenderError::EglInit(msg) => Some(write!(f, "eglInitialize failed: {msg}")),
+        RenderError::NoSupportedConfig => {
+            Some(write!(f, "no EGL configuration supports OpenGL ES 3"))
+        }
+        RenderError::ContextCreation(msg) => Some(write!(f, "failed to create EGL context: {msg}")),
+        RenderError::SurfaceCreation(msg) => Some(write!(f, "failed to create EGL surface: {msg}")),
+        RenderError::MakeCurrent(msg) => Some(write!(f, "eglMakeCurrent failed: {msg}")),
+        RenderError::SurfaceNotInitialized => {
+            Some(write!(f, "EGL window surface is not initialized"))
+        }
+        _ => None,
+    }
+}
+
+fn fmt_gl_error(err: &RenderError, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match err {
+        RenderError::BufferCreation(msg) => write!(f, "failed to create GL buffer: {msg}"),
+        RenderError::TextureCreation(msg) => write!(f, "failed to create GL texture: {msg}"),
+        RenderError::ShaderCreation(msg) => write!(f, "failed to create GL shader: {msg}"),
+        RenderError::ShaderCompile { kind, log } => {
+            write!(f, "{kind} shader compilation failed:\n{log}")
+        }
+        RenderError::ProgramCreation(msg) => write!(f, "failed to create GL program: {msg}"),
+        RenderError::ProgramLink { log } => write!(f, "shader program link failed:\n{log}"),
+        RenderError::InvalidDimensions(w, h) => write!(f, "invalid render dimensions: {w}x{h}"),
+        RenderError::Gl(msg) => write!(f, "OpenGL error: {msg}"),
+        _ => Ok(()),
+    }
+}
+
 impl fmt::Display for RenderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EglSurface(msg) => write!(f, "failed to create wl_egl_window: {msg}"),
-            Self::EglDisplay(msg) => write!(f, "eglGetDisplay failed: {msg}"),
-            Self::EglInit(msg) => write!(f, "eglInitialize failed: {msg}"),
-            Self::NoSupportedConfig => write!(f, "no EGL configuration supports OpenGL ES 3"),
-            Self::ContextCreation(msg) => write!(f, "failed to create EGL context: {msg}"),
-            Self::SurfaceCreation(msg) => write!(f, "failed to create EGL surface: {msg}"),
-            Self::MakeCurrent(msg) => write!(f, "eglMakeCurrent failed: {msg}"),
-            Self::BufferCreation(msg) => write!(f, "failed to create GL buffer: {msg}"),
-            Self::TextureCreation(msg) => write!(f, "failed to create GL texture: {msg}"),
-            Self::ShaderCreation(msg) => write!(f, "failed to create GL shader: {msg}"),
-            Self::ShaderCompile { kind, log } => {
-                write!(f, "{kind} shader compilation failed:\n{log}")
-            }
-            Self::ProgramCreation(msg) => write!(f, "failed to create GL program: {msg}"),
-            Self::ProgramLink { log } => write!(f, "shader program link failed:\n{log}"),
-            Self::InvalidDimensions(w, h) => write!(f, "invalid render dimensions: {w}x{h}"),
-            Self::SurfaceNotInitialized => write!(f, "EGL window surface is not initialized"),
-            Self::Gl(msg) => write!(f, "OpenGL error: {msg}"),
+        if let Some(res) = fmt_egl_error(self, f) {
+            res
+        } else {
+            fmt_gl_error(self, f)
         }
     }
 }
