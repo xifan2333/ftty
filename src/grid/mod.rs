@@ -3183,6 +3183,29 @@ mod tests {
     }
 
     #[test]
+    fn test_circled_numbers_honor_ambiguous_width() {
+        let fg = Color::DefaultForeground;
+        let bg = Color::DefaultBackground;
+        let mut grid = Grid::new(10, 1, 0);
+
+        // Default narrow: circled number takes 1 cell
+        grid.write_char('①', fg, bg, CellFlags::empty());
+        assert_eq!(grid.cursor.col, 1);
+        assert!(!grid.lines[0].cells[0].flags.contains(CellFlags::WIDE_CHAR));
+
+        // Wide mode: circled number takes 2 cells, sets WIDE_CHAR and WIDE_CHAR_SPACER
+        grid.set_ambiguous_width(crate::width::AMBIGUOUS_WIDE);
+        grid.write_char('②', fg, bg, CellFlags::empty());
+        assert_eq!(grid.cursor.col, 3);
+        assert!(grid.lines[0].cells[1].flags.contains(CellFlags::WIDE_CHAR));
+        assert!(
+            grid.lines[0].cells[2]
+                .flags
+                .contains(CellFlags::WIDE_CHAR_SPACER)
+        );
+    }
+
+    #[test]
     fn test_grapheme_clusters_survive_edits_reflow_and_extraction() {
         let fg = Color::DefaultForeground;
         let bg = Color::DefaultBackground;

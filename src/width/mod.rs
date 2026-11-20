@@ -152,4 +152,72 @@ mod tests {
         assert!(continues_grapheme("👍", '\u{1f3fd}', &mut scratch));
         assert_eq!(grapheme_display_width("👍\u{1f3fd}", AMBIGUOUS_NARROW), 2);
     }
+
+    /// Circled digits, CJK ideographs, vulgar fractions, and East Asian Ambiguous codepoints.
+    ///
+    /// These are the characters that commonly cause cursor-desync in terminals when the
+    /// width table disagrees with the font's actual glyph advance. We test both
+    /// `AMBIGUOUS_NARROW` (xterm default) and `AMBIGUOUS_WIDE` (CJK locale) modes.
+    #[test]
+    fn cjk_circled_digits_and_fractions() {
+        // Circled digits (U+2460..U+2473) — East Asian Ambiguous
+        let circled: &[(char, i32, i32)] = &[
+            ('①', 1, 2), // U+2460
+            ('②', 1, 2), // U+2461
+            ('③', 1, 2), // U+2462
+            ('⑩', 1, 2), // U+2469
+            ('⓪', 1, 2), // U+24EA  circled digit zero
+        ];
+        for &(c, narrow, wide) in circled {
+            assert_eq!(
+                wcwidth(c, AMBIGUOUS_NARROW),
+                narrow,
+                "U+{:04X} '{}' narrow",
+                c as u32,
+                c,
+            );
+            assert_eq!(
+                wcwidth(c, AMBIGUOUS_WIDE),
+                wide,
+                "U+{:04X} '{}' wide",
+                c as u32,
+                c,
+            );
+        }
+
+        // CJK Unified Ideographs — always fullwidth (2 columns)
+        for c in ['一', '中', '朝', '国'] {
+            assert_eq!(
+                wcwidth(c, AMBIGUOUS_NARROW),
+                2,
+                "U+{:04X} '{}'",
+                c as u32,
+                c
+            );
+            assert_eq!(wcwidth(c, AMBIGUOUS_WIDE), 2, "U+{:04X} '{}'", c as u32, c);
+        }
+
+        // Vulgar fractions — East Asian Ambiguous: narrow=1, wide=2
+        let fractions: &[(char, i32, i32)] = &[
+            ('¼', 1, 2), // U+00BC
+            ('½', 1, 2), // U+00BD
+            ('¾', 1, 2), // U+00BE
+        ];
+        for &(c, narrow, wide) in fractions {
+            assert_eq!(
+                wcwidth(c, AMBIGUOUS_NARROW),
+                narrow,
+                "U+{:04X} '{}' narrow",
+                c as u32,
+                c,
+            );
+            assert_eq!(
+                wcwidth(c, AMBIGUOUS_WIDE),
+                wide,
+                "U+{:04X} '{}' wide",
+                c as u32,
+                c,
+            );
+        }
+    }
 }

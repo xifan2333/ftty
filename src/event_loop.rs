@@ -138,6 +138,9 @@ impl AppState {
         session.terminal.allow_osc52_write = config.allow_osc52_write();
         session.terminal.grid.cursor.shape = config.cursor_shape();
         session.terminal.grid.max_scrollback = config.scrollback_lines();
+        session
+            .terminal
+            .set_ambiguous_width(config.ambiguous_width().to_u8());
 
         let mut wayland = WaylandState::new();
         let pad_x = u32::from(config.padding_x());
@@ -640,6 +643,9 @@ impl AppState {
         self.session.terminal.allow_osc52_read = new_config.allow_osc52_read();
         self.session.terminal.allow_osc52_write = new_config.allow_osc52_write();
         self.session.terminal.grid.cursor.shape = new_config.cursor_shape();
+        self.session
+            .terminal
+            .set_ambiguous_width(new_config.ambiguous_width().to_u8());
         self.keyboard.update_keybindings(&new_config.keybindings);
     }
 
@@ -1111,6 +1117,9 @@ mod tests {
         std::fs::write(
             &config_path,
             r##"
+        [font]
+        ambiguous_width = "wide"
+
         [window]
         padding = [20, 20]
 
@@ -1127,6 +1136,7 @@ mod tests {
         app.needs_redraw = false;
         app.reload_config();
 
+        assert_eq!(app.session.terminal.grid.ambiguous_width, 2);
         assert_eq!(
             app.session.terminal.theme.default_bg(),
             Rgb::new(18, 52, 86)
