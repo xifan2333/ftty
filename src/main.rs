@@ -192,7 +192,8 @@ fn spawn_session(opts: &CliOptions, config: &Config, cols: u16, rows: u16) -> Te
         .custom_command
         .as_ref()
         .map(|v| v.iter().map(String::as_str).collect());
-    let term = Terminal::new(cols as usize, rows as usize, config.scrollback_lines());
+    let mut term = Terminal::new(cols as usize, rows as usize, config.scrollback_lines());
+    term.set_ambiguous_width(config.ambiguous_width().to_u8());
     let pty = match Pty::spawn_with_dir(
         cmd_slice.as_deref(),
         cols,

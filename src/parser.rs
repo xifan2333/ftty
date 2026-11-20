@@ -218,6 +218,11 @@ impl Terminal {
         self.theme.apply(palette, default_fg, default_bg);
     }
 
+    /// Selects the width model for East Asian Ambiguous characters (1 or 2 cells).
+    pub fn set_ambiguous_width(&mut self, width: u8) {
+        self.grid.set_ambiguous_width(width);
+    }
+
     pub(crate) fn update_dynamic_background(&mut self, new_bg: Rgb) {
         let old_bg = self.theme.default_bg();
         self.theme.set_default_bg(new_bg);

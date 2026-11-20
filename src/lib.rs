@@ -33,7 +33,7 @@ mod width;
 // each item keeps exactly one path. Adding a name here for convenience gives it a second
 // one; add it where it is defined instead.
 pub use alloc::trim_memory;
-pub use config::Config;
+pub use config::{AmbiguousWidth, Config};
 pub use event_loop::{AppState, run_event_loop_with_connection};
 pub use font::FontManager;
 pub use parser::Terminal;

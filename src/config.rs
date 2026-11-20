@@ -34,6 +34,84 @@ impl FontFamilies {
     }
 }
 
+/// Width model for East Asian Ambiguous characters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AmbiguousWidth {
+    #[default]
+    Narrow,
+    Wide,
+}
+
+impl AmbiguousWidth {
+    #[must_use]
+    pub const fn to_u8(self) -> u8 {
+        match self {
+            Self::Narrow => 1,
+            Self::Wide => 2,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for AmbiguousWidth {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct Visitor;
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = AmbiguousWidth;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str(r#""narrow", "wide", 1, or 2"#)
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<AmbiguousWidth, E>
+            where
+                E: serde::de::Error,
+            {
+                if value.eq_ignore_ascii_case("narrow") {
+                    Ok(AmbiguousWidth::Narrow)
+                } else if value.eq_ignore_ascii_case("wide") {
+                    Ok(AmbiguousWidth::Wide)
+                } else {
+                    Err(E::custom(format!(
+                        "invalid ambiguous_width '{value}', expected \"narrow\" or \"wide\""
+                    )))
+                }
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<AmbiguousWidth, E>
+            where
+                E: serde::de::Error,
+            {
+                match value {
+                    1 => Ok(AmbiguousWidth::Narrow),
+                    2 => Ok(AmbiguousWidth::Wide),
+                    other => Err(E::custom(format!(
+                        "invalid ambiguous_width '{other}', expected 1 or 2"
+                    ))),
+                }
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<AmbiguousWidth, E>
+            where
+                E: serde::de::Error,
+            {
+                match value {
+                    1 => Ok(AmbiguousWidth::Narrow),
+                    2 => Ok(AmbiguousWidth::Wide),
+                    other => Err(E::custom(format!(
+                        "invalid ambiguous_width '{other}', expected 1 or 2"
+                    ))),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
 pub struct FontConfig {
     #[serde(alias = "families")]
@@ -43,6 +121,9 @@ pub struct FontConfig {
     pub ligatures: Option<bool>,
     /// Vertical line spacing multiplier applied to the rendered cell height (default: 1.0).
     pub line_height: Option<f32>,
+    /// Width model for East Asian Ambiguous characters (default: narrow).
+    #[serde(alias = "ambiguous-width")]
+    pub ambiguous_width: Option<AmbiguousWidth>,
 }
 
 /// Padding configuration: either a uniform scalar `padding = 4` or an array `padding = [4, 2]`.
@@ -429,6 +510,15 @@ impl Config {
         if let Some(size) = other.font.size {
             self.font.size = Some(size);
         }
+        if let Some(ligatures) = other.font.ligatures {
+            self.font.ligatures = Some(ligatures);
+        }
+        if let Some(line_height) = other.font.line_height {
+            self.font.line_height = Some(line_height);
+        }
+        if let Some(aw) = other.font.ambiguous_width {
+            self.font.ambiguous_width = Some(aw);
+        }
 
         if let Some(p) = other.window.padding {
             self.window.padding = Some(p);
@@ -500,6 +590,11 @@ impl Config {
             .line_height
             .filter(|lh| lh.is_finite() && *lh > 0.0)
             .unwrap_or(1.0)
+    }
+
+    #[must_use]
+    pub fn ambiguous_width(&self) -> AmbiguousWidth {
+        self.font.ambiguous_width.unwrap_or_default()
     }
 
     #[must_use]
@@ -1084,5 +1179,90 @@ mod tests {
         let palette = config.build_palette();
         assert_eq!(palette[1], Rgb::new(255, 0, 0));
         assert_eq!(palette[4], Rgb::new(0, 0, 255));
+    }
+
+    #[test]
+    fn test_font_ambiguous_width_config_parsing() {
+        // Default is narrow (1 cell)
+        let default_cfg = Config::default();
+        assert_eq!(default_cfg.ambiguous_width(), AmbiguousWidth::Narrow);
+        assert_eq!(default_cfg.ambiguous_width().to_u8(), 1);
+
+        // String "wide"
+        let toml_wide = r#"
+        [font]
+        ambiguous_width = "wide"
+        "#;
+        let cfg: Config = toml::from_str(toml_wide).expect("parse wide");
+        assert_eq!(cfg.ambiguous_width(), AmbiguousWidth::Wide);
+        assert_eq!(cfg.ambiguous_width().to_u8(), 2);
+
+        // String "narrow"
+        let toml_narrow = r#"
+        [font]
+        ambiguous_width = "narrow"
+        "#;
+        let cfg: Config = toml::from_str(toml_narrow).expect("parse narrow");
+        assert_eq!(cfg.ambiguous_width(), AmbiguousWidth::Narrow);
+
+        // Alias "ambiguous-width"
+        let toml_kebab = r#"
+        [font]
+        ambiguous-width = "wide"
+        "#;
+        let cfg: Config = toml::from_str(toml_kebab).expect("parse kebab alias");
+        assert_eq!(cfg.ambiguous_width(), AmbiguousWidth::Wide);
+
+        // Integer 2
+        let toml_int2 = r#"
+        [font]
+        ambiguous_width = 2
+        "#;
+        let cfg: Config = toml::from_str(toml_int2).expect("parse int 2");
+        assert_eq!(cfg.ambiguous_width(), AmbiguousWidth::Wide);
+
+        // Integer 1
+        let toml_int1 = r#"
+        [font]
+        ambiguous_width = 1
+        "#;
+        let cfg: Config = toml::from_str(toml_int1).expect("parse int 1");
+        assert_eq!(cfg.ambiguous_width(), AmbiguousWidth::Narrow);
+
+        // Case-insensitivity
+        let toml_case = r#"
+        [font]
+        ambiguous_width = "WiDe"
+        "#;
+        let cfg: Config = toml::from_str(toml_case).expect("parse mixed case");
+        assert_eq!(cfg.ambiguous_width(), AmbiguousWidth::Wide);
+
+        // Invalid string rejected
+        let toml_invalid_str = r#"
+        [font]
+        ambiguous_width = "double"
+        "#;
+        assert!(toml::from_str::<Config>(toml_invalid_str).is_err());
+
+        // Invalid int rejected
+        let toml_invalid_int = r#"
+        [font]
+        ambiguous_width = 3
+        "#;
+        assert!(toml::from_str::<Config>(toml_invalid_int).is_err());
+    }
+
+    #[test]
+    fn test_font_ambiguous_width_merge() {
+        let mut base = Config::default();
+        assert_eq!(base.ambiguous_width(), AmbiguousWidth::Narrow);
+
+        let override_toml = r#"
+        [font]
+        ambiguous_width = "wide"
+        "#;
+        let over: Config = toml::from_str(override_toml).expect("parse override");
+        base.merge(over);
+        assert_eq!(base.ambiguous_width(), AmbiguousWidth::Wide);
     }
 }
