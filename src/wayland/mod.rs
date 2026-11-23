@@ -633,9 +633,79 @@ mod tests {
         );
 
         // A full repaint must be scheduled immediately: the stale frame callback is cleared
-        // (so the frame loop is unblocked) and a redraw flag is set, without waiting for input.
+        // (so the frame loop is unblocked), caches invalidated, atlas marked for full upload,
+        // and a redraw flag is set, without waiting for input.
         assert!(app.frame_callback.is_none());
+        assert!(app.frame_callback_scheduled_at.is_none());
         assert!(app.needs_redraw);
+        assert!(app.atlas.full_upload);
+        assert!(app.atlas.dirty);
+    }
+
+    #[test]
+    fn keyboard_enter_forces_redraw_and_recovers_from_lock_screen() {
+        let (conn, _queue, qh, registry, _server, mut app) = test_app();
+        with_window(&mut app, &registry, &qh);
+        let seat = registry.bind::<WlSeat, _, _>(1, 5, &qh, ());
+        let keyboard = seat.get_keyboard(&qh, ());
+        app.wayland.keyboard = Some(keyboard.clone());
+
+        let surface = app.wayland.surface.clone().expect("wl_surface bound");
+
+        // Simulate post-lock state: surface remained on output (no wl_surface.enter emitted),
+        // but frame callback is in-flight and needs_redraw is false.
+        app.needs_redraw = false;
+        app.atlas.full_upload = false;
+        app.atlas.dirty = false;
+        let pending_cb = surface.frame(&qh, ());
+        app.frame_callback = Some(pending_cb);
+        app.frame_callback_scheduled_at = Some(std::time::Instant::now());
+        conn.flush().expect("flush");
+
+        // Unlock: River/compositor gives back keyboard focus via wl_keyboard.enter.
+        <AppState as wayland_client::Dispatch<
+            wayland_client::protocol::wl_keyboard::WlKeyboard,
+            (),
+        >>::event(
+            &mut app,
+            &keyboard,
+            wayland_client::protocol::wl_keyboard::Event::Enter {
+                serial: 42,
+                surface,
+                keys: Vec::new(),
+            },
+            &(),
+            &conn,
+            &qh,
+        );
+
+        // A full repaint must be scheduled: frame callback unblocked, caches invalidated,
+        // and atlas flagged for full re-upload so no text disappears.
+        assert!(app.frame_callback.is_none());
+        assert!(app.frame_callback_scheduled_at.is_none());
+        assert!(app.needs_redraw);
+        assert!(app.atlas.full_upload);
+        assert!(app.atlas.dirty);
+    }
+
+    #[test]
+    fn stalled_frame_callback_times_out_and_allows_redraw() {
+        let (conn, _queue, qh, registry, _server, mut app) = test_app();
+        with_window(&mut app, &registry, &qh);
+        let surface = app.wayland.surface.clone().expect("wl_surface bound");
+
+        app.needs_redraw = true;
+        let pending_cb = surface.frame(&qh, ());
+        app.frame_callback = Some(pending_cb);
+        app.frame_callback_scheduled_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(300));
+        conn.flush().expect("flush");
+
+        // When 250ms has elapsed without Done, should_render_frame must clear the
+        // stalled callback and return true so rendering does not deadlock.
+        assert!(app.should_render_frame());
+        assert!(app.frame_callback.is_none());
+        assert!(app.frame_callback_scheduled_at.is_none());
     }
 
     #[test]

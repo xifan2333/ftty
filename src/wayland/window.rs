@@ -122,11 +122,10 @@ impl Dispatch<WlSurface, ()> for AppState {
             // The surface re-entered a visible output (e.g. after screen lock/unlock).
             // The compositor may have discarded or suspended our previously presented
             // buffer, and may have stopped issuing frame callbacks while hidden. Clear
-            // the stale frame callback and force a redraw so the frame loop immediately
-            // repaints and re-commits a fresh buffer without waiting for user input.
+            // the stale frame callback, invalidate caches, and force a redraw so the
+            // frame loop immediately repaints and re-commits a fresh buffer without waiting for user input.
             wl_surface::Event::Enter { .. } => {
-                state.frame_callback = None;
-                state.needs_redraw = true;
+                state.force_full_redraw();
             }
             wl_surface::Event::Leave { .. } => {
                 // Surface left a visible output (e.g. lock screen engaged). Keep the
@@ -151,6 +150,7 @@ impl Dispatch<WlCallback, ()> for AppState {
             && state.frame_callback.as_ref() == Some(proxy)
         {
             state.frame_callback = None;
+            state.frame_callback_scheduled_at = None;
         }
     }
 }

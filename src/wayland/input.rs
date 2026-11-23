@@ -111,7 +111,8 @@ impl AppState {
         self.keyboard.set_keymap_from_fd(fd, size as usize);
     }
 
-    /// Applies keyboard focus enter: focus reporting, IME activation, and cursor tracking.
+    /// Applies keyboard focus enter: focus reporting, IME activation, cursor tracking,
+    /// and full repaint recovery (clearing any stale frame callback from screen lock/sleep).
     fn handle_keyboard_enter(&mut self, serial: u32, surface: &WlSurface) {
         self.last_serial = serial;
         if self.wayland.surface.as_ref() != Some(surface) {
@@ -130,6 +131,7 @@ impl AppState {
             );
             self.update_ime_cursor_area();
         }
+        self.force_full_redraw();
     }
 
     /// Applies keyboard focus leave: focus reporting, IME teardown, and a repaint.

@@ -39,6 +39,7 @@ pub struct AppState {
     pub running: bool,
     pub needs_redraw: bool,
     pub frame_callback: Option<WlCallback>,
+    pub frame_callback_scheduled_at: Option<std::time::Instant>,
     pub pending_size: Option<[u32; 2]>,
     /// Set by an `xdg_surface.configure`; the resize is applied once the queue is drained so a
     /// burst of configures collapses into a single, final size.
@@ -192,6 +193,7 @@ impl AppState {
             running: true,
             needs_redraw: true,
             frame_callback: None,
+            frame_callback_scheduled_at: None,
             pending_size: None,
             configure_pending: false,
             render_error: None,
@@ -241,13 +243,19 @@ impl AppState {
         !self.pty_registered && self.wayland.configured
     }
 
-    /// Dispatch deadline: poll quickly while synchronized output is active.
+    /// Dispatch deadline: poll quickly while synchronized output is active, or wait for frame callback timeout.
     #[must_use]
     fn dispatch_timeout(&self) -> Option<std::time::Duration> {
-        self.session
-            .terminal
-            .synchronized_output
-            .then(|| std::time::Duration::from_millis(50))
+        if self.session.terminal.synchronized_output {
+            return Some(std::time::Duration::from_millis(50));
+        }
+        if self.needs_redraw
+            && let Some(scheduled) = self.frame_callback_scheduled_at
+        {
+            let timeout = std::time::Duration::from_millis(250);
+            return Some(timeout.saturating_sub(scheduled.elapsed()));
+        }
+        None
     }
 
     /// Applies the last configure of the dispatch; returns `false` when the loop
@@ -267,9 +275,17 @@ impl AppState {
         }
     }
 
-    /// Whether a new frame should be rendered right now (not synced, no callback in flight).
+    /// Whether a new frame should be rendered right now (not synced, no callback in flight or timed out).
     #[must_use]
-    fn should_render_frame(&self) -> bool {
+    pub fn should_render_frame(&mut self) -> bool {
+        if self.frame_callback.is_some()
+            && let Some(scheduled) = self.frame_callback_scheduled_at
+            && scheduled.elapsed() >= std::time::Duration::from_millis(250)
+        {
+            self.frame_callback = None;
+            self.frame_callback_scheduled_at = None;
+        }
+
         self.needs_redraw
             && !self.session.terminal.synchronized_output
             && self.frame_callback.is_none()
@@ -310,6 +326,21 @@ impl AppState {
             self.update_ime_cursor_area();
         }
         calloop::PostAction::Continue
+    }
+
+    /// Invalidates all render caches, forces atlas re-upload, clears in-flight frame callbacks,
+    /// and schedules an immediate repaint. Used when re-entering focus or visible outputs
+    /// (e.g. after screen lock or monitor sleep).
+    pub fn force_full_redraw(&mut self) {
+        self.frame_callback = None;
+        self.frame_callback_scheduled_at = None;
+        self.session.terminal.grid.mark_all_dirty();
+        if let Some(renderer) = &mut self.renderer {
+            renderer.clear_cache();
+        }
+        self.atlas.full_upload = true;
+        self.atlas.dirty = true;
+        self.needs_redraw = true;
     }
 
     /// Invalidates the render cache and repaints everything after a theme switch.
@@ -569,6 +600,7 @@ impl AppState {
         self.needs_redraw = true;
         // A resize must be committed even if the compositor suspended the old frame callback.
         self.frame_callback = None;
+        self.frame_callback_scheduled_at = None;
         Ok(())
     }
 
@@ -697,6 +729,7 @@ impl AppState {
                 viewport.set_destination(self.wayland.width as i32, self.wayland.height as i32);
             }
             self.frame_callback = Some(surface.frame(qh, ()));
+            self.frame_callback_scheduled_at = Some(std::time::Instant::now());
         }
         renderer.present()?;
         let _ = self
