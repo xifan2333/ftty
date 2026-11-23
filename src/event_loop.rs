@@ -312,6 +312,20 @@ impl AppState {
         calloop::PostAction::Continue
     }
 
+    /// Invalidates all render caches, forces atlas re-upload, clears in-flight frame callbacks,
+    /// and schedules an immediate repaint. Used when re-entering focus or visible outputs
+    /// (e.g. after screen lock or monitor sleep).
+    pub fn force_full_redraw(&mut self) {
+        self.frame_callback = None;
+        self.session.terminal.grid.mark_all_dirty();
+        if let Some(renderer) = &mut self.renderer {
+            renderer.clear_cache();
+        }
+        self.atlas.full_upload = true;
+        self.atlas.dirty = true;
+        self.needs_redraw = true;
+    }
+
     /// Invalidates the render cache and repaints everything after a theme switch.
     fn apply_theme_change(&mut self) {
         if let Some(renderer) = &mut self.renderer {
