@@ -150,6 +150,7 @@ impl Dispatch<WlCallback, ()> for AppState {
             && state.frame_callback.as_ref() == Some(proxy)
         {
             state.frame_callback = None;
+            state.frame_callback_scheduled_at = None;
         }
     }
 }
